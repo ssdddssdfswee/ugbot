@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         UG Bot v1.1.1
+// @name         UG Bot v1.1.2
 // @namespace    ug-bot
-// @version      1.1.1
+// @version      1.1.2
 // @description  Auto-runs crimes, GTA, melting, repair, missions, drug running with Swiss Bank management, live log, session stats, action checkboxes, jail handling, runtime tracking, melt pagination, repair cycles, automatic CTC solving, and point-spending features.
 // @match        *://www.underworldgangsters.com/*
 // @match        *://underworldgangsters.com/*
@@ -430,7 +430,7 @@
     // BOT CONFIG
     // =========================================================================
 
-    const SCRIPT_VERSION = '1.1.1';
+    const SCRIPT_VERSION = '1.1.2';
 
     const CRIME_DEFS = [
         { id: 'gang', name: 'Gang Activities' },
@@ -2343,18 +2343,19 @@
         return matched ? totalMs : null;
     }
 
-    // Reads the "Players found" section on the kill page and updates each
-    // player's stored expiry time with the accurate "Lost in X" value.
-    // This is more reliable than the hardcoded 23hr rescan window.
+    // Reads the "Players found" section on the kill page and:
+    // 1. Updates each known player's stored expiry time with the accurate "Lost in X" value
+    // 2. Adds any unknown players found there to the list as "alive" — this acts as a
+    //    cross-device sync so switching devices populates the list from existing searches
     function syncKillExpiryFromPage() {
-        const players  = state.killPlayers || [];
-        if (!players.length) return;
+        const players = state.killPlayers || [];
 
         // "Players found" rows — each has a player link and a "Lost in" timer span
         const rows = [...document.querySelectorAll('.bgl.i.wb .bgm.chs')];
         if (!rows.length) return;
 
         let updated = 0;
+        let added   = 0;
 
         for (const row of rows) {
             const link = row.querySelector('a[href*="?p=profile&u="]');
@@ -2379,16 +2380,34 @@
             const expiresAt = now() + lostInMs;
 
             const idx = players.findIndex(p => p.name.toLowerCase() === name.toLowerCase());
-            if (idx === -1) continue;
 
-            // Store accurate expiry — rescan when this time passes
-            players[idx].searchExpiresAt = expiresAt;
-            players[idx].status          = KILL_STATUS.ALIVE;
-            updated++;
+            if (idx === -1) {
+                // Player not in list — add them as alive with accurate expiry.
+                // This handles cross-device sync: existing searches on the kill page
+                // populate the list automatically on a new device.
+                players.push({
+                    name,
+                    status:         KILL_STATUS.ALIVE,
+                    lastChecked:    now(),
+                    firstSeen:      now(),
+                    searchCount:    1,
+                    searchExpiresAt: expiresAt
+                });
+                added++;
+            } else {
+                // Player already in list — update their expiry and mark as alive
+                players[idx].searchExpiresAt = expiresAt;
+                players[idx].status          = KILL_STATUS.ALIVE;
+                updated++;
+            }
         }
 
-        if (updated > 0) {
+        if (updated > 0 || added > 0) {
             saveKillPlayers(players);
+            if (added > 0) {
+                addLiveLog(`Kill scanner: synced ${added} player(s) from Players found section`);
+                renderKillList();
+            }
         }
     }
 
