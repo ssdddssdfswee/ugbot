@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         UG Bot v1.1.5
+// @name         Full UG Bot
 // @namespace    ug-bot
-// @version      1.1.5
+// @version      1.2.0
 // @description  Auto-runs crimes, GTA, melting, repair, missions, drug running with Swiss Bank management, live log, session stats, action checkboxes, jail handling, runtime tracking, melt pagination, repair cycles, automatic CTC solving, and point-spending features.
 // @match        *://www.underworldgangsters.com/*
 // @match        *://underworldgangsters.com/*
@@ -430,7 +430,7 @@
     // BOT CONFIG
     // =========================================================================
 
-    const SCRIPT_VERSION = '1.1.5';
+    const SCRIPT_VERSION = '1.2.0';
 
     const CRIME_DEFS = [
         { id: 'gang', name: 'Gang Activities' },
@@ -470,6 +470,15 @@
 
     const DRUG_HEROIN_USA_PRICE = 28999; // Fixed USA Heroin buy price — used to calculate the cash reserve
 
+    // Country name → location select value mapping (used by kill travel)
+    const COUNTRY_LOCATION_MAP = {
+        'england':      '1',
+        'mexico':       '2',
+        'russia':       '3',
+        'south africa': '4',
+        'usa':          '5'
+    };
+
     // =========================================================================
     // KILL SCANNER CONSTANTS
     // =========================================================================
@@ -493,8 +502,8 @@
     const DEFAULTS = {
         enabled: false,
 
-        actionDelayMin: 450,
-        actionDelayMax: 1100,
+        actionDelayMin: 100,
+        actionDelayMax: 300,
 
         burstDelayMin: 180,
         burstDelayMax: 420,
@@ -539,13 +548,20 @@
         killScanOnlineInterval: 10,   // minutes between Players Online checks
         killSearchEnabled:      false,
 
-        maxLiveLogEntries: 80
+        // Kill BG check / shoot loop settings
+        killBgCheckEnabled:      false,  // Global BG check loop toggle
+        killShootEnabled:        false,  // Global shoot loop toggle
+        killAnonymousShooting:   false,  // Shoot anonymously (no show=y)
+        killBgCheckIntervalHrs:  6,      // Hours between BG checks per player
+        killPenaltyThreshold:    0,      // Max kill penalty multiplier (0 = disabled)
+
+        maxLiveLogEntries: 500
     };
 
     const SAFETY = {
         sameCrimeMinGapMs:      3500,
-        postClickSettleMs:      2200,
-        postClickPollMs:        150,
+        postClickSettleMs:      500,
+        postClickPollMs:        30,
         maxBurstActionsReal:    4,
         loopBackoffReloadMin:   2500,
         loopBackoffReloadMax:   4500,
@@ -678,6 +694,46 @@
         // Username currently being searched (persists across page reload)
         get killCurrentSearch()       { return getSetting('killCurrentSearch', ''); },
         set killCurrentSearch(v)      { setSetting('killCurrentSearch', String(v || '')); },
+        get penaltyDropsAt()          { return Number(getSetting('penaltyDropsAt', 0)); },
+        set penaltyDropsAt(v)         { setSetting('penaltyDropsAt', Number(v) || 0); },
+        get pendingPenaltyPage()      { return !!getSetting('pendingPenaltyPage', false); },
+        set pendingPenaltyPage(v)     { setSetting('pendingPenaltyPage', !!v); },
+
+        // Kill BG check / shoot loop settings
+        get killBgCheckEnabled()       { return !!getSetting('killBgCheckEnabled', false); },
+        set killBgCheckEnabled(v)      { setSetting('killBgCheckEnabled', !!v); },
+
+        get killShootEnabled()         { return !!getSetting('killShootEnabled', false); },
+        set killShootEnabled(v)        { setSetting('killShootEnabled', !!v); },
+
+        get killAnonymousShooting()    { return !!getSetting('killAnonymousShooting', false); },
+        set killAnonymousShooting(v)   { setSetting('killAnonymousShooting', !!v); },
+
+        get killBgCheckIntervalHrs()   { return Math.max(1, Number(getSetting('killBgCheckIntervalHrs', 6)) || 6); },
+        set killBgCheckIntervalHrs(v)  { setSetting('killBgCheckIntervalHrs', Math.max(1, Number(v) || 6)); },
+
+        get killPenaltyThreshold()     { return Number(getSetting('killPenaltyThreshold', 0)); },
+        set killPenaltyThreshold(v)    { setSetting('killPenaltyThreshold', Number(v) || 0); },
+
+        // Permanently dead players — never re-added from Players Found
+        get killDeadPlayers()          { return getSetting('killDeadPlayers', []); },
+        set killDeadPlayers(v)         { setSetting('killDeadPlayers', v); },
+
+        // Per-player BG check toggle — stored as a Set of lowercased names
+        get killBgCheckPlayers()       { return getSetting('killBgCheckPlayers', []); },
+        set killBgCheckPlayers(v)      { setSetting('killBgCheckPlayers', v); },
+
+        // Per-player shoot toggle — stored as array of names
+        get killShootPlayers()         { return getSetting('killShootPlayers', []); },
+        set killShootPlayers(v)        { setSetting('killShootPlayers', v); },
+
+        // Pending kill/BG check action — survives page reload
+        get pendingKillAction()        { return getSetting('pendingKillAction', null); },
+        set pendingKillAction(v)       { setSetting('pendingKillAction', v); },
+
+        // Kill loop active flag
+        get killLoopActive()           { return !!getSetting('killLoopActive', false); },
+        set killLoopActive(v)          { setSetting('killLoopActive', !!v); },
 
         // Cached drug capacity — set on each drugs page visit so crimes page can use it
         get drugCapacityCache()    { return Number(getSetting('drugCapacityCache', 0)); },
@@ -818,6 +874,11 @@
     let killScanOnlineInput         = null;
     let killScanIntervalEl          = null;
     let killSearchInput             = null;
+    let killBgCheckInput            = null;
+    let killShootInput              = null;
+    let killAnonymousInput          = null;
+    let killBgCheckIntervalEl       = null;
+    let killPenaltyThresholdEl      = null;
     let resetGTAInput               = null;
     let resetMeltInput              = null;
     let resetTimerMinPointsEl       = null;
@@ -924,8 +985,10 @@
         state.meltResetLoopActive = false;
         state.bustLoopActive      = false;
         state.killSearchLoopActive = false;
+        state.killLoopActive       = false;
         state.killSearchIndex      = 0;
         state.killCurrentSearch    = '';
+        state.pendingKillAction    = null;
         clearPendingMeltResult();
         renderStats();
         renderLiveLog();
@@ -1021,7 +1084,10 @@
         state.meltResetLoopActive  = false;
         state.bustLoopActive       = false;
         state.killSearchLoopActive = false;
+        state.killLoopActive       = false;
         state.killCurrentSearch    = '';
+        state.pendingKillAction    = null;
+        stopBustObserver();
         updatePanel();
         addLiveLog(`Paused: ${reason}`);
     }
@@ -1030,11 +1096,23 @@
         return CTC.isVisible();
     }
 
+    function saveScrollPositions() {
+        const log     = document.querySelector('#ug-bot-log');
+        const klist   = document.querySelector('#ug-bot-kill-list');
+        const panel   = document.querySelector('#ug-bot-panel');
+        if (log)   setSetting('scrollLog',   log.scrollTop);
+        if (klist) setSetting('scrollKill',  klist.scrollTop);
+        if (panel) setSetting('scrollPanel', panel.scrollTop);
+    }
+    window.addEventListener('beforeunload', saveScrollPositions);
+
     function gotoPage(pageName, extraParams = {}) {
+        saveScrollPositions();
         clearScheduledReload();
         const url = new URL(window.location.href);
         url.searchParams.set('p', pageName);
-        url.searchParams.delete('a'); // Never carry over the action/type param between pages
+        url.searchParams.delete('a');    // Never carry over the action/type param between pages
+        url.searchParams.delete('page'); // Never carry over pagination — causes ?p=crimes&page=1 jail bug
 
         for (const [key, value] of Object.entries(extraParams)) {
             if (value == null || value === '') {
@@ -1119,6 +1197,7 @@
 
     // Stat bar readers — available on every page
     function getPlayerMoney()    { return parseMoney(document.querySelector('#player-money')?.textContent    || '0'); }
+    function getPlayerBullets()  { return parseUnits((document.querySelector('#player-bullets')?.textContent || '0').replace(/[^0-9,]/g, '')); }
     function getPlayerSwiss()    { return parseMoney(document.querySelector('#player-swiss')?.textContent    || '0'); }
     function getPlayerLocation() { return (document.querySelector('#player-location')?.textContent || '').trim(); }
 
@@ -1180,6 +1259,11 @@
         };
     }
 
+    const GUN_VALUES = {
+        'none': 0, 'glock': 1, 'fiveseven': 2, 'uzi': 3, 'spas-12': 4,
+        'mp5k': 5, 'ak74u': 6, 'm16': 7, 'famas': 8, 'ak47': 9, 'awp': 10
+    };
+
     const RANKS = [
         'Civilian', 'Vandal', 'Hustler', 'Riff-Raff', 'Ruffian',
         'Homeboy', 'Homie', 'Criminal', 'Hitman', 'Trusted Hitman',
@@ -1205,6 +1289,11 @@
 
     function getPlayerRank() {
         return (document.querySelector('#player-rank')?.textContent || '').trim();
+    }
+
+    function getPlayerGunValue() {
+        const gunName = (document.querySelector('#player-gun')?.textContent || '').trim().toLowerCase();
+        return GUN_VALUES[gunName] || 9; // default to AK47 if not found
     }
 
     function getPlayerRankIndex() {
@@ -2135,6 +2224,386 @@
     // =========================================================================
 
     // -------------------------------------------------------------------------
+    // Kill penalty helpers
+    // -------------------------------------------------------------------------
+
+    // Reads the kill penalty multiplier from the kill page.
+    // Returns 1.0 if no penalty is active (element absent).
+    function getKillPenaltyMultiplier() {
+        const penaltyEl = document.querySelector('a[href*="kill-penalty"] span');
+        if (isKillPage()) {
+            // On kill page — read directly from DOM, always authoritative
+            if (penaltyEl) {
+                const text = textOf(penaltyEl);
+                const match = text.match(/x([\d.]+)/i);
+                const val = match ? parseFloat(match[1]) : 1.0;
+                setSetting('cachedKillPenalty', val);
+                return val;
+            }
+            // On kill page with no penalty element — means no penalty, cache 1.0
+            setSetting('cachedKillPenalty', 1.0);
+            return 1.0;
+        }
+        // Not on kill page — return cached value if available
+        const cached = getSetting('cachedKillPenalty', 1.0);
+        return Number(cached) || 1.0;
+    }
+
+    // Parses the kill penalty page and calculates when the penalty will drop below threshold.
+    // Returns timestamp (ms) when penalty will drop below threshold, or 0 if already below.
+    function calcPenaltyDropsAt() {
+        const threshold = state.killPenaltyThreshold;
+        if (!threshold || threshold <= 0) return 0;
+
+        // Parse all kills from the penalty page
+        const rows = [...document.querySelectorAll('.bgl.chs')];
+        const kills = [];
+        for (const row of rows) {
+            const timerSpan = row.querySelector('.chd');
+            if (!timerSpan) continue;
+            const agoMs = parseLostInMs(textOf(timerSpan));
+            if (agoMs == null) continue;
+            const expiresAt = now() - agoMs + (24 * 60 * 60 * 1000);
+            kills.push(expiresAt);
+        }
+
+        if (!kills.length) {
+            // No kills found — no penalty exists, update cache to reflect this
+            setSetting('cachedKillPenalty', 1.0);
+            return 0;
+        }
+
+        // Sort by expiry time — soonest expiring first
+        kills.sort((a, b) => a - b);
+
+        // Simulate forward: as each kill expires, total count drops
+        // Penalty = max(0, totalKills - 5) * 0.1 + 1.0
+        // Find the first expiry where penalty drops below threshold
+        let remaining = kills.length;
+        for (const expiresAt of kills) {
+            remaining--;
+            const simPenalty = remaining > 5 ? (remaining - 5) * 0.1 + 1.0 : 1.0;
+            if (simPenalty < threshold) {
+                const minsLeft = Math.round((expiresAt - now()) / 60000);
+                const hrsLeft  = Math.floor(minsLeft / 60);
+                const minRem   = minsLeft % 60;
+                const timeStr  = hrsLeft > 0 ? `${hrsLeft}h ${minRem}m` : `${minRem}m`;
+                addLiveLog(`Kill loop: penalty will drop below ${threshold}x in ${timeStr} — waiting`);
+                return expiresAt;
+            }
+        }
+        // All kills expired — penalty will be 1.0x
+        return kills[kills.length - 1];
+    }
+
+    // Returns true if the kill penalty exceeds the configured threshold.
+    // If threshold is 0 or not set, never blocks.
+    function isKillPenaltyTooHigh() {
+        const threshold = state.killPenaltyThreshold;
+        if (!threshold || threshold <= 0) return false;
+        const penalty = getKillPenaltyMultiplier();
+        return penalty > threshold;
+    }
+
+    // -------------------------------------------------------------------------
+    // BG check / shoot helpers
+    // -------------------------------------------------------------------------
+
+    // Returns true if a player has BG check enabled (per-player toggle)
+    function isPlayerBgCheckEnabled(name) {
+        const list = state.killBgCheckPlayers || [];
+        return list.some(n => n.toLowerCase() === name.toLowerCase());
+    }
+
+    // Sets per-player BG check toggle
+    function setPlayerBgCheckEnabled(name, enabled) {
+        let list = state.killBgCheckPlayers || [];
+        const lower = name.toLowerCase();
+        if (enabled) {
+            if (!list.some(n => n.toLowerCase() === lower)) list.push(name);
+        } else {
+            list = list.filter(n => n.toLowerCase() !== lower);
+        }
+        state.killBgCheckPlayers = list;
+    }
+
+    // Returns true if a player has shoot enabled (per-player toggle)
+    function isPlayerShootEnabled(name) {
+        const list = state.killShootPlayers || [];
+        return list.some(n => n.toLowerCase() === name.toLowerCase());
+    }
+
+    // Sets per-player shoot toggle
+    function setPlayerShootEnabled(name, enabled) {
+        let list = state.killShootPlayers || [];
+        const lower = name.toLowerCase();
+        if (enabled) {
+            if (!list.some(n => n.toLowerCase() === lower)) list.push(name);
+        } else {
+            list = list.filter(n => n.toLowerCase() !== lower);
+        }
+        state.killShootPlayers = list;
+    }
+
+    // Returns ms until next BG check is due for this player (negative = due now)
+    function getBgCheckDueMs(player) {
+        const intervalMs = state.killBgCheckIntervalHrs * 60 * 60 * 1000;
+        const lastCheck  = player.lastBgCheck || 0;
+        return (lastCheck + intervalMs) - now();
+    }
+
+    // Reads the player's rank and prestige from their profile page.
+    // Returns { rankIndex: 1-24, prestige: 0-5 } or null if not found.
+    function parseProfileRankPrestige() {
+        // Rank cell is the first <td> after the <th>Rank</th> cell
+        const rows = [...document.querySelectorAll('#profile tr')];
+        let rankText = '';
+        for (const row of rows) {
+            const ths = row.querySelectorAll('th');
+            const tds = row.querySelectorAll('td');
+            if ([...ths].some(th => /^rank$/i.test(textOf(th).trim())) && tds.length >= 1) {
+                rankText = textOf(tds[0]).trim();
+                break;
+            }
+        }
+        if (!rankText) return null;
+
+        // Parse prestige: "(5th Prestige)", "(1st Prestige)", etc.
+        const prestigeMatch = rankText.match(/\((\d+)(?:st|nd|rd|th)\s+prestige\)/i);
+        const prestige = prestigeMatch ? parseInt(prestigeMatch[1], 10) : 0;
+
+        // Extract rank name (remove prestige suffix)
+        const rankName = rankText.replace(/\s*\([^)]+\)\s*/g, '').trim();
+
+        // Map to index (1-based)
+        const idx = RANKS.indexOf(rankName);
+        if (idx === -1) return null;
+
+        return { rankIndex: idx + 1, prestige: Math.min(5, Math.max(0, prestige)) };
+    }
+
+    // Fetches the bullet calculator result for given parameters.
+    // Returns the bullet count as a number, or null on failure.
+    // The calculator auto-selects your rank and gun from your session.
+    async function fetchBulletCount(victimRankIndex, victimPrestige) {
+        try {
+            // Include myrank and gun in the calculator URL — required for the result to appear
+            const myRankIndex = getPlayerRankIndex() || 20;
+            const myGun       = getPlayerGunValue(); // read actual gun from stats bar
+            const url = `?p=kill&show=calc&vrank=${victimRankIndex}&armour=7&prestige=${victimPrestige}&myrank=${myRankIndex}&gun=${myGun}`;
+            const resp = await fetch(url, { credentials: 'include' });
+            const text = await resp.text();
+            const parser = new DOMParser();
+            const doc = parser.parseFromString(text, 'text/html');
+            const successEl = doc.querySelector('.bgm.success');
+            if (!successEl) return null;
+            const match = textOf(successEl).match(/shooting\s*([\d,]+)\s*bullets/i);
+            return match ? parseInt(match[1].replace(/,/g, ''), 10) : null;
+        } catch (e) {
+            addLiveLog(`Kill: bullet calc fetch error — ${e.message}`);
+            return null;
+        }
+    }
+
+    // Fetches a player's profile page and returns their rank/prestige.
+    // Uses the profile link directly from Players Found on the kill page to avoid
+    // URL encoding issues with player names containing spaces or special characters.
+    async function fetchPlayerProfile(username) {
+        try {
+            // Find profile URL from Players Found link — resolve via URL constructor
+            // to properly encode spaces and special chars in player names
+            let profileUrl = `?p=profile&u=${encodeURIComponent(username)}`; // default
+            const foundLinks = [...document.querySelectorAll('.bgl.i.wb .bgm.chs a[href*="?p=profile&u="]')];
+            for (const link of foundLinks) {
+                try {
+                    const resolved = new URL(link.getAttribute('href'), window.location.href);
+                    if ((resolved.searchParams.get('u') || '').toLowerCase() === username.toLowerCase()) {
+                        profileUrl = resolved.toString(); // fully encoded URL
+                        break;
+                    }
+                } catch (_) {}
+            }
+
+            const resp = await fetch(profileUrl, { credentials: 'include' });
+            const text = await resp.text();
+            const parser = new DOMParser();
+            const doc = parser.parseFromString(text, 'text/html');
+
+            // Profile table: header row has <th>Rank</th><th>Money</th>
+            // The NEXT row has <td>RankName</td><td>Money</td>
+            const rows = [...doc.querySelectorAll('#profile tr')];
+            let rankText = '';
+            for (let i = 0; i < rows.length - 1; i++) {
+                const ths = rows[i].querySelectorAll('th');
+                if ([...ths].some(th => /^rank$/i.test(th.textContent.trim()))) {
+                    // Rank value is in the first td of the NEXT row
+                    const nextTds = rows[i + 1].querySelectorAll('td');
+                    if (nextTds.length >= 1) {
+                        rankText = nextTds[0].textContent.trim();
+                        break;
+                    }
+                }
+            }
+            if (!rankText) return null;
+
+            const prestigeMatch = rankText.match(/\((\d+)(?:st|nd|rd|th)\s+prestige\)/i);
+            const prestige  = prestigeMatch ? parseInt(prestigeMatch[1], 10) : 0;
+            const rankName  = rankText.replace(/\s*\([^)]+\)\s*/g, '').trim();
+            const rankIndex = RANKS.indexOf(rankName) + 1;
+            if (rankIndex <= 0) return null;
+
+            return { rankIndex, prestige: Math.min(5, Math.max(0, prestige)) };
+        } catch (e) {
+            addLiveLog(`Kill: profile fetch error for ${username} — ${e.message}`);
+            return null;
+        }
+    }
+
+    // Finds a suitable travel car (RS Tuner, Black, or Orange) on the cars page.
+    // Returns a car link element or null.
+    function findTravelCar() {
+        // Look for protected-name cars in the cars list — these are RS Tuner/Black/Orange
+        // We need to look at ?p=cars page links. On the car page itself, the drive form is present.
+        // This function is called when we're already on a car page.
+        const driveSelect = getDriveLocationSelect();
+        return driveSelect ? driveSelect : null;
+    }
+
+    // Returns the location value string for a country name
+    function getLocationValueForCountry(countryName) {
+        if (!countryName) return null;
+        return COUNTRY_LOCATION_MAP[countryName.toLowerCase()] || null;
+    }
+
+    // Gets the player's current location from the stats bar
+    function getPlayerLocation() {
+        const el = document.querySelector('#player-location');
+        return el ? textOf(el).trim() : '';
+    }
+
+    // Submits a shoot POST to the kill page
+    // Returns the response text
+    async function submitShoot(username, bullets, anonymous) {
+        const params = new URLSearchParams();
+        params.set('do', 'kill');
+        params.set('username', username);
+        params.set('bullets', String(bullets));
+        if (!anonymous) params.set('show', 'y');
+
+        const resp = await fetch('?p=kill', {
+            method: 'POST',
+            credentials: 'include',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: params.toString()
+        });
+        return resp.text();
+    }
+
+    // Parses shoot response to determine outcome
+    // Returns: 'bodyguard' | 'failed' | 'success' | 'unknown'
+    // Also returns bodyguardName if applicable
+    function parseShootResponse(html) {
+        const parser = new DOMParser();
+        const doc    = parser.parseFromString(html, 'text/html');
+
+        const failEl = doc.querySelector('.bgm.fail');
+        if (failEl) {
+            const text = failEl.textContent || '';
+            // Bodyguard message: "X has a bodyguard called Y!"
+            const bgMatch = text.match(/has a bodyguard called\s+(.+?)!/i);
+            if (bgMatch) {
+                // Extract name from the second link in the fail message
+                const links = [...failEl.querySelectorAll('a[href*="?p=profile&u="]')];
+                let bgName = '';
+                if (links.length >= 2) {
+                    try {
+                        const url = new URL(links[1].getAttribute('href'), window.location.href);
+                        bgName = url.searchParams.get('u') || '';
+                    } catch (_) {}
+                }
+                if (!bgName) {
+                    // Fallback: parse from text
+                    bgName = bgMatch[1].trim();
+                }
+                return { outcome: 'bodyguard', bodyguardName: bgName };
+            }
+            // Failed to kill (no bodyguard)
+            if (/failed to kill/i.test(text)) return { outcome: 'failed' };
+            // Dead
+            if (/that player is dead/i.test(text)) return { outcome: 'dead' };
+            // Protected
+            if (/is protected from death/i.test(text)) return { outcome: 'protected' };
+            // Unkillable
+            if (/cannot be killed/i.test(text)) return { outcome: 'unkillable' };
+        }
+
+        const successEl = doc.querySelector('.bgm.success, .bgm.cg');
+        if (successEl) {
+            const text = successEl.textContent || '';
+            if (/killed/i.test(text) || (/you shot/i.test(text))) return { outcome: 'success' };
+        }
+
+        // Check cred div (failed message style)
+        const credEl = doc.querySelector('.bgm.cred');
+        if (credEl) {
+            const text = credEl.textContent || '';
+            if (/failed to kill/i.test(text)) return { outcome: 'failed' };
+        }
+
+        return { outcome: 'unknown' };
+    }
+
+    // Finds the best travel car link on the cars list page (?p=cars).
+    // Priority: Orange → RS Tuner → Black
+    // Returns the absolute URL to the car detail page, or null if none found.
+    function findBestTravelCarUrl() {
+        const allLinks = [...document.querySelectorAll('a[href*="?p=car&id="]')];
+
+        // Build priority groups
+        const orange  = [];
+        const rstuner = [];
+        const black   = [];
+
+        for (const link of allLinks) {
+            const text = textOf(link).toLowerCase();
+            if (text.includes('orange'))   { orange.push(link);  continue; }
+            if (text.includes('rs tuner')) { rstuner.push(link); continue; }
+            if (text.includes('black'))    { black.push(link);   continue; }
+        }
+
+        const best = orange[0] || rstuner[0] || black[0] || null;
+        if (!best) return null;
+
+        try {
+            return new URL(best.getAttribute('href'), window.location.href).toString();
+        } catch (_) {
+            return null;
+        }
+    }
+
+    // Initiates kill loop travel — called when on the cars LIST page (?p=cars).
+    // Finds best travel car and navigates to its detail page.
+    async function driveToCountryForKill(targetCountry) {
+        const locationValue = getLocationValueForCountry(targetCountry);
+        if (!locationValue) {
+            addLiveLog(`Kill travel: unknown country "${targetCountry}"`);
+            return false;
+        }
+
+        const travelCarUrl = findBestTravelCarUrl();
+        if (!travelCarUrl) {
+            addLiveLog('Kill travel: no suitable travel car found (Orange/RS Tuner/Black)');
+            return false;
+        }
+
+        addLiveLog(`Kill travel: navigating to car detail page for ${targetCountry}`);
+        // Store travelCarUrl and move stage to 'travel_car' — we're now on the car detail page
+        state.pendingKillAction = { ...state.pendingKillAction, travelTo: targetCountry, travelCarUrl, stage: 'travel_car' };
+        window.location.href = travelCarUrl;
+        return true;
+    }
+
+    // -------------------------------------------------------------------------
     // Player list management
     // -------------------------------------------------------------------------
 
@@ -2174,21 +2643,28 @@
     }
 
     // Returns the next player to search based on priority:
-    // Returns the next player to search based on priority:
     // 1. Unknown — search immediately
     // 2. Protected — always search whenever the loop runs for any reason
     // 3. Alive with 3hrs or less remaining — re-search to keep active
     // 4. Protected standalone 1hr failsafe — handled by #2 above since
     //    protected players are always priority when the loop activates
     // 5. Unkillable — never search
+    // Pending players (searchExpiresAt > now+2.5hrs) are skipped — they're already
+    // in the game's search queue and just need time to complete.
     function getNextKillTarget() {
         const players = getKillPlayers();
         if (!players.length) return null;
 
         const nowMs = now();
+        const PENDING_SKIP_MS = 2.5 * 60 * 60 * 1000; // 2.5hrs — skip if search expiry > now+2.5hrs
 
         // Priority 1: Unknown players — search immediately
-        const unknown = players.find(p => p.status === KILL_STATUS.UNKNOWN);
+        // Skip if they appear to be in a pending state (recently set to 3hr expiry)
+        const unknown = players.find(p => {
+            if (p.status !== KILL_STATUS.UNKNOWN) return false;
+            if (p.searchExpiresAt && (p.searchExpiresAt - nowMs) > PENDING_SKIP_MS) return false;
+            return true;
+        });
         if (unknown) return unknown;
 
         // Priority 2: Protected players — search all of them whenever the loop
@@ -2204,11 +2680,13 @@
 
         // Priority 3: Alive players with 3hrs or less remaining — re-search
         // to keep their location permanently active with no gap.
+        // If no searchExpiresAt is stored, the player has dropped out of Players Found
+        // (expired or dead) — re-search immediately to discover their status.
         const RESCAN_BUFFER_MS = 3 * 60 * 60 * 1000; // 3hr buffer before expiry
         const expiredAlive = players.find(p => {
             if (p.status !== KILL_STATUS.ALIVE) return false;
-            if (p.searchExpiresAt) return (p.searchExpiresAt - nowMs) < RESCAN_BUFFER_MS;
-            return (nowMs - p.lastChecked) >= KILL_SCANNER_RESCAN_MS;
+            if (!p.searchExpiresAt) return true; // No timer = dropped out, re-search immediately
+            return (p.searchExpiresAt - nowMs) < RESCAN_BUFFER_MS;
         });
         if (expiredAlive) return expiredAlive;
 
@@ -2225,13 +2703,25 @@
             // Remove dead players entirely
             players.splice(idx, 1);
             addLiveLog(`Kill scanner: ${name} is dead — removed from list`);
+            // Add to permanent dead list so syncKillExpiryFromPage never re-adds them
+            const dead = state.killDeadPlayers || [];
+            if (!dead.some(n => n.toLowerCase() === name.toLowerCase())) {
+                dead.push(name);
+                state.killDeadPlayers = dead;
+            }
         } else {
             players[idx].status      = status;
             players[idx].lastChecked = now();
             players[idx].searchCount = (players[idx].searchCount || 0) + 1;
-            // Clear stored expiry when status changes — syncKillExpiryFromPage
-            // will populate it accurately on the next kill page load
-            if (status !== KILL_STATUS.ALIVE) {
+
+            if (status === KILL_STATUS.ALIVE) {
+                // Set searchExpiresAt immediately to now+24hrs so the bot
+                // doesn't re-search this player before syncKillExpiryFromPage
+                // has a chance to read the accurate timer from the page.
+                // syncKillExpiryFromPage will overwrite this with the real value.
+                players[idx].searchExpiresAt = now() + (KILL_SCANNER_SEARCH_HOURS * 60 * 60 * 1000);
+            } else {
+                // Clear stored expiry when status changes to non-alive
                 delete players[idx].searchExpiresAt;
             }
         }
@@ -2245,6 +2735,11 @@
 
     function isKillPage() {
         return currentPage() === 'kill';
+    }
+
+    function isKillPenaltyPage() {
+        const url = new URL(window.location.href);
+        return url.searchParams.get('p') === 'kill-penalty';
     }
 
     function isOnlinePage() {
@@ -2344,19 +2839,65 @@
         return matched ? totalMs : null;
     }
 
-    // Reads the "Players found" section on the kill page and:
+    // Reads the "Players found" and "Searching for" sections on the kill page and:
     // 1. Updates each known player's stored expiry time with the accurate "Lost in X" value
-    // 2. Adds any unknown players found there to the list as "alive" — this acts as a
-    //    cross-device sync so switching devices populates the list from existing searches
+    // 2. Adds any unknown players found there to the list as "alive" — cross-device sync
+    // 3. Marks pending players (currently being searched, no result yet) so the bot
+    //    doesn't try to re-search them — they just need time to be found (3hr window)
     function syncKillExpiryFromPage() {
         const players = state.killPlayers || [];
 
-        // "Players found" rows — each has a player link and a "Lost in" timer span
-        const rows = [...document.querySelectorAll('.bgl.i.wb .bgm.chs')];
-        if (!rows.length) return;
+        // "Your men are out searching for" rows — class chs pd — these are pending
+        // searches that haven't completed yet. Mark them so getNextKillTarget skips them.
+        const pendingRows = [...document.querySelectorAll('.bgl.i.wb .bgm.chs.pd')];
+        const pendingNames = new Set();
+        for (const row of pendingRows) {
+            const b = row.querySelector('b');
+            if (!b) continue;
+            const name = textOf(b).trim();
+            if (!name || name === 'Plub') continue; // Plub is a game NPC, skip
+            pendingNames.add(name.toLowerCase());
 
-        let updated = 0;
-        let added   = 0;
+            // Parse "Found in X h X m X s" timer for any Kill/BG-ticked player
+            // so the tick check knows exactly when to navigate to the kill page
+            const timerSpan = row.querySelector('.chd');
+            if (timerSpan) {
+                const foundInMs = parseLostInMs(textOf(timerSpan));
+                if (foundInMs != null) {
+                    const idx = players.findIndex(p => p.name.toLowerCase() === name.toLowerCase());
+                    if (idx !== -1) {
+                        const p = players[idx];
+                        const relevant = isPlayerBgCheckEnabled(p.name) || isPlayerShootEnabled(p.name) || p.isBg;
+                        if (relevant) {
+                            players[idx].expectedFoundAt = now() + foundInMs;
+                        }
+                    }
+                }
+            }
+        }
+
+        // For each pending player, set searchExpiresAt to now+3hrs so the bot
+        // knows not to re-search them — they're already in the queue.
+        for (const name of pendingNames) {
+            const idx = players.findIndex(p => p.name.toLowerCase() === name);
+            if (idx !== -1) {
+                // Only update if the stored expiry is less than 3hrs from now
+                // (i.e. the bot was about to re-search them)
+                const pending3hr = now() + (3 * 60 * 60 * 1000);
+                if (!players[idx].searchExpiresAt || players[idx].searchExpiresAt < pending3hr) {
+                    players[idx].searchExpiresAt = pending3hr;
+                    players[idx].status = KILL_STATUS.ALIVE;
+                }
+            }
+        }
+
+        // "Players found" rows — each has a player link and a "Lost in" timer span
+        const rows = [...document.querySelectorAll('.bgl.i.wb .bgm.chs:not(.pd)')];
+        if (!rows.length && !pendingNames.size) return;
+
+        let updated    = 0;
+        let added      = 0;
+        let newlyFound = 0; // Players that just appeared in Players Found (were pending/not there before)
 
         for (const row of rows) {
             const link = row.querySelector('a[href*="?p=profile&u="]');
@@ -2380,34 +2921,131 @@
             // Calculate when the search actually expires based on the game's timer
             const expiresAt = now() + lostInMs;
 
+            // Parse country from bold tag inside row: "Name in <b>Country</b> Lost in..."
+            let rowCountry = '';
+            const bTags = [...row.querySelectorAll('b')];
+            // Second <b> tag is the country (first is the player name)
+            if (bTags.length >= 2) rowCountry = textOf(bTags[1]);
+
             const idx = players.findIndex(p => p.name.toLowerCase() === name.toLowerCase());
 
+            const deadList = state.killDeadPlayers || [];
+            const isKnownDead = deadList.some(n => n.toLowerCase() === name.toLowerCase());
+            if (isKnownDead) continue; // Never re-add confirmed dead players
+
             if (idx === -1) {
-                // Player not in list — add them as alive with accurate expiry.
-                // This handles cross-device sync: existing searches on the kill page
-                // populate the list automatically on a new device.
+                // Player not in list — add as alive (cross-device sync)
                 players.push({
                     name,
-                    status:         KILL_STATUS.ALIVE,
-                    lastChecked:    now(),
-                    firstSeen:      now(),
-                    searchCount:    1,
-                    searchExpiresAt: expiresAt
+                    status:          KILL_STATUS.ALIVE,
+                    lastChecked:     now(),
+                    firstSeen:       now(),
+                    searchCount:     1,
+                    searchExpiresAt: expiresAt,
+                    country:         rowCountry
                 });
                 added++;
             } else {
-                // Player already in list — update their expiry and mark as alive
-                players[idx].searchExpiresAt = expiresAt;
-                players[idx].status          = KILL_STATUS.ALIVE;
-                updated++;
+                // Player already in list — update expiry, never resurrect dead
+                if (players[idx].status !== KILL_STATUS.DEAD) {
+                    players[idx].searchExpiresAt = expiresAt;
+                    players[idx].status          = KILL_STATUS.ALIVE;
+                    if (rowCountry) players[idx].country = rowCountry;
+                    // Clear expectedFoundAt — player is now in Players Found
+                    if (players[idx].expectedFoundAt) {
+                        delete players[idx].expectedFoundAt;
+                        newlyFound++; // Was pending, now found — relevant for kill loop reactivation
+                    }
+                    updated++;
+                }
             }
         }
 
         if (updated > 0 || added > 0) {
             saveKillPlayers(players);
-            if (added > 0) {
-                addLiveLog(`Kill scanner: synced ${added} player(s) from Players found section`);
-                renderKillList();
+            if (added > 0) addLiveLog(`Kill scanner: synced ${added} player(s) from Players found section`);
+            renderKillList(); // Always refresh — country data may have changed
+        }
+
+        // Check if any bodyguard players are now alive (found) — trigger bg_shoot
+        // Only if global BG check loop is enabled and penalty not too high
+        if (state.killBgCheckEnabled && !isKillPenaltyTooHigh()) for (const p of players) {
+            if (!p.isBg || !p.bgFor) continue;
+            if (p.status !== KILL_STATUS.ALIVE) continue;
+            if (!isPlayerShootEnabled(p.bgFor)) continue;
+            // Skip if we know required bullets and don't have enough yet
+            if (p.requiredBullets && getPlayerBullets() < p.requiredBullets) continue;
+            const pa = state.pendingKillAction;
+            if (pa && (pa.stage === 'bg_shoot' || pa.targetName === p.name)) continue;
+            // Verify bodyguard is actually in Players Found right now before queuing shoot
+            const inFoundNow = [...document.querySelectorAll('.bgl.i.wb .bgm.chs:not(.pd) a[href*="?p=profile&u="]')]
+                .some(a => { try { return new URL(a.getAttribute('href'), window.location.href).searchParams.get('u').toLowerCase() === p.name.toLowerCase(); } catch(_){ return false; } });
+            if (!inFoundNow) continue;
+            // Skip if already queued for shoot (persistent flag independent of pendingKillAction)
+            if (p.bgShootQueued) continue;
+            addLiveLog(`Kill loop: bodyguard ${p.name} is now found — queuing shoot for ${p.bgFor}`);
+            // Mark as queued so syncKillExpiryFromPage doesn't re-queue on every visit
+            const bgQIdx = players.findIndex(pl => pl.name.toLowerCase() === p.name.toLowerCase());
+            if (bgQIdx !== -1) { players[bgQIdx].bgShootQueued = true; saveKillPlayers(players); }
+            state.pendingKillAction = { stage: 'bg_shoot', targetName: p.name, bgFor: p.bgFor, shootAfterBg: true };
+            state.killLoopActive = true;
+            break;
+        }
+
+        // Clear expectedFoundAt for any player now in Players Found
+        let clearedExpected = false;
+        for (const p of players) {
+            if (!p.expectedFoundAt) continue;
+            const inFoundNow = [...document.querySelectorAll('.bgl.i.wb .bgm.chs:not(.pd) a[href*="?p=profile&u="]')]
+                .some(a => { try { return new URL(a.getAttribute('href'), window.location.href).searchParams.get('u').toLowerCase() === p.name.toLowerCase(); } catch(_){ return false; } });
+            if (inFoundNow) {
+                delete p.expectedFoundAt;
+                clearedExpected = true;
+            }
+        }
+        if (clearedExpected) saveKillPlayers(players);
+
+        // Reactivate kill loop only if a player newly appeared in Players Found OR bullets became sufficient
+        if (state.killBgCheckEnabled && !state.killLoopActive && (added > 0 || newlyFound > 0)) {
+            const nowActive = players.some(p => {
+                if (p.status !== KILL_STATUS.ALIVE) return false;
+                if (p.status === KILL_STATUS.PROTECTED || p.status === KILL_STATUS.UNKILLABLE) return false;
+                // Skip if insufficient bullets known
+                if (p.requiredBullets && getPlayerBullets() < p.requiredBullets) return false;
+                // Must actually be in Players Found right now
+                const inFound = [...document.querySelectorAll('.bgl.i.wb .bgm.chs:not(.pd) a[href*="?p=profile&u="]')]
+                    .some(a => { try { return new URL(a.getAttribute('href'), window.location.href).searchParams.get('u').toLowerCase() === p.name.toLowerCase(); } catch(_){ return false; } });
+                if (!inFound) return false;
+                // BG check due
+                if (isPlayerBgCheckEnabled(p.name) && getBgCheckDueMs(p) <= 0) return true;
+                // Kill only — only reactivate if penalty not too high
+                if (isPlayerShootEnabled(p.name) && !isPlayerBgCheckEnabled(p.name) && !isKillPenaltyTooHigh()) return true;
+                return false;
+            });
+            if (nowActive) {
+                addLiveLog('Kill loop: target now in Players Found — reactivating');
+                state.killLoopActive = true;
+            }
+        }
+
+        // Always check: players already in Players Found with Kill ticked and now sufficient bullets
+        // This handles the case where bullets accumulate over time for a player already found
+        if (state.killBgCheckEnabled && !state.killLoopActive && !isKillPenaltyTooHigh()) { // bullets check — only when penalty ok
+            const foundLinks = new Set([...document.querySelectorAll('.bgl.i.wb .bgm.chs:not(.pd) a[href*="?p=profile&u="]')]
+                .map(a => { try { return new URL(a.getAttribute('href'), window.location.href).searchParams.get('u').toLowerCase(); } catch(_){ return ''; } })
+                .filter(Boolean));
+            const bulletsReady = players.some(p => {
+                if (p.status !== KILL_STATUS.ALIVE) return false;
+                if (!p.requiredBullets) return false;
+                const bulletBuffer = isPlayerBgCheckEnabled(p.name) ? 1 : 0;
+                if (getPlayerBullets() < p.requiredBullets + bulletBuffer) return false;
+                if (!isPlayerShootEnabled(p.name)) return false;
+                if (!foundLinks.has(p.name.toLowerCase())) return false;
+                return true;
+            });
+            if (bulletsReady) {
+                addLiveLog('Kill loop: bullets now sufficient for player in Players Found — reactivating');
+                state.killLoopActive = true;
             }
         }
     }
@@ -2473,6 +3111,26 @@
         // kill page load — this is more reliable than the 23hr fallback window.
         syncKillExpiryFromPage();
 
+        // If penalty exceeds threshold and penaltyDropsAt not set, navigate to penalty page
+        if (state.killPenaltyThreshold > 0 && !state.pendingPenaltyPage) {
+            const livePenalty = getKillPenaltyMultiplier(); // authoritative on kill page
+            const cached = Number(getSetting('cachedKillPenalty', 1.0));
+            const penaltyTooHigh = livePenalty > state.killPenaltyThreshold;
+            const penaltyChanged = Math.abs(livePenalty - cached) >= 0.05;
+            const needsCalc = !state.penaltyDropsAt || penaltyChanged;
+            // If live penalty is 1.0 (no penalty), ensure penaltyDropsAt is cleared
+            if (livePenalty <= 1.0) {
+                if (state.penaltyDropsAt) state.penaltyDropsAt = 0;
+            } else if (penaltyTooHigh && needsCalc) {
+                const reason = penaltyChanged ? `penalty changed (${cached}x → ${livePenalty}x)` : `penalty ${livePenalty}x exceeds threshold`;
+                addLiveLog(`Kill loop: ${reason} — navigating to penalty page`);
+                state.pendingPenaltyPage = true;
+                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                gotoPage('kill-penalty');
+                return;
+            }
+        }
+
         if (hasCTCChallenge()) {
             setLastActionText('CTC solving…');
             await maybeSolveCTC();
@@ -2519,7 +3177,6 @@
                 if (hasKillDeadMessage()) {
                     killSearchResultHandledThisLoad = true;
                     updateKillPlayerStatus(current, KILL_STATUS.DEAD);
-                    addLiveLog(`Kill scanner: ${current} is dead — removed`);
                     state.killCurrentSearch = '';
                     renderKillList();
                 } else if (hasKillUncillableMessage()) {
@@ -2554,15 +3211,38 @@
         const target = getNextKillTarget();
 
         if (!target) {
-            // No targets right now — revert to normal script but keep the toggle ON.
-            // The loop will restart automatically when:
-            // - Toggle 1 adds new unknown players
-            // - An alive player drops below 1hr remaining
-            // - A protected player hits the 1hr failsafe
+            // No search targets — check if kill loop should activate for BG checks
+            if (state.killBgCheckEnabled) {
+                const alivePlayers = getKillPlayers().filter(p =>
+                    p.status === KILL_STATUS.ALIVE || p.status === KILL_STATUS.UNKNOWN
+                );
+                const hasBgDue = alivePlayers.some(p =>
+                    isPlayerBgCheckEnabled(p.name) && getBgCheckDueMs(p) <= 0
+                );
+                const hasKillable = alivePlayers.some(p => {
+                    if (!isPlayerShootEnabled(p.name)) return false;
+                    if (p.requiredBullets && getPlayerBullets() < p.requiredBullets) return false;
+                    if (isPlayerBgCheckEnabled(p.name) && getBgCheckDueMs(p) <= 0) return false;
+                    return true;
+                });
+                if (hasBgDue || hasKillable) {
+                    // syncKillExpiryFromPage already ran above — if kill loop didn't activate,
+                    // the players aren't in Players Found yet. Just revert to normal script.
+                    // killLoopActive may have been set by syncKillExpiryFromPage — check first.
+                    if (!state.killLoopActive) {
+                        addLiveLog('Kill scanner: no targets right now — reverting to normal script (toggle stays on)');
+                        state.killSearchLoopActive = false;
+                        await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                        gotoPage('crimes');
+                        return;
+                    }
+                    // Kill loop was activated by syncKillExpiryFromPage — let it take over
+                    state.killSearchLoopActive = false;
+                    return;
+                }
+            }
             addLiveLog('Kill scanner: no targets right now — reverting to normal script (toggle stays on)');
             state.killSearchLoopActive = false;
-            // killSearchEnabled stays true — init() will re-activate the loop
-            // on the next page load when getNextKillTarget() finds a target
             await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
             gotoPage('crimes');
             return;
@@ -2625,40 +3305,144 @@
 
         let html = '';
 
-        for (const [, group] of Object.entries(groups)) {
+        for (const [status, group] of Object.entries(groups)) {
             if (!group.players.length) continue;
+
+            const canBgCheck = (status === KILL_STATUS.UNKNOWN || status === KILL_STATUS.ALIVE);
 
             html += `<div class="ug-kill-group-title">${escapeHtml(group.label)} (${group.players.length})</div>`;
 
+            // Table approach — immune to flex/CSS interference from the game
+            html += `<table style="width:100%;border-collapse:collapse;table-layout:fixed;">`;
+            if (canBgCheck) {
+                html += `<colgroup><col style="width:auto;"/><col style="width:80px;"/><col style="width:46px;"/><col style="width:22px;"/><col style="width:22px;"/></colgroup>`;
+                html += `<tr><td style="font-size:9px;color:#555;padding:0;"></td><td style="font-size:9px;color:#ccc;padding:0 4px 2px 0;">Country</td><td style="font-size:9px;color:#ccc;text-align:right;padding:0 4px 2px 0;">Time</td><td style="font-size:9px;color:#ccc;text-align:center;padding:0 0 2px 0;">BG</td><td style="font-size:9px;color:#ccc;text-align:center;padding:0 0 2px 0;">Kill</td></tr>`;
+            } else if (status === KILL_STATUS.UNKILLABLE) {
+                html += `<colgroup><col style="width:auto;"/><col style="width:80px;"/><col style="width:46px;"/><col style="width:16px;"/></colgroup>`;
+            } else {
+                html += `<colgroup><col style="width:auto;"/><col style="width:80px;"/><col style="width:46px;"/></colgroup>`;
+            }
+
             for (const p of group.players) {
+                // Time meta
                 let meta = '';
                 if (p.status === KILL_STATUS.ALIVE && p.searchExpiresAt) {
                     const remaining = p.searchExpiresAt - now();
                     if (remaining > 3600000) {
-                        // More than 1hr left — show time remaining
                         const hrs  = Math.floor(remaining / 3600000);
                         const mins = Math.floor((remaining % 3600000) / 60000);
-                        meta = `${hrs}h ${mins}m left`;
+                        meta = `${hrs}h ${mins}m`;
                     } else if (remaining > 0) {
-                        // Less than 1hr — bot should be re-searching soon
-                        const mins = Math.floor(remaining / 60000);
-                        meta = `renewing (${mins}m left)`;
+                        meta = `${Math.floor(remaining / 60000)}m`;
                     } else {
-                        meta = 'expired — re-searching';
+                        meta = 'exp.';
                     }
                 } else if (p.lastChecked) {
                     meta = formatTimeSince(p.lastChecked);
                 } else {
                     meta = 'never';
                 }
-                html += `<div class="ug-kill-entry">
-                    <span class="ug-kill-name" style="color:${group.colour};">${escapeHtml(p.name)}</span>
-                    <span class="ug-kill-meta">${escapeHtml(meta)}</span>
-                </div>`;
+
+                // BG due indicator
+                let bgDue = '';
+                if (p.status === KILL_STATUS.ALIVE && p.lastBgCheck && isPlayerBgCheckEnabled(p.name)) {
+                    const dueMs = getBgCheckDueMs(p);
+                    if (dueMs <= 0) bgDue = ' ●';
+                }
+
+                const bgChecked    = canBgCheck && isPlayerBgCheckEnabled(p.name);
+                const shootChecked = canBgCheck && isPlayerShootEnabled(p.name);
+
+                const country = p.country || '';
+
+                // BG check tooltip — calculated before template literal
+                let bgTooltip = 'BG check: never done';
+                if (p.lastBgCheck) {
+                    const bgDueMs2 = getBgCheckDueMs(p);
+                    if (bgDueMs2 <= 0) {
+                        bgTooltip = 'BG check: due now';
+                    } else {
+                        const bgHrs  = Math.floor(bgDueMs2 / 3600000);
+                        const bgMins = Math.floor((bgDueMs2 % 3600000) / 60000);
+                        bgTooltip = bgHrs > 0 ? 'BG check: due in ' + bgHrs + 'h ' + bgMins + 'm' : 'BG check: due in ' + bgMins + 'm';
+                    }
+                }
+
+                if (canBgCheck) {
+                    html += `<tr>
+                        <td style="font-size:11px;color:${group.colour};padding:1px 0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:0;" title="${escapeHtml(p.name)}">${escapeHtml(p.name)}</td>
+                        <td style="font-size:9px;color:#888;padding:1px 4px 1px 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(country)}</td>
+                        <td style="font-size:9px;color:#ccc;text-align:right;padding:1px 4px 1px 0;white-space:nowrap;">${escapeHtml(meta)}${bgDue}</td>
+                        <td style="text-align:center;padding:1px 2px;"><div class="ug-kcb ug-kill-bg-cb ${bgChecked ? 'checked' : ''}" data-name="${escapeHtml(p.name)}" title="${escapeHtml(bgTooltip)}"></div></td>
+                        <td style="text-align:center;padding:1px 2px;"><div class="ug-kcb ug-kill-shoot-cb ${shootChecked ? 'checked' : ''}" data-name="${escapeHtml(p.name)}"></div></td>
+                    </tr>`;
+                } else if (status === KILL_STATUS.UNKILLABLE) {
+                    html += `<tr>
+                        <td style="font-size:11px;color:${group.colour};padding:1px 0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:0;" title="${escapeHtml(p.name)}">${escapeHtml(p.name)}</td>
+                        <td style="font-size:9px;color:#888;padding:1px 4px 1px 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(country)}</td>
+                        <td style="font-size:9px;color:#ccc;text-align:right;padding:1px 4px 1px 0;white-space:nowrap;">${escapeHtml(meta)}</td>
+                        <td style="text-align:center;padding:1px 0;"><span class="ug-kill-remove" data-name="${escapeHtml(p.name)}" title="Reset to unknown — will be re-searched" style="cursor:pointer;color:#f88;font-size:11px;line-height:1;">✕</span></td>
+                    </tr>`;
+                } else {
+                    html += `<tr>
+                        <td style="font-size:11px;color:${group.colour};padding:1px 0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:0;" title="${escapeHtml(p.name)}">${escapeHtml(p.name)}</td>
+                        <td style="font-size:9px;color:#888;padding:1px 4px 1px 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(country)}</td>
+                        <td style="font-size:9px;color:#ccc;text-align:right;padding:1px 0;white-space:nowrap;">${escapeHtml(meta)}</td>
+                    </tr>`;
+                }
+
+                // Bodyguard sub-row
+                if (p.bodyguard) {
+                    const cols = canBgCheck ? 5 : 3;
+                    html += `<tr><td colspan="${cols}" style="font-size:9px;color:#f8c84a;padding:0 0 1px 8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">&#8594; ${escapeHtml(p.bodyguard)}</td></tr>`;
+                }
             }
+            html += `</table>`;
         }
 
+        const killListScrollTop = el.scrollTop || Number(getSetting('scrollKill', 0));
         el.innerHTML = html;
+        el.scrollTop = killListScrollTop;
+        setSetting('scrollKill', 0);
+        // Listener is attached once in attachKillListListener() — not here
+    }
+
+    // Called once after the kill list element is created in the DOM.
+    // Attaches the click delegation listener that handles fake checkbox toggles.
+    function attachKillListListener() {
+        const el = document.querySelector('#ug-bot-kill-list');
+        if (!el || el.dataset.listenerAttached) return;
+        el.dataset.listenerAttached = '1';
+        el.addEventListener('click', (e) => {
+            // Handle ✕ remove button for unkillable players
+            const removeBtn = e.target.closest('.ug-kill-remove');
+            if (removeBtn) {
+                const name = removeBtn.dataset.name;
+                if (!name) return;
+                const pls = state.killPlayers || [];
+                const idx = pls.findIndex(p => p.name.toLowerCase() === name.toLowerCase());
+                if (idx !== -1) {
+                    pls[idx].status = KILL_STATUS.UNKNOWN;
+                    delete pls[idx].lastChecked;
+                    saveKillPlayers(pls);
+                    addLiveLog(`Kill scanner: ${name} reset to unknown — will be re-searched`);
+                    renderKillList();
+                }
+                return;
+            }
+
+            const cb = e.target.closest('.ug-kcb');
+            if (!cb) return;
+            cb.classList.toggle('checked');
+            const isChecked = cb.classList.contains('checked');
+            const name = cb.dataset.name;
+            if (cb.classList.contains('ug-kill-bg-cb')) {
+                setPlayerBgCheckEnabled(name, isChecked);
+                if (isChecked && state.killBgCheckEnabled && !isKillPenaltyTooHigh()) state.killLoopActive = true;
+            } else if (cb.classList.contains('ug-kill-shoot-cb')) {
+                setPlayerShootEnabled(name, isChecked);
+            }
+        });
     }
 
     function formatTimeSince(ts) {
@@ -2734,20 +3518,81 @@
         state.lastActionAt = now();
 
         if (fastMode) {
-            await wait(rand(60, 120));
+            // Fast mode — minimal delay, use already-found button reference
+            // to avoid re-fetch overhead in competitive busting
+            await wait(rand(10, 30));
+            if (!target.bustBtn.isConnected) return false;
+            target.bustBtn.click();
+            addLiveLog(`Bust attempted: ${textOf(target.row.querySelector('a'))} (${target.timerText})`);
         } else {
             await wait(rand(DEFAULTS.actionDelayMin, DEFAULTS.actionDelayMax));
+            // Re-fetch the button in case the DOM updated
+            const freshCandidates = getBustCandidates();
+            if (!freshCandidates.length) return false;
+            const freshTarget = freshCandidates[0];
+            freshTarget.bustBtn.click();
+            addLiveLog(`Bust attempted: ${textOf(freshTarget.row.querySelector('a'))} (${freshTarget.timerText})`);
         }
 
-        // Re-fetch the button in case the DOM updated
-        const freshCandidates = getBustCandidates();
-        if (!freshCandidates.length) return false;
-
-        const freshTarget = freshCandidates[0];
-        freshTarget.bustBtn.click();
-
-        addLiveLog(`Bust attempted: ${textOf(freshTarget.row.querySelector('a'))} (${freshTarget.timerText})`);
         return true;
+    }
+
+    // MutationObserver for instant bust — fires the moment #jailn changes,
+    // bypassing the 1200ms heartbeat delay for maximum competitive speed.
+    let bustObserver     = null;
+    let bustObserverBusy = false;
+
+    function startBustObserver() {
+        if (bustObserver) return;
+
+        const jailNode = document.querySelector('#jailn');
+        if (!jailNode) return;
+
+        bustObserver = new MutationObserver(async () => {
+            // Don't fire if: not in bust mode, already handling a bust,
+            // CTC is active, or we're jailed ourselves
+            if (!state.bustLoopActive)    return;
+            if (!state.bustFastMode)      return; // only active in fast mode
+            if (bustObserverBusy)         return;
+            if (hasCTCChallenge())        return;
+            if (getOwnJailRow())          return;
+
+            const candidates = getBustCandidates();
+            if (!candidates.length) return;
+
+            bustObserverBusy = true;
+            try {
+                state.lastActionAt = now();
+                await wait(rand(10, 30));
+
+                // Re-check conditions after minimal delay
+                if (!state.bustLoopActive) return;
+                if (hasCTCChallenge())     return;
+                if (getOwnJailRow())       return;
+
+                const freshCandidates = getBustCandidates();
+                if (!freshCandidates.length) return;
+
+                const target = freshCandidates[0];
+                if (!target.bustBtn.isConnected) return;
+
+                target.bustBtn.click();
+                addLiveLog(`Bust (instant): ${textOf(target.row.querySelector('a'))} (${target.timerText})`);
+            } finally {
+                bustObserverBusy = false;
+            }
+        });
+
+        bustObserver.observe(jailNode, { childList: true, subtree: true, characterData: true });
+        addLiveLog('Bust observer started (instant mode)');
+    }
+
+    function stopBustObserver() {
+        if (bustObserver) {
+            bustObserver.disconnect();
+            bustObserver = null;
+        }
+        bustObserverBusy = false;
     }
 
     async function handleBustPage() {
@@ -2756,6 +3601,7 @@
         if (!state.bustEnabled) {
             addLiveLog('Bust disabled — returning to crimes');
             state.bustLoopActive = false;
+            stopBustObserver();
             await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
             gotoPage('crimes');
             return;
@@ -2810,10 +3656,21 @@
             return;
         }
 
-        // Bust the lowest-timer prisoner
-        const didBust = await doBust(state.bustFastMode);
-        if (!didBust) {
-            setLastActionText('Busting: no targets');
+        // Start the instant MutationObserver in fast mode — it fires the moment
+        // a new prisoner appears in #jailn, bypassing the heartbeat delay
+        if (state.bustFastMode) {
+            startBustObserver();
+            // Also attempt an immediate bust for any already-present targets
+            const didBust = await doBust(true);
+            if (!didBust) {
+                setLastActionText('Busting: waiting for prisoners (instant mode)');
+            }
+        } else {
+            stopBustObserver();
+            const didBust = await doBust(false);
+            if (!didBust) {
+                setLastActionText('Busting: no targets');
+            }
         }
     }
 
@@ -3370,12 +4227,18 @@
     }
 
     function isLikelyJailPage() {
-        // Only match on structural page elements — the #jailn element is the
-        // reliable indicator of the jail page. Body text checks were removed
-        // because AJAX-loaded content (chat messages, crime results etc.) on
-        // other pages can contain words like "leave jail" and cause false positives.
+        // The jail page uses ?p=crimes&page=1 as its URL, not ?p=jail
+        // So we can't rely on currentPage() === 'jail' alone
         if (currentPage() === 'jail') return true;
-        if (document.querySelector('#jailn')) return true;
+        // Detect jail via #jailn element — but exclude plain crimes page
+        // (no page param) which doesn't have #jailn
+        if (document.querySelector('#jailn')) {
+            // Extra check: jail page has a Set Reward form pointing to ?p=jail
+            if (document.querySelector('form[action*="p=jail"]')) return true;
+            // Or has the page=1 parameter (jail URL pattern)
+            const pageParam = new URL(window.location.href).searchParams.get('page');
+            if (pageParam === '1') return true;
+        }
         return false;
     }
 
@@ -4106,7 +4969,7 @@
         const meltUsable  = isMeltEnabled() && !isMeltLocked();
         const drugsUsable = isDrugsEnabled();
 
-        if (drugsUsable && isInternalDriveReady()) {
+        if (drugsUsable && isInternalDriveReady() && !state.killLoopActive) {
             await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
             gotoPage('drugs');
             return;
@@ -4272,14 +5135,13 @@
                 s.lastActionText  = `Melt complete (+${confirmedBullets} bullets)`;
             });
 
-            addLiveLog(
-                expectedBullets > 0 && expectedBullets !== confirmedBullets
-                    ? `Melt success confirmed — ${meltLabel}, received ${confirmedBullets} bullets (expected ${expectedBullets})`
-                    : `Melt success confirmed — ${meltLabel}, received ${confirmedBullets} bullets`
-            );
+            addLiveLog(`Melt success confirmed — ${meltLabel}, received ${confirmedBullets} bullets`);
 
             clearPendingMeltResult();
             resetMeltSearchState();
+
+            // No melt reactivation needed — expectedFoundAt timer and search loop
+            // handle kill loop activation when players become available
 
             // If we are in melt reset loop mode, handle repair then loop back
             if (state.meltResetLoopActive) {
@@ -4430,6 +5292,979 @@
         gotoPage('crimes');
     }
 
+    // =========================================================================
+    // KILL LOOP (BG CHECK + SHOOT)
+    // =========================================================================
+
+    // Handles the kill loop page — BG checking and shooting players.
+    // This loop runs separately from the kill search loop.
+    // Flow:
+    //   1. Check kill penalty — if too high, pause kill loop
+    //   2. For each alive player with BG check enabled and interval due:
+    //      a. Travel to their country if needed
+    //      b. Shoot 1 bullet (BG check)
+    //      c. If bodyguard found: add BG to kill list, search them
+    //      d. If no bodyguard AND shoot enabled: fetch profile, calc bullets, shoot
+    //   3. If not enough bullets for a kill shot, pause kill loop (not BG check)
+    async function handleKillLoopPage() {
+        const pending = state.pendingKillAction;
+
+        // Handle pending travel — we've just arrived on a car page to drive somewhere
+        // ── Stage: travel — on cars LIST page, find and navigate to best car ──
+        if (pending && pending.stage === 'travel' && pending.travelTo) {
+            // We should be on the cars list page — find best travel car and navigate to it
+            const travelCarUrl = findBestTravelCarUrl();
+            if (!travelCarUrl) {
+                addLiveLog('Kill loop: no suitable travel car found — clearing');
+                state.pendingKillAction = null;
+                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                gotoPage('kill');
+                return;
+            }
+            addLiveLog(`Kill loop: navigating to car detail page for ${pending.travelTo}`);
+            state.pendingKillAction = { ...pending, stage: 'travel_car', travelCarUrl };
+            window.location.href = travelCarUrl;
+            return;
+        }
+
+        // ── Stage: travel_car — on car DETAIL page, repair if needed then drive ──
+        if (pending && pending.stage === 'travel_car' && pending.travelTo) {
+            const locationValue = getLocationValueForCountry(pending.travelTo);
+            if (!locationValue) {
+                addLiveLog(`Kill loop: invalid travel target "${pending.travelTo}" — clearing`);
+                state.pendingKillAction = null;
+                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                gotoPage('kill');
+                return;
+            }
+
+            // Check if car was just repaired successfully
+            const repairSuccess = document.querySelector('.bgm.cg');
+            if (repairSuccess && /repaired your car/i.test(textOf(repairSuccess))) {
+                addLiveLog('Kill loop: car repaired — now driving');
+                // Fall through to drive logic below
+            } else {
+                // Check if car is too damaged to drive
+                const allBglI = [...document.querySelectorAll('.tac.mb .bgl.i')];
+                const driveSection = allBglI.find(el => /too much damage to drive/i.test(textOf(el)));
+                const isDamaged = !!driveSection;
+
+                if (isDamaged) {
+                    // Repair the car first
+                    const repairBtn = document.querySelector('form input[type="submit"][name="repair"]');
+                    if (!repairBtn) {
+                        addLiveLog('Kill loop: car damaged but no repair button — trying next car');
+                        state.pendingKillAction = { ...pending, stage: 'travel' };
+                        await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                        gotoPage('cars');
+                        return;
+                    }
+                    addLiveLog('Kill loop: car too damaged — repairing before travel');
+                    state.lastActionAt = now();
+                    await wait(rand(DEFAULTS.actionDelayMin, DEFAULTS.actionDelayMax));
+                    const freshRepair = document.querySelector('form input[type="submit"][name="repair"]');
+                    if (freshRepair) freshRepair.click();
+                    return; // Page reloads — next tick handles post-repair
+                }
+            }
+
+            // Check if drive is still on cooldown — the form won't be present if so
+            if (!isInternalDriveReady()) {
+                const remaining = Math.ceil(getInternalDriveRemainingMs() / 1000);
+                addLiveLog(`Kill loop: drive not ready yet (${remaining}s) — returning to crimes to wait`);
+                setLastActionText(`Kill loop: drive in ${remaining}s (waiting for ${pending.travelTo})`);
+                // Keep pendingKillAction so we resume travel when drive is ready
+                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                gotoPage('crimes');
+                return;
+            }
+
+            // Drive form should be present — select destination using location radio button
+            // Car detail page uses: input[name="location"][value="X"] and input[name="subm"][value="Go"]
+            const locationRadio = document.querySelector(`form input[type="radio"][name="location"][value="${locationValue}"]`);
+            const goBtn = document.querySelector('form input[type="submit"][name="subm"][value="Go"]');
+
+            if (!locationRadio || !goBtn) {
+                addLiveLog('Kill loop: drive form not found on car detail page — drive may still be on cooldown, returning to crimes');
+                // Don't clear pendingKillAction — retry when drive is ready
+                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                gotoPage('crimes');
+                return;
+            }
+
+            state.lastActionAt = now();
+            await wait(rand(DEFAULTS.actionDelayMin, DEFAULTS.actionDelayMax));
+
+            const freshRadio = document.querySelector(`form input[type="radio"][name="location"][value="${locationValue}"]`);
+            const freshGo    = document.querySelector('form input[type="submit"][name="subm"][value="Go"]');
+            if (!freshRadio || !freshGo) return;
+
+            freshRadio.checked     = true;
+            state.nextDriveReadyAt = now() + 120000;
+            freshGo.click();
+            addLiveLog(`Kill loop: driving to ${pending.travelTo}`);
+            state.pendingKillAction = { stage: 'bgcheck', targetName: pending.targetName, shootAfterBg: pending.shootAfterBg, deferred: pending.deferred }; // travelTo cleared intentionally
+            return;
+        }
+
+        // Must be on kill page for BG check/shoot
+        if (!isKillPage()) {
+            gotoPage('kill');
+            return;
+        }
+
+        // Always process any pending search result first — even during kill loop
+        // This ensures protected/dead players found via search loop get properly handled
+        if (!killSearchResultHandledThisLoad && state.killCurrentSearch) {
+            const cur = state.killCurrentSearch;
+            addLiveLog(`Kill loop: processing pending search result for ${cur}`);
+            if (hasKillProtectedMessage()) {
+                killSearchResultHandledThisLoad = true;
+                updateKillPlayerStatus(cur, KILL_STATUS.PROTECTED);
+                addLiveLog(`Kill scanner: ${cur} is protected`);
+                state.killCurrentSearch = '';
+                renderKillList();
+            } else if (hasKillDeadMessage()) {
+                killSearchResultHandledThisLoad = true;
+                updateKillPlayerStatus(cur, KILL_STATUS.DEAD);
+                state.killCurrentSearch = '';
+                renderKillList();
+            } else if (hasKillSearchStartedMessage()) {
+                killSearchResultHandledThisLoad = true;
+                updateKillPlayerStatus(cur, KILL_STATUS.ALIVE);
+                addLiveLog(`Kill scanner: ${cur} — search started`);
+                state.killCurrentSearch = '';
+                renderKillList();
+            } else {
+                // Check pending section for post-CTC confirmation
+                const nowSearching = [...document.querySelectorAll('.bgl.i.wb .bgm.chs.pd b')]
+                    .some(el => textOf(el).toLowerCase() === cur.toLowerCase());
+                if (nowSearching) {
+                    killSearchResultHandledThisLoad = true;
+                    updateKillPlayerStatus(cur, KILL_STATUS.ALIVE);
+                    addLiveLog(`Kill scanner: ${cur} — search confirmed (post-CTC)`);
+                    state.killCurrentSearch = '';
+                    renderKillList();
+                }
+            }
+        }
+
+        // If penalty was being tracked and has changed, recalculate penaltyDropsAt
+        if (state.penaltyDropsAt === 0 && isKillPenaltyTooHigh() && !state.pendingPenaltyPage) {
+            // Penalty still too high after timer fired — recalculate
+            state.pendingPenaltyPage = true;
+            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            gotoPage('kill-penalty');
+            return;
+        }
+
+        // Startup: on kill page for penalty reading — navigate to penalty page
+        if (state.killPenaltyThreshold > 0 &&
+            !state.penaltyDropsAt && !state.pendingPenaltyPage && isKillPenaltyTooHigh()) {
+            state.pendingPenaltyPage = true;
+            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            gotoPage('kill-penalty');
+            return;
+        }
+
+        // Sync expiry data from kill page
+        syncKillExpiryFromPage();
+
+        // If penalty exceeds threshold and penaltyDropsAt not set, trigger penalty page
+        const livePenalty = getKillPenaltyMultiplier();
+        const cached = Number(getSetting('cachedKillPenalty', 1.0));
+        if (state.killPenaltyThreshold > 0 && !state.pendingPenaltyPage) {
+            const penaltyTooHigh = livePenalty > state.killPenaltyThreshold;
+            const penaltyChanged = Math.abs(livePenalty - cached) >= 0.05;
+            const needsCalc = !state.penaltyDropsAt || penaltyChanged;
+            if (penaltyTooHigh && needsCalc) {
+                const reason = penaltyChanged ? `penalty changed (${cached}x → ${livePenalty}x)` : `penalty ${livePenalty}x exceeds threshold`;
+                addLiveLog(`Kill loop: ${reason} — navigating to penalty page`);
+                state.pendingPenaltyPage = true;
+                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                gotoPage('kill-penalty');
+                return;
+            }
+        }
+
+        // Check for kill penalty threshold
+        // If penalty too high, navigate to penalty page if not yet calculated
+        // BG checks are still allowed — only actual kills are blocked
+        if (isKillPenaltyTooHigh() && !state.penaltyDropsAt && !state.pendingPenaltyPage) {
+            const mult = getKillPenaltyMultiplier();
+            addLiveLog(`Kill loop: penalty ${mult}x exceeds threshold — navigating to penalty page`);
+            state.pendingPenaltyPage = true;
+            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            gotoPage('kill-penalty');
+            return;
+        }
+
+        // Handle result of a previous shoot action
+        if (pending && pending.stage === 'shoot_result') {
+            const target = pending.targetName;
+            // Check page for shoot result messages
+            const failEl    = document.querySelector('.bgm.fail');
+            const successEl  = document.querySelector('.bgm.success, .bgm.cg');
+            // Check ALL .bgm.cred elements — active bodyguards produce multiple cred divs
+            const credEls    = [...document.querySelectorAll('.bgm.cred')];
+            const credEl     = credEls.find(el => /failed to kill/i.test(textOf(el))) || null;
+
+            if (failEl) {
+                const text = textOf(failEl);
+                const bgMatch = text.match(/has a bodyguard called/i);
+                if (bgMatch) {
+                    // Extract bodyguard name from links
+                    const links = [...failEl.querySelectorAll('a[href*="?p=profile&u="]')];
+                    let bgName = '';
+                    if (links.length >= 2) {
+                        try {
+                            const url = new URL(links[1].getAttribute('href'), window.location.href);
+                            bgName = url.searchParams.get('u') || '';
+                        } catch (_) {}
+                    }
+
+                    if (bgName) {
+                        addLiveLog(`Kill loop: ${target} has bodyguard ${bgName}`);
+                        const players = state.killPlayers || [];
+                        const existingIdx = players.findIndex(p => p.name.toLowerCase() === bgName.toLowerCase());
+
+                        if (existingIdx === -1) {
+                            // Not in list — add as unknown, trigger search
+                            players.push({
+                                name:        bgName,
+                                status:      KILL_STATUS.UNKNOWN,
+                                lastChecked: 0,
+                                firstSeen:   now(),
+                                searchCount: 0,
+                                isBg:        true,
+                                bgFor:       target
+                            });
+                            addLiveLog(`Kill loop: added ${bgName} to search list as bodyguard for ${target} — searching immediately`);
+                            // Set lastBgCheck on target so it won't be re-BG checked immediately
+                            const tIdxImm = players.findIndex(p => p.name.toLowerCase() === target.toLowerCase());
+                            if (tIdxImm !== -1) { players[tIdxImm].bodyguard = bgName; players[tIdxImm].lastBgCheck = now(); }
+                            saveKillPlayers(players);
+                            renderKillList();
+                            // Search the bodyguard immediately using the kill page search form
+                            const searchForm = document.querySelector('form input[name="do"][value="search"]');
+                            const searchParent = searchForm ? searchForm.closest('form') : null;
+                            if (searchParent) {
+                                const usernameInput = searchParent.querySelector('input[name="username"]');
+                                const hoursInput    = searchParent.querySelector('input[name="hours"]');
+                                const submitBtn     = searchParent.querySelector('input[type="submit"][value="Search"]');
+                                if (usernameInput && submitBtn) {
+                                    usernameInput.value = bgName;
+                                    if (hoursInput) hoursInput.value = '24';
+                                    state.killCurrentSearch = bgName;
+                                    state.pendingKillAction = null;
+                                    state.lastActionAt = now();
+                                    await wait(rand(DEFAULTS.actionDelayMin, DEFAULTS.actionDelayMax));
+                                    submitBtn.click();
+                                    addLiveLog(`Kill loop: search submitted for bodyguard ${bgName}`);
+                                    return;
+                                }
+                            }
+                            // Fallback: let search loop handle it
+                            state.killSearchLoopActive = true;
+                        } else {
+                            // Already in list — flag as BG and handle based on status
+                            players[existingIdx].isBg  = true;
+                            players[existingIdx].bgFor = target;
+
+                            // Check if bodyguard is actually in Players Found (not just pending search)
+                            const bgInPlayersFound = [...document.querySelectorAll('.bgl.i.wb .bgm.chs:not(.pd) a[href*="?p=profile&u="]')]
+                                .some(a => { try { return new URL(a.getAttribute('href'), window.location.href).searchParams.get('u').toLowerCase() === bgName.toLowerCase(); } catch(_){ return false; } });
+
+                            if (bgInPlayersFound) {
+                                // Already found — immediately queue shoot of bodyguard
+                                addLiveLog(`Kill loop: ${bgName} already found — queuing immediate shoot`);
+                                saveKillPlayers(players);
+                                // Store bodyguard on target
+                                const tIdx = players.findIndex(p => p.name.toLowerCase() === target.toLowerCase());
+                                if (tIdx !== -1) { players[tIdx].bodyguard = bgName; players[tIdx].lastBgCheck = now(); }
+                                saveKillPlayers(players);
+                                renderKillList();
+                                // Trigger BG shoot flow directly
+                                state.pendingKillAction = {
+                                    stage:       'bg_shoot',
+                                    targetName:  bgName,
+                                    bgFor:       target,
+                                    shootAfterBg: isPlayerShootEnabled(target)
+                                };
+                                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                                gotoPage('kill');
+                                return;
+                            } else {
+                                // Still searching (pending) — let search loop find them, then shoot
+                                addLiveLog(`Kill loop: ${bgName} already being searched — will shoot when found`);
+                                state.killSearchLoopActive = true;
+                            }
+                        }
+
+                        // Store bodyguard on target player
+                        const tIdx = players.findIndex(p => p.name.toLowerCase() === target.toLowerCase());
+                        if (tIdx !== -1) { players[tIdx].bodyguard = bgName; players[tIdx].lastBgCheck = now(); }
+                        saveKillPlayers(players);
+                        renderKillList();
+                    }
+                    state.pendingKillAction = null;
+                    // Go directly to kill page so the search loop immediately searches the bodyguard
+                    await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                    gotoPage('kill');
+                    return;
+                }
+
+                if (/that player is dead/i.test(text)) {
+                    addLiveLog(`Kill loop: ${target} is dead — removing from list`);
+                    updateKillPlayerStatus(target, KILL_STATUS.DEAD);
+                    // Clear from deferred list so loop doesn't keep trying them
+                    const deferred2 = pending.deferred || [];
+                    const newDeferred2 = deferred2.filter(n => n !== target.toLowerCase());
+                    state.pendingKillAction = newDeferred2.length ? { stage: 'bgcheck_deferred', deferred: newDeferred2 } : null;
+                    renderKillList();
+                    await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                    gotoPage('kill');
+                    return;
+                }
+
+                if (/is protected from death/i.test(text)) {
+                    addLiveLog(`Kill loop: ${target} is protected`);
+                    updateKillPlayerStatus(target, KILL_STATUS.PROTECTED);
+                    state.pendingKillAction = null;
+                    renderKillList();
+                    await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                    gotoPage('crimes');
+                    return;
+                }
+
+                if (/cannot be killed/i.test(text)) {
+                    addLiveLog(`Kill loop: ${target} cannot be killed`);
+                    updateKillPlayerStatus(target, KILL_STATUS.UNKILLABLE);
+                    state.pendingKillAction = null;
+                    renderKillList();
+                    await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                    gotoPage('crimes');
+                    return;
+                }
+            }
+
+            if (credEl && /failed to kill/i.test(textOf(credEl))) {
+                // No bodyguard — BG check complete
+                const tName = pending.targetName;
+                addLiveLog(`Kill loop: ${tName} has no bodyguard`);
+                // Update lastBgCheck
+                const players = state.killPlayers || [];
+                const idx = players.findIndex(p => p.name.toLowerCase() === tName.toLowerCase());
+                if (idx !== -1) {
+                    players[idx].lastBgCheck = now();
+                    players[idx].bodyguard   = null;
+                    saveKillPlayers(players);
+                }
+
+                // If shoot toggle is on for this player, proceed to shoot
+                if (pending.shootAfterBg) {
+                    addLiveLog(`Kill loop: no BG on ${tName} — fetching profile for bullet calc`);
+                    state.pendingKillAction = { stage: 'fetch_profile', targetName: tName };
+                    // Stay on kill page — profile fetch is async
+                    await doKillShootFlow(tName);
+                    return;
+                }
+
+                state.pendingKillAction = null;
+                // Check if there are more actionable targets before going to kill page
+                // If none, exit loop directly to avoid an unnecessary kill page trip
+                const morePlayers = getKillPlayers().filter(p => {
+                    if (p.status !== KILL_STATUS.ALIVE && p.status !== KILL_STATUS.UNKNOWN) return false;
+                    if (isPlayerBgCheckEnabled(p.name) && getBgCheckDueMs(p) <= 0) return true;
+                    if (!isPlayerShootEnabled(p.name)) return false;
+                    if (p.requiredBullets && getPlayerBullets() < p.requiredBullets) return false;
+                    if (isPlayerBgCheckEnabled(p.name) && getBgCheckDueMs(p) > 0) return true;
+                    if (!isPlayerBgCheckEnabled(p.name)) return true;
+                    return false;
+                });
+                if (!morePlayers.length) {
+                    addLiveLog('Kill loop: no more targets — reverting to normal script');
+                    state.killLoopActive = false;
+                }
+                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                gotoPage(morePlayers.length ? 'kill' : 'crimes');
+                return;
+            }
+
+            if (successEl && /you killed/i.test(textOf(successEl))) {
+                addLiveLog(`Kill loop: ${target} killed successfully!`);
+                updateStats(s => { s.lastActionText = `Killed ${target}`; });
+                // Clear stored bullet requirement — no longer needed
+                const plsK = state.killPlayers || [];
+                const pIdxK = plsK.findIndex(p => p.name.toLowerCase() === target.toLowerCase());
+                if (pIdxK !== -1) { delete plsK[pIdxK].requiredBullets; saveKillPlayers(plsK); }
+
+                // Check if this was a bodyguard kill — if so, BG check the original target next
+                const players = state.killPlayers || [];
+                const tIdx = players.findIndex(p => p.name.toLowerCase() === target.toLowerCase());
+                const wasBg = tIdx !== -1 && players[tIdx].isBg;
+                const bgFor = wasBg ? players[tIdx].bgFor : null;
+
+                // Clear bgShootQueued flag — player is dead
+                const plsDead = state.killPlayers || [];
+                const deadIdx = plsDead.findIndex(p => p.name.toLowerCase() === target.toLowerCase());
+                if (deadIdx !== -1 && plsDead[deadIdx].bgShootQueued) { delete plsDead[deadIdx].bgShootQueued; saveKillPlayers(plsDead); }
+                updateKillPlayerStatus(target, KILL_STATUS.DEAD);
+                renderKillList();
+
+                if (wasBg && bgFor && isPlayerShootEnabled(bgFor)) {
+                    // Was a bodyguard kill — re-BG check the original target
+                    addLiveLog(`Kill loop: ${target} was BG for ${bgFor} — re-BG checking ${bgFor}`);
+                    // Clear bodyguard from original target
+                    const bgForIdx = (state.killPlayers || []).findIndex(p => p.name.toLowerCase() === bgFor.toLowerCase());
+                    if (bgForIdx !== -1) {
+                        const pl = state.killPlayers || [];
+                        pl[bgForIdx].bodyguard = null;
+                        saveKillPlayers(pl);
+                    }
+                    state.pendingKillAction = {
+                        stage:       'shoot_result',
+                        targetName:  bgFor,
+                        shootAfterBg: true,
+                        recheck:     true  // signal this is a re-BG-check after killing bodyguard
+                    };
+                    await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                    gotoPage('kill');
+                    return;
+                }
+
+                // Continue kill loop — go back to kill page to process next player
+                state.pendingKillAction = null;
+                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                gotoPage('kill');
+                return;
+            }
+
+            // Unknown result — check if this is actually a bodyguard search confirmation
+            // (page reloaded after submitting search form for bodyguard)
+            const pendingRows = [...document.querySelectorAll('.bgl.i.wb .bgm.chs.pd b')];
+            const bgSearchConfirmed = pendingRows.some(b => {
+                const name = textOf(b).trim();
+                const players2 = state.killPlayers || [];
+                const p = players2.find(pl => pl.name.toLowerCase() === name.toLowerCase());
+                return p && p.isBg && p.bgFor && p.bgFor.toLowerCase() === target.toLowerCase();
+            });
+
+            if (bgSearchConfirmed) {
+                addLiveLog(`Kill loop: bodyguard search confirmed for ${target} — continuing`);
+                state.pendingKillAction = null;
+                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                gotoPage('kill');
+                return;
+            }
+
+            // Genuinely unknown result — clear and move on
+            addLiveLog(`Kill loop: unknown shoot result for ${target} — clearing`);
+            state.pendingKillAction = null;
+            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            gotoPage('crimes');
+            return;
+        }
+
+        // ── Stage: bgcheck_deferred — some players moved, re-evaluate on kill page ──
+        if (pending && pending.stage === 'bgcheck_deferred') {
+            // Just clear the stage marker — the main BG check logic below will re-evaluate
+            // using the deferred list stored in pending
+            if (!isKillPage()) {
+                gotoPage('kill');
+                return;
+            }
+            // Fall through to main BG check logic — pending is kept with deferred list
+        }
+
+        // ── Stage: bg_shoot — shoot a known bodyguard (already found, no BG check needed) ──
+        if (pending && pending.stage === 'bg_shoot') {
+            const bgName = pending.targetName;
+            const bgFor  = pending.bgFor;
+
+            // If penalty too high, skip the bodyguard shoot — BG check only, no kills
+            if (isKillPenaltyTooHigh()) {
+                addLiveLog(`Kill loop: penalty too high — skipping bodyguard shoot for ${bgName}`);
+                state.pendingKillAction = null;
+                // Clear bgShootQueued so it can be re-queued when penalty drops
+                const plsBg = state.killPlayers || [];
+                const bgIdx = plsBg.findIndex(p => p.name.toLowerCase() === bgName.toLowerCase());
+                if (bgIdx !== -1) { delete plsBg[bgIdx].bgShootQueued; saveKillPlayers(plsBg); }
+                // Don't navigate — let loop continue to next BG-due player
+                return;
+            }
+
+            // Find bodyguard's country from Players Found
+            const foundRows2 = [...document.querySelectorAll('.bgl.i.wb .bgm.chs:not(.pd)')];
+            let bgCountry = null;
+            for (const row of foundRows2) {
+                const link = row.querySelector('a[href*="?p=profile&u="]');
+                if (!link) continue;
+                try {
+                    const url  = new URL(link.getAttribute('href'), window.location.href);
+                    const name = url.searchParams.get('u') || '';
+                    if (name.toLowerCase() === bgName.toLowerCase()) {
+                        const rowText = textOf(row);
+                        const cm = rowText.match(/in\s+([A-Za-z\s]+?)Lost in/i);
+                        if (cm) bgCountry = cm[1].trim();
+                        break;
+                    }
+                } catch (_) {}
+            }
+
+            if (!bgCountry) {
+                addLiveLog(`Kill loop: bodyguard ${bgName} not in Players Found — waiting for search`);
+                state.pendingKillAction = null;
+                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                gotoPage('crimes');
+                return;
+            }
+
+            const myLoc = getPlayerLocation();
+            const needsBgTravel = myLoc && bgCountry && myLoc.toLowerCase() !== bgCountry.toLowerCase();
+
+            if (needsBgTravel && !isInternalDriveReady()) {
+                const remaining = Math.ceil(getInternalDriveRemainingMs() / 1000);
+                addLiveLog(`Kill loop: drive not ready (${remaining}s) — waiting to travel to bodyguard ${bgName}`);
+                setLastActionText(`Kill loop: waiting for drive to shoot BG ${bgName}`);
+                // Don't lock into travel stage — clear pending and let the main BG check
+                // logic continue processing other due players in the current country
+                state.pendingKillAction = null;
+                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                gotoPage('kill');
+                return;
+            }
+
+            if (needsBgTravel) {
+                addLiveLog(`Kill loop: travelling to ${bgCountry} to shoot bodyguard ${bgName}`);
+                state.pendingKillAction = { stage: 'travel', travelTo: bgCountry, targetName: bgName,
+                    afterTravel: { stage: 'bg_shoot', targetName: bgName, bgFor, shootAfterBg: pending.shootAfterBg } };
+                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                gotoPage('cars');
+                return;
+            }
+
+            // In same country — calculate combined cost before shooting bodyguard
+            // Fetch target profile to get bullets needed AFTER killing BG (penalty +0.1x)
+            if (pending.shootAfterBg && isPlayerShootEnabled(bgFor)) {
+                addLiveLog(`Kill loop: calculating combined cost for ${bgFor} + bodyguard ${bgName}`);
+                const targetProfile = await fetchPlayerProfile(bgFor);
+                const bgProfile     = await fetchPlayerProfile(bgName);
+                if (targetProfile && bgProfile) {
+                    const currentMult  = getKillPenaltyMultiplier();
+                    const postKillMult = currentMult + 0.1; // penalty after killing BG
+                    const bgBullets    = await fetchBulletCount(bgProfile.rankIndex, bgProfile.prestige);
+                    // Calculate target bullets at elevated penalty by adjusting fetched value
+                    // fetchBulletCount already uses live penalty — we simulate +0.1x manually
+                    const targetBulletsBase = await fetchBulletCount(targetProfile.rankIndex, targetProfile.prestige);
+                    // Re-scale: targetBulletsBase uses currentMult, we need postKillMult
+                    const targetBullets = Math.ceil(targetBulletsBase * (postKillMult / currentMult));
+                    const totalNeeded  = (bgBullets || 0) + (targetBullets || 0);
+                    const available    = getPlayerBullets();
+                    addLiveLog(`Kill loop: need ${totalNeeded} bullets total (BG: ${bgBullets}, target at ${postKillMult.toFixed(1)}x: ${targetBullets}) — have ${available}`);
+                    // Store required bullets on both players for ordering
+                    const pls3 = state.killPlayers || [];
+                    const tIdx3 = pls3.findIndex(p => p.name.toLowerCase() === bgFor.toLowerCase());
+                    const bIdx3 = pls3.findIndex(p => p.name.toLowerCase() === bgName.toLowerCase());
+                    if (tIdx3 !== -1) { pls3[tIdx3].requiredBullets = targetBullets; }
+                    if (bIdx3 !== -1) { pls3[bIdx3].requiredBullets = bgBullets; }
+                    if (tIdx3 !== -1 || bIdx3 !== -1) saveKillPlayers(pls3);
+                    if (available < totalNeeded) {
+                        addLiveLog(`Kill loop: insufficient bullets for ${bgFor} + ${bgName} — skipping`);
+                        state.pendingKillAction = null;
+                        // Clear bgShootQueued so it re-queues when bullets sufficient
+                        if (bIdx3 !== -1) { delete pls3[bIdx3].bgShootQueued; saveKillPlayers(pls3); }
+                        // Don't navigate — let loop continue to next player
+                        return;
+                    }
+                    // Check penalty won't exceed threshold after killing BG
+                    if (state.killPenaltyThreshold > 0 && postKillMult > state.killPenaltyThreshold) {
+                        addLiveLog(`Kill loop: killing ${bgName} would push penalty to ${postKillMult.toFixed(1)}x — skipping`);
+                        state.pendingKillAction = null;
+                        if (bIdx3 !== -1) { delete pls3[bIdx3].bgShootQueued; saveKillPlayers(pls3); }
+                        return;
+                    }
+                }
+            }
+            // Sufficient bullets — shoot the bodyguard
+            addLiveLog(`Kill loop: shooting bodyguard ${bgName}`);
+            await doKillShootFlow(bgName, bgFor);
+            return;
+        }
+
+        // ── Grouped BG check logic ───────────────────────────────────────────────
+        // 1. Build map of due players by country from Players Found list
+        // 2. Process current country first, then countries by most players
+        // 3. If a player moved (not in dropdown), defer them — circle back after all others
+        const players      = getKillPlayers();
+        const myLocation   = getPlayerLocation();
+
+        // Get deferred players from state (moved country, needs retry)
+        const deferred = state.pendingKillAction && state.pendingKillAction.stage === 'bgcheck_deferred'
+            ? (state.pendingKillAction.deferred || [])
+            : [];
+
+        // Build country → due players map from Players Found + stored country data
+        const foundRows = [...document.querySelectorAll('.bgl.i.wb .bgm.chs:not(.pd)')];
+        const foundMap  = new Map(); // name.lower() → country
+        for (const row of foundRows) {
+            const link = row.querySelector('a[href*="?p=profile&u="]');
+            if (!link) continue;
+            try {
+                const url  = new URL(link.getAttribute('href'), window.location.href);
+                const name = url.searchParams.get('u') || '';
+                if (!name) continue;
+                const rowText = textOf(row);
+                const cm = rowText.match(/in\s+([A-Za-z\s]+?)Lost in/i);
+                if (cm) foundMap.set(name.toLowerCase(), cm[1].trim());
+            } catch (_) {}
+        }
+
+        // All due BG check players (including deferred)
+        const duePlayers = players.filter(p => {
+            if (p.status !== KILL_STATUS.ALIVE) return false;
+            if (!isPlayerBgCheckEnabled(p.name)) return false;
+            if (deferred.includes(p.name.toLowerCase())) return true; // deferred always retry
+            return getBgCheckDueMs(p) <= 0;
+        });
+
+        // Kill-only players: shoot directly without BG check. Two cases:
+        // 1. Kill ticked, BG not ticked — always shoot directly
+        // 2. Kill ticked, BG ticked but interval not yet due — BG already checked recently, shoot directly
+        // Skip players whose profile fetch failed recently (30s cooldown)
+        // Skip players where we know required bullets and don't have enough yet
+        const KILL_ATTEMPT_COOLDOWN_MS = 30 * 1000;
+        const currentBullets = getPlayerBullets();
+        const killOnlyPlayers = players.filter(p => {
+            if (p.status !== KILL_STATUS.ALIVE) return false;
+            if (!isPlayerShootEnabled(p.name)) return false;
+            if (p.lastKillAttempt && (now() - p.lastKillAttempt) < KILL_ATTEMPT_COOLDOWN_MS) return false;
+            // Skip if we know required bullets and don't have enough yet
+            if (p.requiredBullets && currentBullets < p.requiredBullets) return false;
+            // If BG ticked and interval is due — handle via BG check path, not here
+            if (isPlayerBgCheckEnabled(p.name) && getBgCheckDueMs(p) <= 0) return false;
+            // Must be in Players Found right now — skip if dead, pending, or not found
+            if (!foundMap.has(p.name.toLowerCase())) return false;
+            // Skip all kill-only players when penalty too high
+            if (isKillPenaltyTooHigh()) return false;
+            return true;
+        });
+
+        // Sync country data from Players Found so foundMap is always fresh
+        syncKillExpiryFromPage();
+
+        // Helper: get country from live Players Found only — no stale p.country fallback
+        // If a player isn't in Players Found right now (dead, not yet found, moved),
+        // they return empty string and are skipped entirely
+        const getPlayerCountry = (p) => foundMap.get(p.name.toLowerCase()) || '';
+
+        // ── Kill-only: Kill ticked, BG not ticked — shoot directly ──────────
+        // Sort by requiredBullets ascending — unknowns (no stored value) go last
+        killOnlyPlayers.sort((a, b) => {
+            const aCost = a.requiredBullets || Infinity;
+            const bCost = b.requiredBullets || Infinity;
+            return aCost - bCost;
+        });
+        // Check current country first
+        for (const p of killOnlyPlayers) {
+            const pCountry = getPlayerCountry(p);
+            if (!pCountry) continue;
+            if (myLocation && pCountry.toLowerCase() === myLocation.toLowerCase()) {
+                addLiveLog(`Kill loop: kill-only — shooting ${p.name} in ${pCountry}`);
+                await doKillShootFlow(p.name);
+                return;
+            }
+        }
+        // Kill-only players in other countries — travel to best country
+        if (killOnlyPlayers.length) {
+            const killByCountry = new Map();
+            for (const p of killOnlyPlayers) {
+                const pCountry = getPlayerCountry(p);
+                if (!pCountry) continue;
+                if (!killByCountry.has(pCountry)) killByCountry.set(pCountry, []);
+                killByCountry.get(pCountry).push(p);
+            }
+            if (killByCountry.size) {
+                const bestCountry = [...killByCountry.keys()].sort((a, b) =>
+                    killByCountry.get(b).length - killByCountry.get(a).length)[0];
+                const tgt = killByCountry.get(bestCountry)[0];
+                if (!isInternalDriveReady()) {
+                    const rem = Math.ceil(getInternalDriveRemainingMs() / 1000);
+                    addLiveLog(`Kill loop: drive not ready (${rem}s) — waiting to travel for ${tgt.name}`);
+                    // Set travel stage so tick intercept knows to wait rather than bounce to kill page
+                    state.pendingKillAction = { stage: 'travel', travelTo: bestCountry, targetName: tgt.name, shootAfterBg: false, killOnly: true };
+                    await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                    // Stay on crimes — tick intercept will wait until drive is ready
+                    return;
+                }
+                addLiveLog(`Kill loop: travelling to ${bestCountry} for kill-only player ${tgt.name}`);
+                state.pendingKillAction = { stage: 'travel', travelTo: bestCountry, targetName: tgt.name, shootAfterBg: false, killOnly: true };
+                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                gotoPage('cars');
+                return;
+            }
+            // Kill-only players not in Players Found — exit loop, reactivate when found
+            addLiveLog('Kill loop: kill-only players not yet in Players Found — reverting to normal script');
+            state.killLoopActive    = false;
+            state.pendingKillAction = null;
+            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            gotoPage('crimes');
+            return;
+        }
+
+        // ── BG check targets ─────────────────────────────────────────────────
+        if (!duePlayers.length) {
+            addLiveLog('Kill loop: no actionable targets — reverting to normal script');
+            state.killLoopActive    = false;
+            state.pendingKillAction = null;
+            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            gotoPage('crimes');
+            return;
+        }
+
+        // Sort duePlayers by requiredBullets ascending — unknowns last
+        duePlayers.sort((a, b) => {
+            const aCost = a.requiredBullets || Infinity;
+            const bCost = b.requiredBullets || Infinity;
+            return aCost - bCost;
+        });
+
+        // Group due players by country
+        const byCountry = new Map(); // country → [players]
+        for (const p of duePlayers) {
+            const country = getPlayerCountry(p);
+            if (!country) continue; // not found yet — skip
+            if (!byCountry.has(country)) byCountry.set(country, []);
+            byCountry.get(country).push(p);
+        }
+
+        if (!byCountry.size) {
+            addLiveLog('Kill loop: due BG players not yet in Players Found — reverting to normal script');
+            state.killLoopActive    = false;
+            state.pendingKillAction = null;
+            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            gotoPage('crimes');
+            return;
+        }
+
+        // Sort countries: current location first, then by most players
+        const sortedCountries = [...byCountry.keys()].sort((a, b) => {
+            const aIsCurrent = myLocation && a.toLowerCase() === myLocation.toLowerCase();
+            const bIsCurrent = myLocation && b.toLowerCase() === myLocation.toLowerCase();
+            if (aIsCurrent && !bIsCurrent) return -1;
+            if (bIsCurrent && !aIsCurrent) return 1;
+            return byCountry.get(b).length - byCountry.get(a).length;
+        });
+
+        // Pick first player in current country, or travel to best country
+        let bgTarget     = null;
+        let targetCountry = null;
+
+        for (const country of sortedCountries) {
+            const inThisCountry = byCountry.get(country);
+            if (myLocation && country.toLowerCase() === myLocation.toLowerCase()) {
+                // Already here — pick first player
+                bgTarget      = inThisCountry[0];
+                targetCountry = country;
+                break;
+            } else if (!bgTarget) {
+                // Best country to travel to
+                bgTarget      = inThisCountry[0];
+                targetCountry = country;
+            }
+        }
+
+        if (!bgTarget) {
+            addLiveLog('Kill loop: could not select BG check target');
+            state.pendingKillAction = null;
+            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            gotoPage('crimes');
+            return;
+        }
+
+        // Check if we need to travel
+        const needsTravel = myLocation && targetCountry &&
+            myLocation.toLowerCase() !== targetCountry.toLowerCase();
+
+        if (needsTravel && !isInternalDriveReady()) {
+            const remaining = Math.ceil(getInternalDriveRemainingMs() / 1000);
+            addLiveLog(`Kill loop: drive not ready (${remaining}s) — waiting before travelling to ${targetCountry}`);
+            setLastActionText(`Kill loop: waiting for drive (${remaining}s)`);
+            // Set travel stage so tick intercept waits rather than bouncing to kill page
+            state.pendingKillAction = { stage: 'travel', travelTo: targetCountry, targetName: bgTarget.name,
+                shootAfterBg: isPlayerShootEnabled(bgTarget.name), deferred };
+            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            return;
+        }
+
+        if (needsTravel) {
+            addLiveLog(`Kill loop: travelling to ${targetCountry} (${byCountry.get(targetCountry).length} player(s) to check)`);
+            state.pendingKillAction = { stage: 'travel', travelTo: targetCountry, targetName: bgTarget.name,
+                shootAfterBg: isPlayerShootEnabled(bgTarget.name), deferred };
+            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            gotoPage('cars');
+            return;
+        }
+
+        // In correct country — check if player is in shoot dropdown
+        const shootSelect = document.querySelector('form input[name="do"][value="kill"] ~ * select[name="username"], form select[name="username"]');
+        if (shootSelect) {
+            const options    = [...shootSelect.options];
+            const inDropdown = options.some(o => o.value.toLowerCase() === bgTarget.name.toLowerCase());
+            if (!inDropdown) {
+                // Player moved — defer them and continue with next player
+                addLiveLog(`Kill loop: ${bgTarget.name} moved country — deferring`);
+                const newDeferred = [...new Set([...deferred, bgTarget.name.toLowerCase()])];
+                // Remove from byCountry and try next player in same country
+                const remaining2 = (byCountry.get(targetCountry) || []).filter(p => p.name.toLowerCase() !== bgTarget.name.toLowerCase());
+                if (remaining2.length) {
+                    // Try next player in same country immediately
+                    state.pendingKillAction = { stage: 'bgcheck_deferred', deferred: newDeferred };
+                } else {
+                    state.pendingKillAction = { stage: 'bgcheck_deferred', deferred: newDeferred };
+                }
+                await wait(rand(DEFAULTS.actionDelayMin, DEFAULTS.actionDelayMax));
+                // Stay on kill page, re-evaluate next tick
+                return;
+            }
+        }
+
+        // Check bullet count — need at least 1 for BG check
+        const bullets = getPlayerBullets();
+        if (bullets < 1) {
+            addLiveLog('Kill loop: no bullets available — pausing');
+            state.killLoopActive = false;
+            setLastActionText('Kill loop paused — no bullets');
+            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            gotoPage('crimes');
+            return;
+        }
+
+        // Shoot 1 bullet for BG check
+        addLiveLog(`Kill loop: BG checking ${bgTarget.name} (shooting 1 bullet)`);
+        // Clear deferred list once we successfully shoot — fresh start next evaluation
+        const remainingDeferred = deferred.filter(n => n !== bgTarget.name.toLowerCase());
+        state.pendingKillAction = { stage: 'shoot_result', targetName: bgTarget.name,
+            shootAfterBg: isPlayerShootEnabled(bgTarget.name),
+            deferred: remainingDeferred };
+        state.lastActionAt      = now();
+        await wait(rand(DEFAULTS.actionDelayMin, DEFAULTS.actionDelayMax));
+
+        // Use the shoot form directly
+        const killForm = [...document.querySelectorAll('form')].find(f => f.querySelector('input[name="do"][value="kill"]'));
+        if (killForm) {
+            const usernameSelect = killForm.querySelector('select[name="username"]');
+            const bulletsInput   = killForm.querySelector('input[name="bullets"]');
+            const showCheckbox   = killForm.querySelector('input[name="show"]');
+            const submitBtn      = killForm.querySelector('input[type="submit"][value="Shoot"]');
+
+            if (usernameSelect && bulletsInput && submitBtn) {
+                usernameSelect.value = bgTarget.name;
+                bulletsInput.value   = '1';
+                if (showCheckbox) showCheckbox.checked = !state.killAnonymousShooting;
+                submitBtn.click();
+                addLiveLog(`Kill loop: BG check shot fired at ${bgTarget.name}`);
+                return;
+            }
+        }
+
+        addLiveLog('Kill loop: shoot form not found — retrying next tick');
+        state.pendingKillAction = null;
+    }
+
+    // Handles the full shoot flow — shoots targetName, then BG checks bgFor if set
+    async function doKillShootFlow(targetName, bgFor = null) {
+        // Block all kills when penalty too high — only BG check shots (1 bullet) are allowed
+        if (isKillPenaltyTooHigh()) {
+            addLiveLog(`Kill loop: penalty too high — skipping kill of ${targetName}`);
+            state.pendingKillAction = null;
+            // Don't navigate away — let handleKillLoopPage continue to next BG-due player
+            return;
+        }
+
+        // Fetch profile for rank/prestige
+        const profile = await fetchPlayerProfile(targetName);
+        if (!profile) {
+            addLiveLog(`Kill loop: could not fetch profile for ${targetName} — retrying in 30s`);
+            // Mark player with a temporary cooldown so the loop doesn't retry immediately
+            const pls = state.killPlayers || [];
+            const pIdx = pls.findIndex(p => p.name.toLowerCase() === targetName.toLowerCase());
+            if (pIdx !== -1) {
+                pls[pIdx].lastKillAttempt = now();
+                saveKillPlayers(pls);
+            }
+            state.pendingKillAction = null;
+            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            gotoPage('crimes');
+            return;
+        }
+
+        addLiveLog(`Kill loop: ${targetName} is rank index ${profile.rankIndex}, prestige ${profile.prestige}`);
+
+        // Fetch bullet count from calculator
+        const bulletCount = await fetchBulletCount(profile.rankIndex, profile.prestige);
+        if (!bulletCount) {
+            addLiveLog(`Kill loop: could not calculate bullets for ${targetName} — skipping`);
+            state.pendingKillAction = null;
+            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            gotoPage('crimes');
+            return;
+        }
+
+        // Bullet calculator already includes kill penalty — use result directly
+        const requiredBullets = bulletCount;
+        addLiveLog(`Kill loop: ${targetName} requires ${requiredBullets} bullets`);
+
+        // Store required bullets on player so we can skip them until we have enough
+        const pls2 = state.killPlayers || [];
+        const pIdx2 = pls2.findIndex(p => p.name.toLowerCase() === targetName.toLowerCase());
+        if (pIdx2 !== -1) {
+            pls2[pIdx2].requiredBullets = requiredBullets;
+            saveKillPlayers(pls2);
+        }
+
+        // Check available bullets — if not enough, skip this player and try next
+        const available = getPlayerBullets();
+        if (available < requiredBullets) {
+            addLiveLog(`Kill loop: insufficient bullets (${available}/${requiredBullets}) for ${targetName} — waiting for more bullets`);
+            setLastActionText(`Kill loop: need ${requiredBullets} bullets for ${targetName}, have ${available}`);
+            // Clear bgShootQueued so it re-queues when bullets are sufficient
+            const plsBQ = state.killPlayers || [];
+            const bqIdx = plsBQ.findIndex(p => p.name.toLowerCase() === targetName.toLowerCase());
+            if (bqIdx !== -1 && plsBQ[bqIdx].bgShootQueued) { delete plsBQ[bqIdx].bgShootQueued; saveKillPlayers(plsBQ); }
+            state.pendingKillAction = null;
+            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            gotoPage('kill'); // Continue loop — check other players
+            return;
+        }
+
+        // Shoot with correct bullet count
+        addLiveLog(`Kill loop: shooting ${targetName} with ${requiredBullets} bullets`);
+        state.pendingKillAction = { stage: 'shoot_result', targetName, isKillShot: true, bgFor };
+        state.lastActionAt      = now();
+        await wait(rand(DEFAULTS.actionDelayMin, DEFAULTS.actionDelayMax));
+
+        const killForm = [...document.querySelectorAll('form')].find(f => f.querySelector('input[name="do"][value="kill"]'));
+        if (killForm) {
+            const usernameSelect = killForm.querySelector('select[name="username"]');
+            const bulletsInput   = killForm.querySelector('input[name="bullets"]');
+            const showCheckbox   = killForm.querySelector('input[name="show"]');
+            const submitBtn      = killForm.querySelector('input[type="submit"][value="Shoot"]');
+
+            if (usernameSelect && bulletsInput && submitBtn) {
+                usernameSelect.value = targetName;
+                bulletsInput.value   = String(requiredBullets);
+                if (showCheckbox) showCheckbox.checked = !state.killAnonymousShooting;
+                submitBtn.click();
+                addLiveLog(`Kill loop: kill shot fired at ${targetName} (${requiredBullets} bullets)`);
+                return;
+            }
+        }
+
+        addLiveLog('Kill loop: shoot form not found for kill shot — retrying');
+        state.pendingKillAction = null;
+    }
+
     async function handleCarsPage() {
         stopJailObserver();
 
@@ -4462,6 +6297,13 @@
                 gotoCleanMeltPage(1);
                 return;
             }
+            // If we came from kill loop travel, return to kill page
+            if (state.killLoopActive) {
+                addLiveLog('Repair done — resuming kill loop');
+                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                gotoPage('kill');
+                return;
+            }
             await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
             gotoPage('crimes');
             return;
@@ -4481,13 +6323,116 @@
     async function tick() {
         if (!state.enabled || loopBusy || reloadPending) return;
 
+        // ── Kill penalty page — handle immediately, skip all other tick logic ──
+        // Prevents any other navigation (search loop, online scanner etc.) from
+        // navigating away before the penalty page is parsed.
+        if (isKillPenaltyPage() && state.killPenaltyThreshold > 0) {
+            loopBusy = true;
+            try {
+                updatePanel();
+                state.pendingPenaltyPage = false;
+                state.penaltyDropsAt = calcPenaltyDropsAt();
+                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                gotoPage('crimes');
+            } finally { loopBusy = false; }
+            return;
+        }
+
         // ── Dedicated loop intercepts ─────────────────────────────────────────
         // When a reset loop is active the bot ignores all other page logic and
         // routes exclusively to the relevant page. Jail handling is still active
         // so the bot can leave jail and return to the loop immediately.
 
+        // Kill loop — BG check and shoot mode, runs alongside or instead of kill search
+        if (state.killLoopActive) {
+            if (isLikelyJailPage()) {
+                loopBusy = true;
+                try { updatePanel(); await handleJailState(); } finally { loopBusy = false; }
+                return;
+            }
+            if (hasCTCChallenge()) {
+                loopBusy = true;
+                try { updatePanel(); setLastActionText('CTC solving…'); await maybeSolveCTC(); } finally { loopBusy = false; }
+                return;
+            }
+            // If drive isn't ready and we need to travel, let normal script run until it is
+            const kpa = state.pendingKillAction;
+            const needsDrive = kpa && (kpa.stage === 'travel' || kpa.stage === 'travel_car');
+            if (needsDrive && !isInternalDriveReady()) {
+                // Let normal script handle this tick — don't bounce to kill page
+                const remSec = Math.ceil(getInternalDriveRemainingMs() / 1000);
+                setLastActionText(`Kill loop: waiting for drive (${remSec}s)`);
+                // Fall through to normal script handling below
+            } else {
+            // Handle travel stages
+            const kpending = state.pendingKillAction;
+            if (kpending && kpending.stage === 'travel') {
+                // Need cars LIST page to find best car
+                if (isCarsPage() || hasCarsPageMarkers()) {
+                    loopBusy = true;
+                    try { updatePanel(); await handleKillLoopPage(); } finally { loopBusy = false; }
+                    return;
+                }
+                addLiveLog('Kill loop: navigating to cars page to find travel car');
+                gotoPage('cars');
+                return;
+            }
+            if (kpending && kpending.stage === 'travel_car') {
+                // Need car DETAIL page — check if we're on it
+                if (isCarPage()) {
+                    loopBusy = true;
+                    try { updatePanel(); await handleKillLoopPage(); } finally { loopBusy = false; }
+                    return;
+                }
+                // Navigate to the specific car URL we stored
+                if (kpending.travelCarUrl) {
+                    addLiveLog('Kill loop: navigating to travel car detail page');
+                    window.location.href = kpending.travelCarUrl;
+                    return;
+                }
+                // No stored URL — fall back to cars list to re-select
+                state.pendingKillAction = { ...kpending, stage: 'travel' };
+                gotoPage('cars');
+                return;
+            }
+            // If we're on any car page while kill loop is active (e.g. post-drive reload),
+            // navigate to kill page rather than letting handleCarPage intercept
+            if (isCarPage() || isCarsPage()) {
+                gotoPage('kill');
+                return;
+            }
+            if (!isKillPage() && !isKillPenaltyPage()) {
+                addLiveLog('Kill loop: navigating to kill page');
+                gotoPage('kill');
+                return;
+            }
+            loopBusy = true;
+            try { updatePanel(); await handleKillLoopPage(); } finally { loopBusy = false; }
+            return;
+            } // end drive-ready else block
+        }
+
+        // Kill search mode — only runs when kill loop is not mid-chain
+        // Kill loop takes priority: if there is a pending kill action in progress,
+        // reactivate the kill loop rather than letting the search loop interrupt.
+        if (!state.killLoopActive && state.pendingKillAction && state.killBgCheckEnabled) {
+            const pa = state.pendingKillAction;
+            if (pa.stage && pa.stage !== 'bgcheck') {
+                // Mid-chain — reactivate kill loop
+                // BG check chains always allowed; kill-only blocked later in doKillShootFlow
+                if (!isKillPenaltyTooHigh() || pa.stage === 'bg_shoot' || pa.stage === 'travel') {
+                    state.killLoopActive = true;
+                }
+            }
+        }
+
         // Kill search mode — dedicated loop, searches players one by one
-        if (state.killSearchLoopActive) {
+        // Also runs if kill loop is active but waiting for drive (needsDrive && !driveReady)
+        const killLoopWaitingForDrive = state.killLoopActive &&
+            state.pendingKillAction &&
+            (state.pendingKillAction.stage === 'travel' || state.pendingKillAction.stage === 'travel_car') &&
+            !isInternalDriveReady();
+        if (state.killSearchLoopActive && (!state.killLoopActive || killLoopWaitingForDrive)) {
             if (isLikelyJailPage()) {
                 loopBusy = true;
                 try { updatePanel(); await handleJailState(); } finally { loopBusy = false; }
@@ -4499,14 +6444,20 @@
                 return;
             }
             // Navigate to kill page if not already there
+            // If on crimes page or penalty page, let normal script handle this tick
             if (!isKillPage()) {
-                addLiveLog('Kill search: navigating to kill page');
-                gotoPage('kill');
+                if (isCrimesPage() || hasCrimePageMarkers() || isKillPenaltyPage()) {
+                    // Let normal script handle this tick, search loop will navigate next tick
+                } else {
+                    addLiveLog('Kill search: navigating to kill page');
+                    gotoPage('kill');
+                    return;
+                }
+            } else {
+                loopBusy = true;
+                try { updatePanel(); await handleKillPage(); } finally { loopBusy = false; }
                 return;
             }
-            loopBusy = true;
-            try { updatePanel(); await handleKillPage(); } finally { loopBusy = false; }
-            return;
         }
 
         // Bust mode — always route to jail page, bust continuously
@@ -4690,11 +6641,46 @@
             // Players Online scan — fires opportunistically during normal script.
             // Only runs when no dedicated loop is active and scan is due.
             if (isKillOnlineScanDue() && !state.bustLoopActive && !state.gtaResetLoopActive &&
-                !state.meltResetLoopActive && !state.resetCrimesEnabled) {
+                !state.meltResetLoopActive && !state.resetCrimesEnabled && !isKillPenaltyPage()) {
                 addLiveLog('Kill scanner: online scan due — navigating to Players Online');
                 gotoPage('online');
                 return;
             }
+
+            // Penalty drop timer — navigate to kill page when penalty should have dropped
+            if (state.penaltyDropsAt && now() >= state.penaltyDropsAt &&
+                !state.killLoopActive && !state.bustLoopActive && !isKillPage() && !isKillPenaltyPage()) {
+                addLiveLog('Kill loop: penalty drop timer elapsed — checking kill page');
+                state.penaltyDropsAt = 0;
+                gotoPage('kill');
+                return;
+            }
+
+            // Bodyguard expected found — navigate to kill page when timer elapses
+            if (state.killBgCheckEnabled && !state.killLoopActive && !state.bustLoopActive &&
+                !state.gtaResetLoopActive && !state.meltResetLoopActive && !isKillPage()) {
+                const playerReady = getKillPlayers().some(p =>
+                    p.expectedFoundAt && now() >= p.expectedFoundAt
+                );
+                if (playerReady) {
+                    // Clear expectedFoundAt — visit kill page once
+                    // syncKillExpiryFromPage will handle reactivation if player is in Players Found
+                    const pls = state.killPlayers || [];
+                    pls.forEach(p => {
+                        if (p.expectedFoundAt && now() >= p.expectedFoundAt) {
+                            delete p.expectedFoundAt;
+                        }
+                    });
+                    saveKillPlayers(pls);
+                    if (!isKillPenaltyTooHigh()) {
+                        addLiveLog('Kill loop: player search timer elapsed — navigating to kill page');
+                        gotoPage('kill');
+                        return;
+                    }
+                }
+            }
+
+            // Kill penalty page handled at top of tick — nothing to do here
 
             if (isBankPage()) {
                 await handleBankPage();
@@ -4702,6 +6688,12 @@
             }
 
             if (isDrugsPage() || hasDrugsPageMarkers()) {
+                if (state.killLoopActive) {
+                    // Kill loop takes priority — drive timer is shared, return to kill page
+                    await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                    gotoPage('kill');
+                    return;
+                }
                 await handleDrugsPage();
                 return;
             }
@@ -4829,9 +6821,17 @@
         if (log.length === lastRenderedLogLength && log[0] === lastRenderedLogFirst) return;
         lastRenderedLogLength = log.length;
         lastRenderedLogFirst  = log[0] || '';
+        const savedLogScroll = getSetting('scrollLog', -1);
+        const logScroll = logEl.scrollTop > 0 ? logEl.scrollTop : (savedLogScroll >= 0 ? savedLogScroll : -1);
         logEl.innerHTML = log
             .map(entry => `<div class="ug-log-entry">${escapeHtml(entry)}</div>`)
             .join('');
+        if (logScroll >= 0) {
+            // Restore saved position
+            logEl.scrollTop = logScroll;
+            setSetting('scrollLog', -1); // Clear after first restore
+        }
+        // If no saved position, leave at top (default) — don't force-scroll to bottom
     }
 
     function buildActionCheckboxes() {
@@ -4940,6 +6940,38 @@
         state.killScanOnlineEnabled  = killScanOnlineInput   ? killScanOnlineInput.checked   : state.killScanOnlineEnabled;
         state.killScanOnlineInterval = killScanIntervalEl    ? Number(killScanIntervalEl.value) : state.killScanOnlineInterval;
         state.killSearchEnabled      = killSearchInput       ? killSearchInput.checked       : state.killSearchEnabled;
+        state.killBgCheckEnabled     = killBgCheckInput      ? killBgCheckInput.checked      : state.killBgCheckEnabled;
+        state.killShootEnabled       = killShootInput        ? killShootInput.checked        : state.killShootEnabled;
+        state.killAnonymousShooting  = killAnonymousInput    ? killAnonymousInput.checked    : state.killAnonymousShooting;
+        state.killBgCheckIntervalHrs = killBgCheckIntervalEl ? Number(killBgCheckIntervalEl.value) : state.killBgCheckIntervalHrs;
+        const penaltyVal = killPenaltyThresholdEl ? parseFloat(killPenaltyThresholdEl.value) : 0;
+        const newThreshold = isNaN(penaltyVal) ? 0 : Math.max(0, penaltyVal);
+        // If threshold changed and penalty is now below new threshold, clear cached drop time
+        if (newThreshold !== state.killPenaltyThreshold) {
+            const currentPenalty = Number(getSetting('cachedKillPenalty', 1.0));
+            if (newThreshold === 0 || currentPenalty <= newThreshold) {
+                state.penaltyDropsAt   = 0;
+                state.pendingPenaltyPage = false;
+            }
+        }
+        state.killPenaltyThreshold = newThreshold;
+
+        // Activate kill loop if BG check is enabled and there are ticked players.
+        // Also force scan and search on — the kill loop requires both to function.
+        if (state.killBgCheckEnabled) {
+            const hasBgTargets = (state.killBgCheckPlayers || []).length > 0;
+            if (hasBgTargets) state.killLoopActive = true;
+            // Force scan online and search players on
+            state.killScanOnlineEnabled = true;
+            state.killSearchEnabled     = true;
+            // Also force the search loop active if not already
+            state.killSearchLoopActive  = true;
+            // Update UI checkboxes to reflect forced state
+            if (killScanOnlineInput)  killScanOnlineInput.checked = true;
+            if (killSearchInput)      killSearchInput.checked     = true;
+        } else {
+            state.killLoopActive = false;
+        }
 
         // Activate or deactivate the persisted loop flags to match the toggles.
         // These survive page reloads so the dedicated loops maintain themselves.
@@ -5236,7 +7268,7 @@
                     <div class="ug-row">
                         <div class="ug-section-box">
                             <div class="ug-section-title">Players Online Scanner</div>
-                            <div class="ug-helptext" style="margin-bottom:6px;">Periodically visits the Players Online page and adds new players to the list. Runs in the background during normal script operation only — not during dedicated modes.</div>
+                            <div class="ug-helptext" style="margin-bottom:6px;">Periodically visits the Players Online page and adds new players to the list. Runs in the background during normal script operation only &mdash; not during dedicated modes.</div>
                             <label class="ug-action-label">
                                 <input id="ug-bot-kill-scan-online" type="checkbox" />
                                 Scan Players Online
@@ -5265,12 +7297,62 @@
                         </div>
                     </div>
                     <div class="ug-row">
+                        <div class="ug-section-box">
+                            <div class="ug-section-title">BG Check &amp; Shoot</div>
+                            <div class="ug-helptext" style="margin-bottom:6px;">Travels to found players and shoots 1 bullet to check for bodyguards. Tick BG check per-player in the list below. Drug running pauses during travel.</div>
+                            <label class="ug-action-label">
+                                <input id="ug-bot-kill-bgcheck" type="checkbox" />
+                                Enable BG check loop
+                            </label>
+                            <label class="ug-action-label">
+                                <input id="ug-bot-kill-anonymous" type="checkbox" />
+                                Shoot anonymously (hide your name)
+                            </label>
+                            <div style="margin-top:6px;">
+                                <div class="ug-subtitle" style="margin-bottom:4px;">BG check interval</div>
+                                <select id="ug-bot-kill-bgcheck-interval" data-role="none" style="width:100%;box-sizing:border-box;padding:7px 8px;border:1px solid #555;border-radius:6px;background:#111;color:#fff;font-size:12px;">
+                                    <option value="1">1 hour</option>
+                                    <option value="2">2 hours</option>
+                                    <option value="3">3 hours</option>
+                                    <option value="4">4 hours</option>
+                                    <option value="5">5 hours</option>
+                                    <option value="6">6 hours</option>
+                                    <option value="7">7 hours</option>
+                                    <option value="8">8 hours</option>
+                                    <option value="9">9 hours</option>
+                                    <option value="10">10 hours</option>
+                                    <option value="11">11 hours</option>
+                                    <option value="12">12 hours</option>
+                                    <option value="13">13 hours</option>
+                                    <option value="14">14 hours</option>
+                                    <option value="15">15 hours</option>
+                                    <option value="16">16 hours</option>
+                                    <option value="17">17 hours</option>
+                                    <option value="18">18 hours</option>
+                                    <option value="19">19 hours</option>
+                                    <option value="20">20 hours</option>
+                                    <option value="21">21 hours</option>
+                                    <option value="22">22 hours</option>
+                                    <option value="23">23 hours</option>
+                                    <option value="24">24 hours</option>
+                                </select>
+                            </div>
+                            <div style="margin-top:6px;">
+                                <div class="ug-subtitle" style="margin-bottom:4px;">Kill penalty threshold (0 = disabled)</div>
+                                <input id="ug-bot-kill-penalty-threshold" type="text" inputmode="decimal" placeholder="e.g. 1.5" style="width:100%;box-sizing:border-box;padding:7px 8px;border:1px solid #555;border-radius:6px;background:#111;color:#fff;font-size:12px;" />
+                                <div class="ug-helptext">Pause kill loop if penalty multiplier exceeds this. BG check loop continues regardless.</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="ug-row">
                         <div class="ug-section-box" style="padding:0;border:none;background:none;">
                             <div class="ug-subtitle" style="margin-bottom:6px;">Player list <span id="ug-bot-kill-count" style="font-weight:normal;color:#aaa;font-size:11px;"></span></div>
                             <div id="ug-bot-kill-list" class="ug-kill-list"></div>
-                            <div style="display:flex;gap:6px;margin-top:8px;">
+                            <div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap;">
                                 <button id="ug-bot-kill-clear" type="button" style="font-size:11px;padding:4px 8px;">Clear list</button>
                                 <button id="ug-bot-kill-copy" type="button" style="font-size:11px;padding:4px 8px;">Copy names</button>
+                                <button id="ug-bot-kill-select-all-bg" type="button" style="font-size:11px;padding:4px 8px;">All BG</button>
+                                <button id="ug-bot-kill-select-all-shoot" type="button" style="font-size:11px;padding:4px 8px;">All Kill</button>
                             </div>
                         </div>
                     </div>
@@ -5289,6 +7371,10 @@
                         </div>
                     </div>
                     <div class="ug-subtab-pane" data-subtab="log">
+                        <div class="ug-row" style="margin-bottom:6px;display:flex;gap:6px;">
+                            <button id="ug-bot-copy-log" type="button" style="font-size:11px;padding:4px 8px;">Copy log</button>
+                            <button id="ug-bot-clear-log" type="button" style="font-size:11px;padding:4px 8px;">Clear log</button>
+                        </div>
                         <div class="ug-row">
                             <div id="ug-bot-log"></div>
                         </div>
@@ -5505,12 +7591,42 @@
             .ug-kill-list {
                 max-height: 280px;
                 overflow-y: auto;
+                overflow-x: hidden;
                 background: #111;
                 border: 1px solid #444;
                 border-radius: 6px;
                 padding: 6px;
                 font-size: 11px;
                 text-align: left;
+            }
+            /* Fake checkbox divs — avoid jQuery Mobile interference entirely */
+            .ug-kcb {
+                width: 13px;
+                height: 13px;
+                border: 1px solid #888;
+                background: #222;
+                display: inline-block;
+                cursor: pointer;
+                box-sizing: border-box;
+                position: relative;
+                flex-shrink: 0;
+                vertical-align: middle;
+            }
+            .ug-kcb.checked {
+                background: #2a6;
+                border-color: #2a6;
+            }
+            .ug-kcb.checked::after {
+                content: '';
+                position: absolute;
+                left: 2px;
+                top: 0px;
+                width: 4px;
+                height: 8px;
+                border: 2px solid #fff;
+                border-top: none;
+                border-left: none;
+                transform: rotate(45deg);
             }
             .ug-kill-group-title {
                 font-weight: bold;
@@ -5598,6 +7714,29 @@
         killScanOnlineInput      = document.querySelector('#ug-bot-kill-scan-online');
         killScanIntervalEl       = document.querySelector('#ug-bot-kill-scan-interval');
         killSearchInput          = document.querySelector('#ug-bot-kill-search');
+        killBgCheckInput         = document.querySelector('#ug-bot-kill-bgcheck');
+
+        // Immediately update scan/search disabled state when BG loop checkbox changes
+        if (killBgCheckInput) {
+            killBgCheckInput.addEventListener('change', () => {
+                const on = killBgCheckInput.checked;
+                if (killScanOnlineInput) {
+                    killScanOnlineInput.disabled = on;
+                    const lbl = killScanOnlineInput.closest('label');
+                    if (lbl) { lbl.style.opacity = on ? '0.4' : ''; lbl.style.cursor = on ? 'default' : ''; }
+                }
+                if (killSearchInput) {
+                    killSearchInput.disabled = on;
+                    const lbl = killSearchInput.closest('label');
+                    if (lbl) { lbl.style.opacity = on ? '0.4' : ''; lbl.style.cursor = on ? 'default' : ''; }
+                }
+            });
+        }
+
+        killShootInput           = document.querySelector('#ug-bot-kill-shoot');
+        killAnonymousInput       = document.querySelector('#ug-bot-kill-anonymous');
+        killBgCheckIntervalEl    = document.querySelector('#ug-bot-kill-bgcheck-interval');
+        killPenaltyThresholdEl   = document.querySelector('#ug-bot-kill-penalty-threshold');
         statsEl                 = document.querySelector('#ug-bot-stats');
         logEl                   = document.querySelector('#ug-bot-log');
         compactBtn              = document.querySelector('#ug-bot-compact-btn');
@@ -5630,9 +7769,33 @@
             bustFastModeInput.closest('.ug-fast-mode-label')?.classList.add('ug-disabled-sub');
         }
 
-        if (killScanOnlineInput)  killScanOnlineInput.checked = state.killScanOnlineEnabled;
+        // Grey out scan/search when BG loop is on.
+        // Must sync the checkbox first so its .checked reflects persisted state,
+        // then read it back — this way unticking immediately re-enables them
+        // AND the persisted on state greys them out on page load.
+        if (killBgCheckInput) killBgCheckInput.checked = state.killBgCheckEnabled;
+        const bgLoopCurrentlyOn = killBgCheckInput ? killBgCheckInput.checked : state.killBgCheckEnabled;
+
+        if (killScanOnlineInput) {
+            killScanOnlineInput.checked  = state.killScanOnlineEnabled;
+            killScanOnlineInput.disabled = bgLoopCurrentlyOn;
+            const scanLabel = killScanOnlineInput.closest('label');
+            if (scanLabel) scanLabel.style.opacity = bgLoopCurrentlyOn ? '0.4' : '';
+            if (scanLabel) scanLabel.style.cursor  = bgLoopCurrentlyOn ? 'default' : '';
+        }
         if (killScanIntervalEl)   killScanIntervalEl.value    = String(state.killScanOnlineInterval);
-        if (killSearchInput)      killSearchInput.checked     = state.killSearchEnabled;
+        if (killSearchInput) {
+            killSearchInput.checked  = state.killSearchEnabled;
+            killSearchInput.disabled = bgLoopCurrentlyOn;
+            const searchLabel = killSearchInput.closest('label');
+            if (searchLabel) searchLabel.style.opacity = bgLoopCurrentlyOn ? '0.4' : '';
+            if (searchLabel) searchLabel.style.cursor  = bgLoopCurrentlyOn ? 'default' : '';
+        }
+        if (killBgCheckInput)     killBgCheckInput.checked    = state.killBgCheckEnabled;
+        if (killShootInput)       killShootInput.checked      = state.killShootEnabled;
+        if (killAnonymousInput)   killAnonymousInput.checked  = state.killAnonymousShooting;
+        if (killBgCheckIntervalEl) killBgCheckIntervalEl.value = String(state.killBgCheckIntervalHrs);
+        if (killPenaltyThresholdEl) killPenaltyThresholdEl.value = state.killPenaltyThreshold > 0 ? String(state.killPenaltyThreshold) : '';
 
         attachNumberFormatting(depositThresholdEl);
 
@@ -5688,6 +7851,8 @@
             if (state.enabled) {
                 setPaused('Stopped manually');
             } else {
+                // Designate this window as the bot window
+                window.name = 'ug-bot';
                 cancelCurrentRun();
                 state.enabled      = true;
                 state.pausedReason = '';
@@ -5732,11 +7897,55 @@
         updatePanel();
 
         // Kill scanner — clear list button
+        attachKillListListener();
+
+        const copyLogBtn = document.querySelector('#ug-bot-copy-log');
+        if (copyLogBtn && !copyLogBtn.dataset.listenerAttached) {
+            copyLogBtn.dataset.listenerAttached = '1';
+            copyLogBtn.addEventListener('click', () => {
+                const log = state.liveLog || [];
+                navigator.clipboard.writeText(log.join('\n')).then(() => {
+                    copyLogBtn.textContent = 'Copied!';
+                    setTimeout(() => { copyLogBtn.textContent = 'Copy log'; }, 2000);
+                }).catch(() => {
+                    // Fallback for browsers without clipboard API
+                    const ta = document.createElement('textarea');
+                    ta.value = log.join('\n');
+                    document.body.appendChild(ta);
+                    ta.select();
+                    document.execCommand('copy');
+                    document.body.removeChild(ta);
+                    copyLogBtn.textContent = 'Copied!';
+                    setTimeout(() => { copyLogBtn.textContent = 'Copy log'; }, 2000);
+                });
+            });
+        }
+
+        const clearLogBtn = document.querySelector('#ug-bot-clear-log');
+        if (clearLogBtn && !clearLogBtn.dataset.listenerAttached) {
+            clearLogBtn.dataset.listenerAttached = '1';
+            clearLogBtn.addEventListener('click', () => {
+                state.liveLog = [];
+                renderLiveLog();
+            });
+        }
+
+        // Restore panel scroll position from before last page navigation
+        const savedPanelScroll = Number(getSetting('scrollPanel', 0));
+        if (savedPanelScroll > 0) {
+            const panel = document.querySelector('#ug-bot-panel');
+            if (panel) {
+                panel.scrollTop = savedPanelScroll;
+                setSetting('scrollPanel', 0);
+            }
+        }
+
         const killClearBtn = document.querySelector('#ug-bot-kill-clear');
         if (killClearBtn) {
             killClearBtn.addEventListener('click', () => {
                 if (confirm('Clear the entire player list? This cannot be undone.')) {
                     state.killPlayers       = [];
+                    state.killDeadPlayers   = [];
                     state.killCurrentSearch = '';
                     state.killSearchIndex   = 0;
                     renderKillList();
@@ -5774,6 +7983,34 @@
                     killCopyBtn.textContent = `Copied ${players.length}!`;
                     setTimeout(() => { killCopyBtn.textContent = 'Copy names'; }, 2000);
                 });
+            });
+        }
+
+        // Kill scanner — Select All BG button
+        const killSelectAllBgBtn = document.querySelector('#ug-bot-kill-select-all-bg');
+        if (killSelectAllBgBtn) {
+            killSelectAllBgBtn.addEventListener('click', () => {
+                const players = getKillPlayers().filter(p =>
+                    p.status === KILL_STATUS.ALIVE || p.status === KILL_STATUS.UNKNOWN
+                );
+                const allOn = players.every(p => isPlayerBgCheckEnabled(p.name));
+                for (const p of players) setPlayerBgCheckEnabled(p.name, !allOn);
+                renderKillList();
+                addLiveLog(`Kill scanner: BG check ${allOn ? 'disabled' : 'enabled'} for all ${players.length} players`);
+            });
+        }
+
+        // Kill scanner — All Kill button (toggles all on/off)
+        const killSelectAllShootBtn = document.querySelector('#ug-bot-kill-select-all-shoot');
+        if (killSelectAllShootBtn) {
+            killSelectAllShootBtn.addEventListener('click', () => {
+                const players = getKillPlayers().filter(p =>
+                    p.status === KILL_STATUS.ALIVE || p.status === KILL_STATUS.UNKNOWN
+                );
+                const allOn = players.every(p => isPlayerShootEnabled(p.name));
+                for (const p of players) setPlayerShootEnabled(p.name, !allOn);
+                renderKillList();
+                addLiveLog(`Kill scanner: shoot ${allOn ? 'disabled' : 'enabled'} for all ${players.length} players`);
             });
         }
     }
@@ -5855,6 +8092,19 @@
                         const secs = Math.floor((msUntil % 60000) / 1000);
                         return mins > 0 ? mins + 'm ' + secs + 's' : secs + 's';
                     })()} | Search: ${state.killSearchEnabled ? 'on' : 'off'} | Players: ${getKillPlayers().length}</div>
+                    ${state.killPenaltyThreshold > 0 ? `<div class="ug-status-line"><b>Kill penalty:</b> ${(() => {
+                        const penalty = Number(getSetting('cachedKillPenalty', 1.0));
+                        const penStr = penalty > 1.0 ? `${penalty.toFixed(2)}x` : 'none';
+                        if (state.penaltyDropsAt && state.penaltyDropsAt > now()) {
+                            const ms = state.penaltyDropsAt - now();
+                            const hrs  = Math.floor(ms / 3600000);
+                            const mins = Math.floor((ms % 3600000) / 60000);
+                            const secs = Math.floor((ms % 60000) / 1000);
+                            const timeStr = hrs > 0 ? hrs + 'h ' + mins + 'm' : mins > 0 ? mins + 'm ' + secs + 's' : secs + 's';
+                            return `${penStr} — resumes in ${timeStr}`;
+                        }
+                        return penStr;
+                    })()}</div>` : ''}
                     <div class="ug-status-line"><b>Deposit:</b> ${state.autoDepositEnabled && !state.autoDrugsEnabled ? '$' + escapeHtml(state.autoDepositThreshold.toLocaleString()) : 'off'}</div>
                 `;
             }
@@ -5960,6 +8210,29 @@
             return;
         }
 
+        // ── Window identity check ─────────────────────────────────────────────
+        // Only run in windows explicitly designated as the bot window via the
+        // activate button. window.name persists across page navigations within
+        // the same window but starts empty in any new window.
+        if (window.name !== 'ug-bot') {
+            // Not designated — show a minimal activate button, stay dormant
+            const existing = document.querySelector('#ug-bot-activate');
+            if (!existing) {
+                const btn = document.createElement('div');
+                btn.id = 'ug-bot-activate';
+                btn.textContent = '⚙ UG Bot';
+                btn.style.cssText = 'position:fixed;bottom:10px;right:10px;background:#222;color:#fff;padding:6px 10px;border-radius:6px;cursor:pointer;font-size:12px;z-index:99999;border:1px solid #555;';
+                btn.title = 'Click to activate UG Bot in this window';
+                btn.addEventListener('click', () => {
+                    window.name = 'ug-bot';
+                    btn.remove();
+                    init();
+                });
+                document.body.appendChild(btn);
+            }
+            return;
+        }
+
         if (state.enabled && !state.sessionStartedAt) {
             state.sessionStartedAt = now();
         }
@@ -6004,7 +8277,55 @@
             state.killSearchLoopActive = hasUnknowns || hasExpiringAlives || hasProtectedDue;
         }
 
+        // Kill loop (BG check/shoot) activation — activates on page load if toggle is on,
+        // there are per-player BG ticked players, and at least one has a due interval.
+        if (!state.killBgCheckEnabled) {
+            state.killLoopActive    = false;
+            state.pendingKillAction = null;
+        } else if (state.killLoopActive) {
+            // Already running — keep active
+        } else {
+            const alivePlayers = getKillPlayers().filter(p =>
+                p.status === KILL_STATUS.ALIVE || p.status === KILL_STATUS.UNKNOWN
+            );
+            // Only activate if on kill page and can verify player is in Players Found
+            // On other pages, syncKillExpiryFromPage handles reactivation when player appears
+            const canCheckFound = isKillPage();
+            const foundNames = canCheckFound
+                ? new Set([...document.querySelectorAll('.bgl.i.wb .bgm.chs:not(.pd) a[href*="?p=profile&u="]')]
+                    .map(a => { try { return new URL(a.getAttribute('href'), window.location.href).searchParams.get('u').toLowerCase(); } catch(_){return '';} })
+                    .filter(Boolean))
+                : null;
+
+            const hasDueBgCheck = alivePlayers.some(p => {
+                if (!isPlayerBgCheckEnabled(p.name)) return false;
+                if (getBgCheckDueMs(p) > 0) return false;
+                // On kill page: verify player is actually in Players Found right now
+                if (canCheckFound) return foundNames && foundNames.has(p.name.toLowerCase());
+                // On other pages: activate if BG check is due — kill loop will navigate to kill page
+                return true;
+            });
+            const hasKillOnly = alivePlayers.some(p => {
+                if (!isPlayerShootEnabled(p.name)) return false;
+                if (p.lastKillAttempt && (now() - p.lastKillAttempt) < 30000) return false;
+                if (p.requiredBullets && getPlayerBullets() < p.requiredBullets) return false;
+                if (isPlayerBgCheckEnabled(p.name) && getBgCheckDueMs(p) <= 0) return false;
+                // If on kill page, only activate if player is actually in Players Found
+                if (canCheckFound) return foundNames && foundNames.has(p.name.toLowerCase());
+                // If not on kill page, only activate if expectedFoundAt has elapsed
+                // (player should now be in Players Found) — don't activate based on stale data
+                if (!p.expectedFoundAt) return false;
+                return now() >= p.expectedFoundAt;
+            });
+            // Allow kill loop for BG checks even when penalty too high
+            // Kill-only players are blocked by doKillShootFlow when penalty exceeded
+            state.killLoopActive = hasDueBgCheck || (!isKillPenaltyTooHigh() && hasKillOnly);
+        }
+
         updateStats(s => { s.pageLoads += 1; });
+
+        // Penalty page navigation is handled within handleKillPage / handleKillLoopPage
+        // to avoid race conditions with the search loop tick
 
         // Cache drug capacity on drugs page visits so crimes page can use it for deposit calc
         if (isDrugsPage() || hasDrugsPageMarkers()) {
