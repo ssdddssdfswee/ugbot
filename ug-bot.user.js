@@ -315,6 +315,9 @@
             };
         }
 
+        let consecutiveSkips = 0;
+        const MAX_SKIPS_BEFORE_RELOAD = 10;
+
         async function trySolve(logFn) {
             if (isSolving) {
                 return { attempted: false, solved: false, message: 'CTC solver already running' };
@@ -348,10 +351,21 @@
             try {
                 const result = await Promise.race([doSolve(widget, logFn, solveCtx), timeout]);
                 logFn(result.message);
+                if (result.solved) {
+                    consecutiveSkips = 0;
+                } else {
+                    consecutiveSkips++;
+                    if (consecutiveSkips >= MAX_SKIPS_BEFORE_RELOAD) {
+                        consecutiveSkips = 0;
+                        logFn('CTC: too many failed attempts — reloading page for fresh CTC');
+                        gotoPage(currentPage());
+                    }
+                }
                 return { attempted: true, solved: result.solved, message: result.message };
             } catch (err) {
                 const message = 'CTC solver error: ' + err.message;
                 logFn(message);
+                consecutiveSkips++;
                 return { attempted: true, solved: false, message };
             } finally {
                 isSolving = false;
