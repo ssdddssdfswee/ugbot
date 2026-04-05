@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Full UG Bot
 // @namespace    ug-bot
-// @version      1.2.0
+// @version      1.2.1
 // @description  Auto-runs crimes, GTA, melting, repair, missions, drug running with Swiss Bank management, live log, session stats, action checkboxes, jail handling, runtime tracking, melt pagination, repair cycles, automatic CTC solving, and point-spending features.
 // @match        *://www.underworldgangsters.com/*
 // @match        *://underworldgangsters.com/*
@@ -444,7 +444,7 @@
     // BOT CONFIG
     // =========================================================================
 
-    const SCRIPT_VERSION = '1.2.0';
+    const SCRIPT_VERSION = '1.2.1';
 
     const CRIME_DEFS = [
         { id: 'gang', name: 'Gang Activities' },
@@ -2466,7 +2466,12 @@
             const rankIndex = RANKS.indexOf(rankName) + 1;
             if (rankIndex <= 0) return null;
 
-            return { rankIndex, prestige: Math.min(5, Math.max(0, prestige)) };
+            // Detect VIP status — shown as a coloured span next to the username
+            // VIP players require double the bullets to kill
+            const isVip = !!doc.querySelector('a[href*="?p=mail"] span[style*="a05684"]') ||
+                          /V\s*I\s*P/i.test(textOf(doc.querySelector('a[href*="?p=mail"]') || doc.createElement('span')));
+
+            return { rankIndex, prestige: Math.min(5, Math.max(0, prestige)), isVip };
         } catch (e) {
             addLiveLog(`Kill: profile fetch error for ${username} — ${e.message}`);
             return null;
@@ -5867,12 +5872,14 @@
                 if (targetProfile && bgProfile) {
                     const currentMult  = getKillPenaltyMultiplier();
                     const postKillMult = currentMult + 0.1; // penalty after killing BG
-                    const bgBullets    = await fetchBulletCount(bgProfile.rankIndex, bgProfile.prestige);
+                    const bgBulletsBase    = await fetchBulletCount(bgProfile.rankIndex, bgProfile.prestige);
+                    const bgBullets        = bgProfile.isVip ? bgBulletsBase * 2 : bgBulletsBase;
                     // Calculate target bullets at elevated penalty by adjusting fetched value
                     // fetchBulletCount already uses live penalty — we simulate +0.1x manually
                     const targetBulletsBase = await fetchBulletCount(targetProfile.rankIndex, targetProfile.prestige);
                     // Re-scale: targetBulletsBase uses currentMult, we need postKillMult
-                    const targetBullets = Math.ceil(targetBulletsBase * (postKillMult / currentMult));
+                    // Double if target is VIP
+                    const targetBullets = Math.ceil(targetBulletsBase * (postKillMult / currentMult)) * (targetProfile.isVip ? 2 : 1);
                     const totalNeeded  = (bgBullets || 0) + (targetBullets || 0);
                     const available    = getPlayerBullets();
                     addLiveLog(`Kill loop: need ${totalNeeded} bullets total (BG: ${bgBullets}, target at ${postKillMult.toFixed(1)}x: ${targetBullets}) — have ${available}`);
@@ -6213,7 +6220,7 @@
             return;
         }
 
-        addLiveLog(`Kill loop: ${targetName} is rank index ${profile.rankIndex}, prestige ${profile.prestige}`);
+        addLiveLog(`Kill loop: ${targetName} is rank index ${profile.rankIndex}, prestige ${profile.prestige}${profile.isVip ? ' (VIP)' : ''}`);
 
         // Fetch bullet count from calculator
         const bulletCount = await fetchBulletCount(profile.rankIndex, profile.prestige);
@@ -6225,9 +6232,9 @@
             return;
         }
 
-        // Bullet calculator already includes kill penalty — use result directly
-        const requiredBullets = bulletCount;
-        addLiveLog(`Kill loop: ${targetName} requires ${requiredBullets} bullets`);
+        // Bullet calculator includes kill penalty — double if VIP
+        const requiredBullets = profile.isVip ? bulletCount * 2 : bulletCount;
+        addLiveLog(`Kill loop: ${targetName} requires ${requiredBullets} bullets${profile.isVip ? ' (VIP x2)' : ''}`);
 
         // Store required bullets on player so we can skip them until we have enough
         const pls2 = state.killPlayers || [];
