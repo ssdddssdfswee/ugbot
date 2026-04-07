@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Full UG Bot
 // @namespace    ug-bot
-// @version      1.2.1
+// @version      1.2.2
 // @description  Auto-runs crimes, GTA, melting, repair, missions, drug running with Swiss Bank management, live log, session stats, action checkboxes, jail handling, runtime tracking, melt pagination, repair cycles, automatic CTC solving, and point-spending features.
 // @match        *://www.underworldgangsters.com/*
 // @match        *://underworldgangsters.com/*
@@ -444,7 +444,7 @@
     // BOT CONFIG
     // =========================================================================
 
-    const SCRIPT_VERSION = '1.2.1';
+    const SCRIPT_VERSION = '1.2.2';
 
     const CRIME_DEFS = [
         { id: 'gang', name: 'Gang Activities' },
@@ -556,6 +556,7 @@
         // Bust settings
         bustEnabled:  false,
         bustFastMode: false,
+        bustNoReload: false,
 
         // Kill scanner settings
         killScanOnlineEnabled:  false,
@@ -676,6 +677,8 @@
 
         get bustFastMode()         { return !!getSetting('bustFastMode', DEFAULTS.bustFastMode); },
         set bustFastMode(v)        { setSetting('bustFastMode', !!v); },
+        get bustNoReload()         { return !!getSetting('bustNoReload', DEFAULTS.bustNoReload); },
+        set bustNoReload(v)        { setSetting('bustNoReload', !!v); },
 
         get bustLoopActive()       { return !!getSetting('bustLoopActive', false); },
         set bustLoopActive(v)      { setSetting('bustLoopActive', !!v); },
@@ -885,6 +888,7 @@
     let resetCrimesFastModeInput    = null;
     let bustEnabledInput            = null;
     let bustFastModeInput           = null;
+    let bustNoReloadInput           = null;
     let killScanOnlineInput         = null;
     let killScanIntervalEl          = null;
     let killSearchInput             = null;
@@ -3612,6 +3616,72 @@
             bustObserver = null;
         }
         bustObserverBusy = false;
+    }
+
+    // ── No Reload Bust — background fetch polling ─────────────────────────────
+    let noReloadBustTimer  = null;
+    let noReloadBustActive = false;
+
+    function startNoReloadBust() {
+        if (noReloadBustActive) return;
+        noReloadBustActive = true;
+        scheduleNoReloadBustPoll();
+    }
+
+    function stopNoReloadBust() {
+        noReloadBustActive = false;
+        if (noReloadBustTimer) {
+            clearTimeout(noReloadBustTimer);
+            noReloadBustTimer = null;
+        }
+    }
+
+    function scheduleNoReloadBustPoll() {
+        if (!noReloadBustActive) return;
+        const delay = rand(800, 1200);
+        noReloadBustTimer = setTimeout(doNoReloadBustPoll, delay);
+    }
+
+    async function doNoReloadBustPoll() {
+        if (!noReloadBustActive || !state.bustNoReload || !state.enabled) {
+            scheduleNoReloadBustPoll();
+            return;
+        }
+        // Pause during CTC or if jailed
+        if (hasCTCChallenge() || getOwnJailRow()) {
+            scheduleNoReloadBustPoll();
+            return;
+        }
+        try {
+            const cache = Math.random();
+            const resp = await fetch(`/a/jailn.php?cache=${cache}`, {
+                credentials: 'include',
+                cache: 'no-store'
+            });
+            const js = await resp.text();
+            // Response is JS: document.getElementById('jailn').innerHTML="..."
+            // Extract player names from escaped name="player" value="PLAYERNAME"
+            const playerRegex = /name=\\"player\\" value=\\"([^\\]+)\\"/g;
+            let match;
+            while ((match = playerRegex.exec(js)) !== null) {
+                const player = match[1];
+                if (!player) continue;
+                const bustResp = await fetch(
+                    `/?p=jail&player=${encodeURIComponent(player)}`,
+                    { credentials: 'include', cache: 'no-store' }
+                );
+                const bustText = await bustResp.text();
+                if (/helped .+ out of jail/i.test(bustText)) {
+                    updateStats(s => { s.bustsSuccess = (s.bustsSuccess || 0) + 1; });
+                    addLiveLog(`No reload bust: ✓ busted ${player}`);
+                } else if (/failed helping/i.test(bustText)) {
+                    updateStats(s => { s.bustsFailed = (s.bustsFailed || 0) + 1; });
+                }
+            }
+        } catch (e) {
+            // Silent fail — network errors shouldn't stop the loop
+        }
+        scheduleNoReloadBustPoll();
     }
 
     async function handleBustPage() {
@@ -6956,8 +7026,24 @@
         state.resetCrimesFastMode = resetCrimesFastModeInput ? resetCrimesFastModeInput.checked : state.resetCrimesFastMode;
         state.resetGTAEnabled     = resetGTAInput            ? resetGTAInput.checked            : state.resetGTAEnabled;
         state.resetMeltEnabled    = resetMeltInput           ? resetMeltInput.checked           : state.resetMeltEnabled;
-        state.bustEnabled            = bustEnabledInput      ? bustEnabledInput.checked      : state.bustEnabled;
-        state.bustFastMode           = bustFastModeInput     ? bustFastModeInput.checked     : state.bustFastMode;
+        const newBustEnabled  = bustEnabledInput    ? bustEnabledInput.checked    : state.bustEnabled;
+        const newBustNoReload = bustNoReloadInput  ? bustNoReloadInput.checked  : state.bustNoReload;
+        // Mutual exclusivity — no reload bust vs enable bust
+        if (newBustNoReload && !state.bustNoReload) {
+            // Switching to no reload — disable enable bust
+            state.bustEnabled  = false;
+            state.bustFastMode = false;
+            if (bustEnabledInput)  bustEnabledInput.checked  = false;
+            if (bustFastModeInput) bustFastModeInput.checked = false;
+        } else if (newBustEnabled && !state.bustEnabled && state.bustNoReload) {
+            // Switching to enable bust — disable no reload
+            state.bustNoReload = false;
+            if (bustNoReloadInput) bustNoReloadInput.checked = false;
+        } else {
+            state.bustEnabled  = newBustEnabled;
+            state.bustFastMode = bustFastModeInput ? bustFastModeInput.checked : state.bustFastMode;
+        }
+        state.bustNoReload = bustNoReloadInput ? bustNoReloadInput.checked : state.bustNoReload;
         state.killScanOnlineEnabled  = killScanOnlineInput   ? killScanOnlineInput.checked   : state.killScanOnlineEnabled;
         state.killScanOnlineInterval = killScanIntervalEl    ? Number(killScanIntervalEl.value) : state.killScanOnlineInterval;
         state.killSearchEnabled      = killSearchInput       ? killSearchInput.checked       : state.killSearchEnabled;
@@ -6999,6 +7085,12 @@
         state.gtaResetLoopActive   = state.resetGTAEnabled;
         state.meltResetLoopActive  = state.resetMeltEnabled;
         state.bustLoopActive       = state.bustEnabled;
+        // Start or stop no reload bust background loop
+        if (state.bustNoReload) {
+            startNoReloadBust();
+        } else {
+            stopNoReloadBust();
+        }
         // Kill search loop activation logic:
         // - If the toggle is off, always deactivate
         // - If the loop was already active (persisted), keep it active — never
@@ -7230,6 +7322,10 @@
                             <label class="ug-action-label ug-fast-mode-label" id="ug-bot-bust-fast-label">
                                 <input id="ug-bot-bust-fast" type="checkbox" />
                                 Fast bust — bust players instantly
+                            </label>
+                            <label class="ug-action-label" style="margin-top:6px;">
+                                <input id="ug-bot-bust-noreload" type="checkbox" />
+                                No reload bust — busts in background via fetch, no page navigation needed
                             </label>
                         </div>
                     </div>
@@ -7732,6 +7828,7 @@
         resetTimerMinPointsEl    = document.querySelector('#ug-bot-reset-minpoints');
         bustEnabledInput         = document.querySelector('#ug-bot-bust-enabled');
         bustFastModeInput        = document.querySelector('#ug-bot-bust-fast');
+        bustNoReloadInput        = document.querySelector('#ug-bot-bust-noreload');
         killScanOnlineInput      = document.querySelector('#ug-bot-kill-scan-online');
         killScanIntervalEl       = document.querySelector('#ug-bot-kill-scan-interval');
         killSearchInput          = document.querySelector('#ug-bot-kill-search');
@@ -7788,6 +7885,9 @@
         bustFastModeInput.disabled           = !state.bustEnabled;
         if (!state.bustEnabled) {
             bustFastModeInput.closest('.ug-fast-mode-label')?.classList.add('ug-disabled-sub');
+        }
+        if (bustNoReloadInput) {
+            bustNoReloadInput.checked = state.bustNoReload;
         }
 
         // Grey out scan/search when BG loop is on.
@@ -7851,6 +7951,17 @@
                     const label = bustFastModeInput.closest('.ug-fast-mode-label');
                     if (label) label.classList.toggle('ug-disabled-sub', !bustEnabledInput.checked);
                 }
+            } else if (e.target === bustNoReloadInput && bustNoReloadInput.checked) {
+                // No reload bust enabled — uncheck enable bust and fast bust
+                if (bustEnabledInput)  { bustEnabledInput.checked  = false; }
+                if (bustFastModeInput) { bustFastModeInput.checked = false; }
+                const label = bustFastModeInput ? bustFastModeInput.closest('.ug-fast-mode-label') : null;
+                if (label) label.classList.add('ug-disabled-sub');
+                saveSettings();
+            } else if (e.target === bustEnabledInput && bustEnabledInput.checked) {
+                // Enable bust enabled — uncheck no reload bust
+                if (bustNoReloadInput) { bustNoReloadInput.checked = false; }
+                saveSettings();
             } else if (e.target.matches('input[type="checkbox"], input[type="number"], select')) {
                 saveSettings();
             }
@@ -8267,6 +8378,12 @@
         state.gtaResetLoopActive   = state.resetGTAEnabled;
         state.meltResetLoopActive  = state.resetMeltEnabled;
         state.bustLoopActive       = state.bustEnabled;
+        // Start or stop no reload bust background loop
+        if (state.bustNoReload) {
+            startNoReloadBust();
+        } else {
+            stopNoReloadBust();
+        }
         // Kill search loop activation logic:
         // - If the toggle is off, always deactivate
         // - If the loop was already active (persisted), keep it active — never
