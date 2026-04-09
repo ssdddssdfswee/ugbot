@@ -7081,8 +7081,6 @@
         state.bustNoReload = bustNoReloadInput ? bustNoReloadInput.checked : state.bustNoReload;
         if (killProtectedRecheckInput)  state.killProtectedRecheckEnabled = killProtectedRecheckInput.checked;
         if (killProtectedRecheckMinsEl) state.killProtectedRecheckMins    = Number(killProtectedRecheckMinsEl.value) || DEFAULTS.killProtectedRecheckMins;
-        // Start or stop QT sniper
-
         state.killScanOnlineEnabled  = killScanOnlineInput   ? killScanOnlineInput.checked   : state.killScanOnlineEnabled;
         state.killScanOnlineInterval = killScanIntervalEl    ? Number(killScanIntervalEl.value) : state.killScanOnlineInterval;
         state.killSearchEnabled      = killSearchInput       ? killSearchInput.checked       : state.killSearchEnabled;
