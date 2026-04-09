@@ -1,15 +1,15 @@
 // ==UserScript==
-// @name         Full UG Bot
+// @name         UG Crimes + GTA + Melt Helper v6.3.44
 // @namespace    ug-bot
-// @version      1.2.2
+// @version      1.1.168-pub
 // @description  Auto-runs crimes, GTA, melting, repair, missions, drug running with Swiss Bank management, live log, session stats, action checkboxes, jail handling, runtime tracking, melt pagination, repair cycles, automatic CTC solving, and point-spending features.
 // @match        *://www.underworldgangsters.com/*
 // @match        *://underworldgangsters.com/*
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @run-at       document-start
-// @updateURL    https://raw.githubusercontent.com/ssdddssdfswee/ugbot/main/ug-bot.user.js
-// @downloadURL  https://raw.githubusercontent.com/ssdddssdfswee/ugbot/main/ug-bot.user.js
+// @updateURL    https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main/ug-bot.user.js
+// @downloadURL  https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main/ug-bot.user.js
 // ==/UserScript==
 
 (function () {
@@ -444,7 +444,7 @@
     // BOT CONFIG
     // =========================================================================
 
-    const SCRIPT_VERSION = '1.2.2';
+    const SCRIPT_VERSION = '1.1.168-pub';
 
     const CRIME_DEFS = [
         { id: 'gang', name: 'Gang Activities' },
@@ -558,10 +558,13 @@
         bustFastMode: false,
         bustNoReload: false,
 
+
         // Kill scanner settings
         killScanOnlineEnabled:  false,
         killScanOnlineInterval: 10,   // minutes between Players Online checks
         killSearchEnabled:      false,
+        killProtectedRecheckEnabled:  false,
+        killProtectedRecheckMins:     5,
 
         // Kill BG check / shoot loop settings
         killBgCheckEnabled:      false,  // Global BG check loop toggle
@@ -680,6 +683,7 @@
         get bustNoReload()         { return !!getSetting('bustNoReload', DEFAULTS.bustNoReload); },
         set bustNoReload(v)        { setSetting('bustNoReload', !!v); },
 
+
         get bustLoopActive()       { return !!getSetting('bustLoopActive', false); },
         set bustLoopActive(v)      { setSetting('bustLoopActive', !!v); },
 
@@ -692,6 +696,10 @@
 
         get killSearchEnabled()       { return !!getSetting('killSearchEnabled', DEFAULTS.killSearchEnabled); },
         set killSearchEnabled(v)      { setSetting('killSearchEnabled', !!v); },
+        get killProtectedRecheckEnabled() { return !!getSetting('killProtectedRecheckEnabled', DEFAULTS.killProtectedRecheckEnabled); },
+        set killProtectedRecheckEnabled(v){ setSetting('killProtectedRecheckEnabled', !!v); },
+        get killProtectedRecheckMins()    { return Number(getSetting('killProtectedRecheckMins', DEFAULTS.killProtectedRecheckMins)) || DEFAULTS.killProtectedRecheckMins; },
+        set killProtectedRecheckMins(v)   { setSetting('killProtectedRecheckMins', Number(v)); },
 
         get killSearchLoopActive()    { return !!getSetting('killSearchLoopActive', false); },
         set killSearchLoopActive(v)   { setSetting('killSearchLoopActive', !!v); },
@@ -889,6 +897,9 @@
     let bustEnabledInput            = null;
     let bustFastModeInput           = null;
     let bustNoReloadInput           = null;
+    let killProtectedRecheckInput   = null;
+    let killProtectedRecheckMinsEl  = null;
+
     let killScanOnlineInput         = null;
     let killScanIntervalEl          = null;
     let killSearchInput             = null;
@@ -1127,6 +1138,7 @@
     function gotoPage(pageName, extraParams = {}) {
         saveScrollPositions();
         clearScheduledReload();
+        reloadPending = true;
         const url = new URL(window.location.href);
         url.searchParams.set('p', pageName);
         url.searchParams.delete('a');    // Never carry over the action/type param between pages
@@ -2694,7 +2706,10 @@
         // runs. To cycle through all protected players rather than repeatedly
         // searching the same one, skip any searched in the last 5 minutes.
         // This allows the bot to work through the full list in one run.
-        const RECENTLY_SEARCHED_MS = 5 * 60 * 1000; // 5 minutes
+        // If killProtectedRecheckEnabled, use the user-defined interval instead.
+        const RECENTLY_SEARCHED_MS = (state.killProtectedRecheckEnabled && state.killSearchEnabled)
+            ? state.killProtectedRecheckMins * 60 * 1000
+            : 5 * 60 * 1000;
         const nextProtected = players.find(p =>
             p.status === KILL_STATUS.PROTECTED &&
             (nowMs - (p.lastChecked || 0)) >= RECENTLY_SEARCHED_MS
@@ -6524,21 +6539,17 @@
             (state.pendingKillAction.stage === 'travel' || state.pendingKillAction.stage === 'travel_car') &&
             !isInternalDriveReady();
         if (state.killSearchLoopActive && (!state.killLoopActive || killLoopWaitingForDrive)) {
-            if (isLikelyJailPage()) {
-                loopBusy = true;
-                try { updatePanel(); await handleJailState(); } finally { loopBusy = false; }
-                return;
-            }
+            // Don't intercept jail page — kill page is accessible whilst jailed,
+            // so continue searching. Jail observer handles release separately.
             if (hasCTCChallenge()) {
                 loopBusy = true;
                 try { updatePanel(); setLastActionText('CTC solving…'); await maybeSolveCTC(); } finally { loopBusy = false; }
                 return;
             }
             // Navigate to kill page if not already there
-            // If on crimes page or penalty page, let normal script handle this tick
             if (!isKillPage()) {
-                if (isCrimesPage() || hasCrimePageMarkers() || isKillPenaltyPage()) {
-                    // Let normal script handle this tick, search loop will navigate next tick
+                if (isKillPenaltyPage()) {
+                    // Let penalty page handle first
                 } else {
                     addLiveLog('Kill search: navigating to kill page');
                     gotoPage('kill');
@@ -6821,18 +6832,42 @@
         }
     }
 
+    let protectedRecheckHandle = null;
+
     function startHeartbeat() {
         stopHeartbeat();
         startRuntimeIfNeeded();
         heartbeatHandle = setInterval(() => tick(), DEFAULTS.heartbeatMs);
         setTimeout(() => tick(), 400);
         addLiveLog('Heartbeat started');
+        // Start independent protected recheck checker — runs every 10s regardless of loopBusy
+        // Just sets the flag — the next heartbeat tick handles navigation naturally
+        if (protectedRecheckHandle) clearInterval(protectedRecheckHandle);
+        protectedRecheckHandle = setInterval(() => {
+            if (!state.enabled || !state.killProtectedRecheckEnabled || !state.killSearchEnabled) return;
+            if (state.killSearchLoopActive || state.killLoopActive) return;
+            const recheckMs = state.killProtectedRecheckMins * 60 * 1000;
+            const nowMs = now();
+            const players = getKillPlayers();
+            const hasProtectedDue = players.some(p =>
+                p.status === KILL_STATUS.PROTECTED &&
+                (nowMs - (p.lastChecked || 0)) >= recheckMs
+            );
+            if (hasProtectedDue) {
+                addLiveLog('Kill scanner: protected recheck due — activating search');
+                state.killSearchLoopActive = true;
+            }
+        }, 10000);
     }
 
     function stopHeartbeat() {
         if (heartbeatHandle) {
             clearInterval(heartbeatHandle);
             heartbeatHandle = null;
+        }
+        if (protectedRecheckHandle) {
+            clearInterval(protectedRecheckHandle);
+            protectedRecheckHandle = null;
         }
     }
 
@@ -7044,6 +7079,10 @@
             state.bustFastMode = bustFastModeInput ? bustFastModeInput.checked : state.bustFastMode;
         }
         state.bustNoReload = bustNoReloadInput ? bustNoReloadInput.checked : state.bustNoReload;
+        if (killProtectedRecheckInput)  state.killProtectedRecheckEnabled = killProtectedRecheckInput.checked;
+        if (killProtectedRecheckMinsEl) state.killProtectedRecheckMins    = Number(killProtectedRecheckMinsEl.value) || DEFAULTS.killProtectedRecheckMins;
+        // Start or stop QT sniper
+
         state.killScanOnlineEnabled  = killScanOnlineInput   ? killScanOnlineInput.checked   : state.killScanOnlineEnabled;
         state.killScanOnlineInterval = killScanIntervalEl    ? Number(killScanIntervalEl.value) : state.killScanOnlineInterval;
         state.killSearchEnabled      = killSearchInput       ? killSearchInput.checked       : state.killSearchEnabled;
@@ -7411,6 +7450,41 @@
                                 <input id="ug-bot-kill-search" type="checkbox" class="ug-reset-cb" data-reset="killsearch" />
                                 Search players
                             </label>
+                        </div>
+                    </div>
+                    <div class="ug-row">
+                        <div class="ug-section-box">
+                            <div class="ug-section-title">Protected Player Re-search</div>
+                            <div class="ug-helptext" style="margin-bottom:6px;">Additionally re-searches protected players at a set interval. Only active when Search Players is enabled. Does not replace the existing search cycle.</div>
+                            <label class="ug-action-label">
+                                <input id="ug-bot-kill-protected-recheck" type="checkbox" />
+                                Additionally search protected players
+                            </label>
+                            <div style="margin-top:6px;">
+                                <div class="ug-subtitle" style="margin-bottom:4px;">Re-search interval</div>
+                                <select id="ug-bot-kill-protected-recheck-mins" data-role="none" style="width:100%;box-sizing:border-box;padding:7px 8px;border:1px solid #555;border-radius:6px;background:#111;color:#fff;font-size:12px;">
+                                    <option value="1">Every 1 minute</option>
+                                    <option value="2">Every 2 minutes</option>
+                                    <option value="3">Every 3 minutes</option>
+                                    <option value="4">Every 4 minutes</option>
+                                    <option value="5">Every 5 minutes</option>
+                                    <option value="6">Every 6 minutes</option>
+                                    <option value="7">Every 7 minutes</option>
+                                    <option value="8">Every 8 minutes</option>
+                                    <option value="9">Every 9 minutes</option>
+                                    <option value="10">Every 10 minutes</option>
+                                    <option value="11">Every 11 minutes</option>
+                                    <option value="12">Every 12 minutes</option>
+                                    <option value="13">Every 13 minutes</option>
+                                    <option value="14">Every 14 minutes</option>
+                                    <option value="15">Every 15 minutes</option>
+                                    <option value="16">Every 16 minutes</option>
+                                    <option value="17">Every 17 minutes</option>
+                                    <option value="18">Every 18 minutes</option>
+                                    <option value="19">Every 19 minutes</option>
+                                    <option value="20">Every 20 minutes</option>
+                                </select>
+                            </div>
                         </div>
                     </div>
                     <div class="ug-row">
@@ -7828,7 +7902,10 @@
         resetTimerMinPointsEl    = document.querySelector('#ug-bot-reset-minpoints');
         bustEnabledInput         = document.querySelector('#ug-bot-bust-enabled');
         bustFastModeInput        = document.querySelector('#ug-bot-bust-fast');
-        bustNoReloadInput        = document.querySelector('#ug-bot-bust-noreload');
+        bustNoReloadInput           = document.querySelector('#ug-bot-bust-noreload');
+        killProtectedRecheckInput   = document.querySelector('#ug-bot-kill-protected-recheck');
+        killProtectedRecheckMinsEl  = document.querySelector('#ug-bot-kill-protected-recheck-mins');
+
         killScanOnlineInput      = document.querySelector('#ug-bot-kill-scan-online');
         killScanIntervalEl       = document.querySelector('#ug-bot-kill-scan-interval');
         killSearchInput          = document.querySelector('#ug-bot-kill-search');
@@ -7889,6 +7966,11 @@
         if (bustNoReloadInput) {
             bustNoReloadInput.checked = state.bustNoReload;
         }
+        if (killProtectedRecheckInput)  killProtectedRecheckInput.checked = state.killProtectedRecheckEnabled;
+        if (killProtectedRecheckMinsEl) {
+            killProtectedRecheckMinsEl.value = String(state.killProtectedRecheckMins);
+        }
+
 
         // Grey out scan/search when BG loop is on.
         // Must sync the checkbox first so its .checked reflects persisted state,
