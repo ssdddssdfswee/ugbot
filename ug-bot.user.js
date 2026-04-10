@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         UG Crimes + GTA + Melt Helper v6.3.44
 // @namespace    ug-bot
-// @version      1.1.168-pub
+// @version      1.1.171-pub
 // @description  Auto-runs crimes, GTA, melting, repair, missions, drug running with Swiss Bank management, live log, session stats, action checkboxes, jail handling, runtime tracking, melt pagination, repair cycles, automatic CTC solving, and point-spending features.
 // @match        *://www.underworldgangsters.com/*
 // @match        *://underworldgangsters.com/*
@@ -444,7 +444,7 @@
     // BOT CONFIG
     // =========================================================================
 
-    const SCRIPT_VERSION = '1.1.168-pub';
+    const SCRIPT_VERSION = '1.1.171-pub';
 
     const CRIME_DEFS = [
         { id: 'gang', name: 'Gang Activities' },
@@ -3148,6 +3148,31 @@
         // Sync accurate expiry times from the "Players found" section on every
         // kill page load — this is more reliable than the 23hr fallback window.
         syncKillExpiryFromPage();
+
+        // Detect manually searched players — read all names from "Your men are
+        // out searching for" section and add any not already in the kill list
+        // as UNKNOWN so they appear in the UI immediately with BG/Kill checkboxes.
+        const pendingSearchEls = [...document.querySelectorAll('.bgl.i.wb .bgm.chs.pd b')];
+        if (pendingSearchEls.length > 0) {
+            const players = getKillPlayers();
+            const dead = state.killDeadPlayers || [];
+            let added = false;
+            for (const el of pendingSearchEls) {
+                const name = el.textContent.trim();
+                if (!name) continue;
+                const already = players.some(p => p.name.toLowerCase() === name.toLowerCase());
+                const isDead  = dead.some(n => n.toLowerCase() === name.toLowerCase());
+                if (!already && !isDead) {
+                    players.push({ name, status: KILL_STATUS.UNKNOWN, lastChecked: 0, searchCount: 0 });
+                    addLiveLog(`Kill scanner: added pending search player ${name} to list`);
+                    added = true;
+                }
+            }
+            if (added) {
+                saveKillPlayers(players);
+                renderKillList();
+            }
+        }
 
         // If penalty exceeds threshold and penaltyDropsAt not set, navigate to penalty page
         if (state.killPenaltyThreshold > 0 && !state.pendingPenaltyPage) {
@@ -6145,7 +6170,32 @@
         }
 
         if (!byCountry.size) {
-            addLiveLog('Kill loop: due BG players not yet in Players Found — reverting to normal script');
+            // Check if any due players are still in pending search (not yet found)
+            // If so, defer their BG check until they appear in Players Found
+            const pendingNames = new Set(
+                [...document.querySelectorAll('.bgl.i.wb .bgm.chs.pd b')]
+                    .map(el => el.textContent.trim().toLowerCase())
+            );
+            const deferredAny = duePlayers.some(p => pendingNames.has(p.name.toLowerCase()));
+            if (deferredAny) {
+                // Defer BG check for pending players — set lastBgCheck to now
+                // so getBgCheckDueMs returns positive, preventing immediate re-trigger
+                const allPlayers = getKillPlayers();
+                let changed = false;
+                for (const p of duePlayers) {
+                    if (pendingNames.has(p.name.toLowerCase())) {
+                        const idx = allPlayers.findIndex(pl => pl.name.toLowerCase() === p.name.toLowerCase());
+                        if (idx !== -1) {
+                            allPlayers[idx].lastBgCheck = now();
+                            changed = true;
+                            addLiveLog(`Kill loop: ${p.name} still being searched — deferring BG check until found`);
+                        }
+                    }
+                }
+                if (changed) saveKillPlayers(allPlayers);
+            } else {
+                addLiveLog('Kill loop: due BG players not yet in Players Found — reverting to normal script');
+            }
             state.killLoopActive    = false;
             state.pendingKillAction = null;
             await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
