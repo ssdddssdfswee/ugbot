@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         UG Crimes + GTA + Melt Helper v6.3.44
+// @name         Full UG Bot v1.2.2
 // @namespace    ug-bot
 // @version      1.2.2
 // @description  Auto-runs crimes, GTA, melting, repair, missions, drug running with Swiss Bank management, live log, session stats, action checkboxes, jail handling, runtime tracking, melt pagination, repair cycles, automatic CTC solving, and point-spending features.
