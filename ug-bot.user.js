@@ -1,15 +1,15 @@
 // ==UserScript==
 // @name         UG Crimes + GTA + Melt Helper v6.3.44
 // @namespace    ug-bot
-// @version      1.1.171-pub
+// @version      1.2.2
 // @description  Auto-runs crimes, GTA, melting, repair, missions, drug running with Swiss Bank management, live log, session stats, action checkboxes, jail handling, runtime tracking, melt pagination, repair cycles, automatic CTC solving, and point-spending features.
 // @match        *://www.underworldgangsters.com/*
 // @match        *://underworldgangsters.com/*
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @run-at       document-start
-// @updateURL    https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main/ug-bot.user.js
-// @downloadURL  https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main/ug-bot.user.js
+// @updateURL    https://raw.githubusercontent.com/ssdddssdfswee/ugbot/main/ug-bot.user.js
+// @downloadURL  https://raw.githubusercontent.com/ssdddssdfswee/ugbot/main/ug-bot.user.js
 // ==/UserScript==
 
 (function () {
@@ -444,7 +444,7 @@
     // BOT CONFIG
     // =========================================================================
 
-    const SCRIPT_VERSION = '1.1.171-pub';
+    const SCRIPT_VERSION = '1.2.2';
 
     const CRIME_DEFS = [
         { id: 'gang', name: 'Gang Activities' },
