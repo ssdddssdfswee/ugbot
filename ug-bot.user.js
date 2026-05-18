@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Full UG Bot v1.2.2
+// @name         Full UG Bot
 // @namespace    ug-bot
-// @version      1.2.2
+// @version      2.1.1
 // @description  Auto-runs crimes, GTA, melting, repair, missions, drug running with Swiss Bank management, live log, session stats, action checkboxes, jail handling, runtime tracking, melt pagination, repair cycles, automatic CTC solving, and point-spending features.
 // @match        *://www.underworldgangsters.com/*
 // @match        *://underworldgangsters.com/*
@@ -39,13 +39,34 @@
     // =========================================================================
 
     const CTC = (function () {
-        const SIMILARITY_FLOOR  = 0.75;
-        const SCORE_GAP_FLOOR   = 0.05;
-        const SOLVE_TIMEOUT_MS  = 8000;
-        const NORM_SIZE         = 96;
-        const COLOR_THRESHOLD   = 40;
-        const SETTLE_DELAY_MS   = 300;
-        const BLANK_THRESHOLD   = 0.01;
+        const SIMILARITY_FLOOR    = 0.70;
+        const SCORE_GAP_FLOOR     = 0.03;
+        const SOLVE_TIMEOUT_MS    = 10000;
+        const NORM_SIZE           = 128;
+        const COLOR_THRESHOLD     = 40;
+        const SETTLE_DELAY_MS     = 300;
+        const BLANK_THRESHOLD     = 0.01;
+        const ROTATION_MAX_DEG    = 30;
+        const ANGLE_OFFSETS       = [-10, -5, 0, 5, 10];
+
+        // Pre-computed Gaussian weights for gaussianSimilarity.
+        // Calculated once at script load — avoids recalculating 16,384 Math.exp()
+        // calls on every comparison (20 comparisons per CTC solve).
+        const GAUSSIAN_WEIGHTS = (() => {
+            const size  = 128; // NORM_SIZE
+            const cx    = size / 2, cy = size / 2;
+            const sigma = size / 4;
+            const twoSigSq = 2 * sigma * sigma;
+            const weights = new Float32Array(size * size);
+            for (let i = 0; i < size * size; i++) {
+                const x = i % size, y = Math.floor(i / size);
+                const dx = x - cx, dy = y - cy;
+                weights[i] = Math.exp(-(dx*dx + dy*dy) / twoSigSq);
+            }
+            return weights;
+        })();
+
+        // ── Image processing ──────────────────────────────────────────────────
 
         let isSolving = false;
 
@@ -82,22 +103,63 @@
             return c;
         }
 
-        function cropToContentCanvas(canvas) {
+        function toBinaryCanvas(canvas) {
+            const ctx  = canvas.getContext('2d');
+            const { width, height } = canvas;
+            const src  = ctx.getImageData(0, 0, width, height);
+            const out  = document.createElement('canvas');
+            out.width  = width;
+            out.height = height;
+            const octx = out.getContext('2d');
+            const dst  = octx.createImageData(width, height);
+            for (let i = 0; i < src.data.length; i += 4) {
+                const lit = Math.max(src.data[i], src.data[i+1], src.data[i+2]) > COLOR_THRESHOLD ? 255 : 0;
+                dst.data[i]   = lit;
+                dst.data[i+1] = lit;
+                dst.data[i+2] = lit;
+                dst.data[i+3] = 255;
+            }
+            octx.putImageData(dst, 0, 0);
+            return out;
+        }
+
+        function dilate(binaryCanvas, radius = 1) {
+            const { width, height } = binaryCanvas;
+            const src  = binaryCanvas.getContext('2d').getImageData(0, 0, width, height);
+            const out  = document.createElement('canvas');
+            out.width  = width;
+            out.height = height;
+            const ctx  = out.getContext('2d');
+            const dst  = ctx.createImageData(width, height);
+            for (let y = 0; y < height; y++) {
+                for (let x = 0; x < width; x++) {
+                    let lit = false;
+                    outer: for (let dy = -radius; dy <= radius; dy++) {
+                        for (let dx = -radius; dx <= radius; dx++) {
+                            const nx = x + dx, ny = y + dy;
+                            if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
+                            if (src.data[(ny * width + nx) * 4] > 127) { lit = true; break outer; }
+                        }
+                    }
+                    const i = (y * width + x) * 4;
+                    const v = lit ? 255 : 0;
+                    dst.data[i] = dst.data[i+1] = dst.data[i+2] = v;
+                    dst.data[i+3] = 255;
+                }
+            }
+            ctx.putImageData(dst, 0, 0);
+            return out;
+        }
+
+        function cropToContent(canvas) {
             const ctx = canvas.getContext('2d');
             const { width, height } = canvas;
             const { data } = ctx.getImageData(0, 0, width, height);
-
-            let minX = width;
-            let minY = height;
-            let maxX = -1;
-            let maxY = -1;
-
+            let minX = width, minY = height, maxX = -1, maxY = -1;
             for (let y = 0; y < height; y++) {
                 for (let x = 0; x < width; x++) {
-                    const i     = (y * width + x) * 4;
-                    const value = Math.max(data[i], data[i + 1], data[i + 2]);
-
-                    if (value > COLOR_THRESHOLD) {
+                    const i = (y * width + x) * 4;
+                    if (Math.max(data[i], data[i+1], data[i+2]) > COLOR_THRESHOLD) {
                         if (x < minX) minX = x;
                         if (y < minY) minY = y;
                         if (x > maxX) maxX = x;
@@ -105,90 +167,132 @@
                     }
                 }
             }
-
             if (maxX < minX || maxY < minY) return null;
-
-            const pad = 2;
+            const pad  = 3;
             minX = Math.max(0, minX - pad);
             minY = Math.max(0, minY - pad);
-            maxX = Math.min(width - 1, maxX + pad);
+            maxX = Math.min(width - 1,  maxX + pad);
             maxY = Math.min(height - 1, maxY + pad);
-
-            const cropW = maxX - minX + 1;
-            const cropH = maxY - minY + 1;
-
             const out = document.createElement('canvas');
-            out.width  = cropW;
-            out.height = cropH;
-
-            out.getContext('2d').drawImage(
-                canvas,
-                minX, minY, cropW, cropH,
-                0, 0, cropW, cropH
-            );
-
+            out.width  = maxX - minX + 1;
+            out.height = maxY - minY + 1;
+            out.getContext('2d').drawImage(canvas, minX, minY, out.width, out.height, 0, 0, out.width, out.height);
             return out;
         }
 
-        function toFingerprint(canvas) {
-            const cropped = cropToContentCanvas(canvas);
-            if (!cropped) return null;
+        function rotateCanvas(canvas, angleDeg) {
+            if (angleDeg === 0) return canvas;
+            const rad  = angleDeg * Math.PI / 180;
+            const { width: w, height: h } = canvas;
+            const cos  = Math.abs(Math.cos(rad));
+            const sin  = Math.abs(Math.sin(rad));
+            const outW = Math.ceil(w * cos + h * sin);
+            const outH = Math.ceil(w * sin + h * cos);
+            const out  = document.createElement('canvas');
+            out.width  = outW;
+            out.height = outH;
+            const ctx  = out.getContext('2d');
+            ctx.fillStyle = '#000';
+            ctx.fillRect(0, 0, outW, outH);
+            ctx.translate(outW / 2, outH / 2);
+            ctx.rotate(rad);
+            ctx.drawImage(canvas, -w / 2, -h / 2);
+            ctx.setTransform(1, 0, 0, 1, 0, 0);
+            return out;
+        }
 
-            const out = document.createElement('canvas');
+        function estimateRotationAngle(binaryCanvas) {
+            const ctx = binaryCanvas.getContext('2d');
+            const { width, height } = binaryCanvas;
+            const { data } = ctx.getImageData(0, 0, width, height);
+            let m00 = 0, m10 = 0, m01 = 0;
+            for (let y = 0; y < height; y++) {
+                for (let x = 0; x < width; x++) {
+                    if (data[(y * width + x) * 4] > 127) { m00++; m10 += x; m01 += y; }
+                }
+            }
+            if (m00 === 0) return 0;
+            const cx = m10 / m00, cy = m01 / m00;
+            let m11 = 0, m20 = 0, m02 = 0;
+            for (let y = 0; y < height; y++) {
+                for (let x = 0; x < width; x++) {
+                    if (data[(y * width + x) * 4] > 127) {
+                        const dx = x - cx, dy = y - cy;
+                        m11 += dx * dy; m20 += dx * dx; m02 += dy * dy;
+                    }
+                }
+            }
+            const angle = 0.5 * Math.atan2(2 * m11, m20 - m02) * 180 / Math.PI;
+            return Math.max(-ROTATION_MAX_DEG, Math.min(ROTATION_MAX_DEG, angle));
+        }
+
+        function normaliseToBits(cropped) {
+            if (!cropped) return null;
+            const out  = document.createElement('canvas');
             out.width  = NORM_SIZE;
             out.height = NORM_SIZE;
-
-            const ctx = out.getContext('2d');
+            const ctx  = out.getContext('2d');
             ctx.fillStyle = '#000';
             ctx.fillRect(0, 0, NORM_SIZE, NORM_SIZE);
-
-            const scale = Math.min(
-                NORM_SIZE / cropped.width,
-                NORM_SIZE / cropped.height
-            );
-
+            const scale = Math.min(NORM_SIZE / cropped.width, NORM_SIZE / cropped.height);
             const drawW = Math.max(1, Math.round(cropped.width  * scale));
             const drawH = Math.max(1, Math.round(cropped.height * scale));
             const offX  = Math.floor((NORM_SIZE - drawW) / 2);
             const offY  = Math.floor((NORM_SIZE - drawH) / 2);
-
             ctx.drawImage(cropped, offX, offY, drawW, drawH);
-
             const { data } = ctx.getImageData(0, 0, NORM_SIZE, NORM_SIZE);
             const bits = new Uint8Array(NORM_SIZE * NORM_SIZE);
-
             for (let i = 0, p = 0; i < data.length; i += 4, p++) {
-                bits[p] = Math.max(data[i], data[i + 1], data[i + 2]) > COLOR_THRESHOLD ? 1 : 0;
+                bits[p] = data[i] > 127 ? 1 : 0;
             }
-
             return bits;
+        }
+
+        function prepareCanvas(canvas) {
+            const binary  = toBinaryCanvas(canvas);
+            const dilated = dilate(binary, 1);
+            const angle   = estimateRotationAngle(dilated);
+            return { dilated, angle };
+        }
+
+        function fingerprintAtAngle(dilatedCanvas, angleDeg) {
+            const rotated = angleDeg !== 0 ? rotateCanvas(dilatedCanvas, angleDeg) : dilatedCanvas;
+            const cropped = cropToContent(rotated);
+            return normaliseToBits(cropped);
         }
 
         function isBlankFingerprint(bits) {
             if (!bits) return true;
-
             let litPixels = 0;
-            for (let i = 0; i < bits.length; i++) {
-                if (bits[i] === 1) litPixels++;
-            }
-
+            for (let i = 0; i < bits.length; i++) { if (bits[i] === 1) litPixels++; }
             return litPixels / bits.length < BLANK_THRESHOLD;
         }
 
-        function pixelSimilarity(bitsA, bitsB) {
-            let matches = 0;
+        function gaussianSimilarity(bitsA, bitsB) {
+            let weightedMatches = 0, totalWeight = 0;
             for (let i = 0; i < bitsA.length; i++) {
-                if (bitsA[i] === bitsB[i]) matches++;
+                const w = GAUSSIAN_WEIGHTS[i];
+                if (bitsA[i] === bitsB[i]) weightedMatches += w;
+                totalWeight += w;
             }
-            return matches / bitsA.length;
+            return weightedMatches / totalWeight;
         }
 
-        // Returns the CTC container element if visible, null otherwise.
-        // The CTC appears in two different locations depending on the page:
-        //   - Most pages: #ctcbox (a dedicated div, hidden by default via display:none)
-        //   - GTA page:   td.veg.lettuce.centd (always visible when present, no hiding)
+        function bestSimilarity(refBits, choiceDilated, choiceAngle, refAngle) {
+            const relativeCorrection = choiceAngle - refAngle;
+            let best = 0;
+            for (const offset of ANGLE_OFFSETS) {
+                const bits = fingerprintAtAngle(choiceDilated, -(relativeCorrection + offset));
+                if (!bits || isBlankFingerprint(bits)) continue;
+                const sim = gaussianSimilarity(refBits, bits);
+                if (sim > best) best = sim;
+            }
+            return best;
+        }
+
+        // ── CTC detection ─────────────────────────────────────────────────────
+
         function getCTCContainer() {
-            // Check standard ctcbox first
             const box = document.getElementById('ctcbox');
             if (box) {
                 const style = window.getComputedStyle(box);
@@ -197,17 +301,13 @@
                     if (rect.width > 0 && rect.height > 0) return box;
                 }
             }
-
-            // Check GTA page variant — td with classes veg, lettuce, centd
-            // Only treat it as a CTC if it contains the CTC image sources
             const gtaTd = document.querySelector('td.veg.lettuce.centd');
             if (gtaTd) {
-                const hasRefImg    = !!gtaTd.querySelector('img[src*="text.php"]');
-                const hasChoices   = gtaTd.querySelectorAll('input[type="image"]').length === 4;
-                const hasInstruct  = /match the 3 letters/i.test(gtaTd.textContent || '');
+                const hasRefImg   = !!gtaTd.querySelector('img[src*="text.php"]');
+                const hasChoices  = gtaTd.querySelectorAll('input[type="image"]').length === 4;
+                const hasInstruct = /match the 3 letters/i.test(gtaTd.textContent || '');
                 if (hasRefImg && hasChoices && hasInstruct) return gtaTd;
             }
-
             return null;
         }
 
@@ -218,21 +318,18 @@
         function getWidget() {
             const box = getCTCContainer();
             if (!box) return null;
-
             const refImg = box.querySelector('img[src*="text.php"]');
             if (!refImg) return null;
-
             const choiceInputs = [...box.querySelectorAll('input[type="image"]')];
             if (choiceInputs.length !== 4) return null;
-
             const allHaveSrc = choiceInputs.every(inp => inp.src && inp.src.trim());
             if (!allHaveSrc) return null;
-
             const hasInstruction = /match the 3 letters/i.test(box.textContent || '');
             if (!hasInstruction) return null;
-
             return { container: box, refImg, choiceInputs };
         }
+
+        // ── Solver ────────────────────────────────────────────────────────────
 
         async function doSolve(widget, logFn, solveCtx = { cancelled: false }) {
             const { refImg, choiceInputs } = widget;
@@ -241,36 +338,42 @@
                 return { solved: false, choice: null, similarity: 0, message: 'CTC solve cancelled' };
             }
 
-            const refElement = await resolveImage(refImg);
+            // Fetch reference and all 4 choices in parallel
+            const [refElement, ...choiceImages] = await Promise.all([
+                resolveImage(refImg),
+                ...choiceInputs.map(inp => resolveImage(inp))
+            ]);
 
             if (solveCtx.cancelled || !isVisible()) {
                 return { solved: false, choice: null, similarity: 0, message: 'CTC no longer active — aborted' };
             }
 
-            const refBits = toFingerprint(imageToCanvas(refElement));
+            const refCanvas = imageToCanvas(refElement);
+            const refPrep   = prepareCanvas(refCanvas);
+            const refBits   = fingerprintAtAngle(refPrep.dilated, -refPrep.angle);
 
             if (!refBits || isBlankFingerprint(refBits)) {
                 return { solved: false, choice: null, similarity: 0, message: 'CTC reference image appears blank — aborting, will retry' };
             }
 
+            const choiceCanvases = choiceImages.map(img => imageToCanvas(img));
+            const choicePreps    = choiceCanvases.map(c => prepareCanvas(c));
+
+            if (solveCtx.cancelled || !isVisible()) {
+                return { solved: false, choice: null, similarity: 0, message: 'CTC no longer active — aborted' };
+            }
+
             const results = [];
-
-            for (let i = 0; i < choiceInputs.length; i++) {
-                if (solveCtx.cancelled || !isVisible()) {
-                    return { solved: false, choice: null, similarity: 0, message: 'CTC no longer active — aborted' };
-                }
-
-                const img  = await resolveImage(choiceInputs[i]);
-                const bits = toFingerprint(imageToCanvas(img));
-
-                if (!bits || isBlankFingerprint(bits)) {
+            for (let i = 0; i < choicePreps.length; i++) {
+                const { dilated, angle } = choicePreps[i];
+                const quickBits = fingerprintAtAngle(dilated, -angle);
+                if (!quickBits || isBlankFingerprint(quickBits)) {
                     logFn(`CTC choice ${i + 1}: appears blank — skipping`);
-                    results.push({ index: i, similarity: -1, el: choiceInputs[i] });
+                    results.push({ index: i, similarity: -1, el: choiceInputs[i], canvas: choiceCanvases[i] });
                     continue;
                 }
-
-                const similarity = pixelSimilarity(refBits, bits);
-                results.push({ index: i, similarity, el: choiceInputs[i] });
+                const similarity = bestSimilarity(refBits, dilated, angle, refPrep.angle);
+                results.push({ index: i, similarity, el: choiceInputs[i], canvas: choiceCanvases[i] });
                 logFn(`CTC choice ${i + 1}: ${(similarity * 100).toFixed(1)}% match`);
             }
 
@@ -282,21 +385,18 @@
             validResults.sort((a, b) => b.similarity - a.similarity);
             const winner   = validResults[0];
             const runnerUp = validResults[1] || null;
+            const gap      = runnerUp ? winner.similarity - runnerUp.similarity : 1;
 
             if (winner.similarity < SIMILARITY_FLOOR) {
                 return {
-                    solved: false,
-                    choice: winner.index + 1,
-                    similarity: winner.similarity,
+                    solved: false, choice: winner.index + 1, similarity: winner.similarity,
                     message: `CTC: best match ${(winner.similarity * 100).toFixed(1)}% below floor — skipping`
                 };
             }
 
-            if (runnerUp && (winner.similarity - runnerUp.similarity) < SCORE_GAP_FLOOR) {
+            if (runnerUp && gap < SCORE_GAP_FLOOR) {
                 return {
-                    solved: false,
-                    choice: winner.index + 1,
-                    similarity: winner.similarity,
+                    solved: false, choice: winner.index + 1, similarity: winner.similarity,
                     message: `CTC: top two matches too close (${(winner.similarity * 100).toFixed(1)}% vs ${(runnerUp.similarity * 100).toFixed(1)}%) — skipping`
                 };
             }
@@ -305,18 +405,19 @@
                 return { solved: false, choice: winner.index + 1, similarity: winner.similarity, message: 'CTC no longer active before click — aborted' };
             }
 
-            winner.el.click();
+            humanClick(winner.el);
 
             return {
                 solved: true,
                 choice: winner.index + 1,
                 similarity: winner.similarity,
+                gap,
                 message: `CTC solved — clicked choice ${winner.index + 1} (${(winner.similarity * 100).toFixed(1)}% match)`
             };
         }
 
         let consecutiveSkips = 0;
-        const MAX_SKIPS_BEFORE_RELOAD = 10;
+        const MAX_SKIPS_BEFORE_RELOAD = 5;
 
         async function trySolve(logFn) {
             if (isSolving) {
@@ -340,9 +441,7 @@
                 setTimeout(() => {
                     solveCtx.cancelled = true;
                     resolve({
-                        solved: false,
-                        choice: null,
-                        similarity: 0,
+                        solved: false, choice: null, similarity: 0,
                         message: 'CTC solver timed out'
                     });
                 }, SOLVE_TIMEOUT_MS)
@@ -358,7 +457,8 @@
                     if (consecutiveSkips >= MAX_SKIPS_BEFORE_RELOAD) {
                         consecutiveSkips = 0;
                         logFn('CTC: too many failed attempts — reloading page for fresh CTC');
-                        gotoPage(currentPage());
+                        location.reload();
+                        return { attempted: true, solved: false, message: result.message };
                     }
                 }
                 return { attempted: true, solved: result.solved, message: result.message };
@@ -402,12 +502,8 @@
 
             function attach() {
                 const box = document.getElementById('ctcbox');
-                if (box) {
-                    observeBox(box);
-                    return;
-                }
+                if (box) { observeBox(box); return; }
 
-                // Also check for the GTA page CTC variant which is not a #ctcbox
                 if (isVisible() && !isSolving) {
                     logFn('GTA-variant CTC visible on load — solving');
                     trySolve(logFn);
@@ -424,7 +520,6 @@
                         observeBox(nextBox);
                         return;
                     }
-                    // Check for GTA page variant appearing via AJAX
                     if (isVisible() && !isSolving) {
                         logFn('GTA-variant CTC appeared — triggering solver');
                         trySolve(logFn);
@@ -440,11 +535,14 @@
         return { trySolve, attachObserver, isVisible };
     })();
 
+
+
+
     // =========================================================================
     // BOT CONFIG
     // =========================================================================
 
-    const SCRIPT_VERSION = '1.2.2';
+    const SCRIPT_VERSION = '2.1.1';
 
     const CRIME_DEFS = [
         { id: 'gang', name: 'Gang Activities' },
@@ -557,11 +655,45 @@
         bustEnabled:  false,
         bustFastMode: false,
         bustNoReload: false,
+        bustPollMin:  800,
+        bustPollMax:  1200,
+        bgCrimeEnabled: false,
+        bulletFactoryEnabled: false,
+        qtBgEnabled:         false,
+        qtBgThreshold:       1320,
+        qtBulletsEnabled:    false,
+        qtBulletsThreshold:  100000,
+        qtBulletsMin:        0,
+        qtPerkExtendEnabled: false,
+        qtPerkExtendMins:    5,
+        qtPollMin:           2000,
+        qtPollMax:           4000,
+        qtPointsEnabled:     false,
+        qtPointsThreshold:   15000000,
 
+        // QT car scanner
+        qtCarsEnabled:       false,
+        qtCarsScanInterval:  30, // seconds
+        qtCarsTypes: [
+            { b: 28, name: 'Orange',                    enabled: false, maxPrice: 100000000  },
+            { b: 27, name: 'Black Lamborghini Aventador', enabled: false, maxPrice: 100000000 },
+            { b: 26, name: 'Black Range Rover Evoque',  enabled: false, maxPrice: 100000000  },
+            { b: 25, name: 'Black Audi RS5',            enabled: false, maxPrice: 100000000  },
+            { b: 24, name: 'Black BMW M3',              enabled: false, maxPrice: 100000000  },
+            { b: 23, name: 'Black Audi A3',             enabled: false, maxPrice: 100000000  },
+            { b: 22, name: 'RS Tuner',                  enabled: false, maxPrice: 100000000  },
+            { b: 21, name: 'Tuner',                     enabled: false, maxPrice: 100000000  },
+            { b: 20, name: 'McLaren P1',                enabled: false, maxPrice: 100000000  },
+            { b: 19, name: 'Jaguar F-Type',             enabled: false, maxPrice: 100000000  },
+            { b: 18, name: 'Mercedes E63',              enabled: false, maxPrice: 100000000  },
+            { b: 17, name: 'Porsche Panamera',          enabled: false, maxPrice: 100000000  },
+            { b: 16, name: 'Range Rover Sport',         enabled: false, maxPrice: 100000000  },
+            { b: 15, name: 'Mercedes GLC Coupe',        enabled: false, maxPrice: 100000000  },
+        ],
 
         // Kill scanner settings
         killScanOnlineEnabled:  false,
-        killScanOnlineInterval: 10,   // minutes between Players Online checks
+        killScanOnlineInterval: 1,    // minutes between Players Online checks
         killSearchEnabled:      false,
         killProtectedRecheckEnabled:  false,
         killProtectedRecheckMins:     5,
@@ -573,12 +705,17 @@
         killBgCheckIntervalHrs:  6,      // Hours between BG checks per player
         killPenaltyThreshold:    0,      // Max kill penalty multiplier (0 = disabled)
 
-        maxLiveLogEntries: 500
+        maxLiveLogEntries: 500,
+
+        // Human page visit settings
+        humanPageVisitChance: 0.08,  // 8% chance per natural pause point
+        humanPageVisitMinMs: 3000,
+        humanPageVisitMaxMs: 8000,
     };
 
     const SAFETY = {
         sameCrimeMinGapMs:      3500,
-        postClickSettleMs:      500,
+        postClickSettleMs:      1500,
         postClickPollMs:        30,
         maxBurstActionsReal:    4,
         loopBackoffReloadMin:   2500,
@@ -594,6 +731,73 @@
         'black',
         'orange'
     ];
+
+    // ── Personality system ────────────────────────────────────────────────────
+    // On first run, generates a unique "personality" for this installation and
+    // stores it persistently. This makes each bot instance behave slightly
+    // differently, avoiding identical fingerprints across multiple accounts.
+
+    // Safe pages to visit — excludes any page the bot might interact with
+    const HUMAN_PAGES = [
+        'help', 'online', 'find', 'top', 'stats', 'editprofile', 'my-stats',
+        'perks', 'notes', 'notifications', 'points', 'mail', 'forum', 'oc',
+        'lottery', 'hospital', 'hitlist', 'attempts', 'auction', 'qt',
+        'betting', 'blackjack', 'dice', 'racetrack', 'gangs', 'gang-info'
+    ];
+
+    let personalityJustGenerated = false;
+
+    function getPersonality() {
+        const stored = GM_getValue('ugbot_personality', null);
+        if (stored) return stored;
+
+        // First run — generate a personality and store it permanently
+        personalityJustGenerated = true;
+        const shuffle = arr => arr.slice().sort(() => Math.random() - 0.5);
+        const pageCount = 6 + Math.floor(Math.random() * 7); // 6–12 pages
+        const personality = {
+            depositThreshold:    Math.floor(10000000 + Math.random() * 20000000), // $10M–$30M
+            drugDepositMult:     +(2 + Math.random() * 3).toFixed(1),             // 2.0–5.0
+            scanIntervalMins:    +(0.5 + Math.random() * 2).toFixed(1),           // 0.5–2.5 mins
+            timingOffsetMs:      Math.floor(-150 + Math.random() * 300),          // -150ms to +150ms
+            humanPages:          shuffle(HUMAN_PAGES).slice(0, pageCount),
+            idleVisitChancePct:  5 + Math.floor(Math.random() * 8),              // 5–12%
+            idleMinMs:           20000 + Math.floor(Math.random() * 40000),       // 20–60s idle
+        };
+        GM_setValue('ugbot_personality', personality);
+        return personality;
+    }
+
+    const PERSONALITY = getPersonality();
+
+    // Apply personality defaults — always force-apply on first generation,
+    // otherwise only set values that have never been configured
+    function applyPersonalityDefaults() {
+        const neverSet = key => GM_getValue(key, null) === null;
+        if (personalityJustGenerated || neverSet('autoDepositThreshold')) GM_setValue('autoDepositThreshold', PERSONALITY.depositThreshold);
+        if (personalityJustGenerated || neverSet('drugDepositMultiplier')) GM_setValue('drugDepositMultiplier', PERSONALITY.drugDepositMult);
+        if (personalityJustGenerated || neverSet('killScanOnlineInterval')) GM_setValue('killScanOnlineInterval', PERSONALITY.scanIntervalMins);
+    }
+
+    let lastHumanVisitAt = 0;
+
+    // Call this at natural pause points — occasionally navigates to a human page
+    async function maybeVisitHumanPage() {
+        if (!state.enabled) return false;
+        const minGapMs = 3 * 60 * 1000; // at least 3 mins between human visits
+        if (Date.now() - lastHumanVisitAt < minGapMs) return false;
+        if (Math.random() * 100 >= PERSONALITY.idleVisitChancePct) return false;
+
+        const pages = PERSONALITY.humanPages;
+        if (!pages || !pages.length) return false;
+        const page = pages[Math.floor(Math.random() * pages.length)];
+
+        lastHumanVisitAt = Date.now();
+        addLiveLog(`[Human] Visiting ?p=${page}`);
+        await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+        gotoPage(page);
+        return true;
+    }
 
     function getSetting(key, fallback) {
         try {
@@ -682,7 +886,57 @@
         set bustFastMode(v)        { setSetting('bustFastMode', !!v); },
         get bustNoReload()         { return !!getSetting('bustNoReload', DEFAULTS.bustNoReload); },
         set bustNoReload(v)        { setSetting('bustNoReload', !!v); },
+        get bustPollMin()          { return getSetting('bustPollMin', DEFAULTS.bustPollMin); },
+        set bustPollMin(v)         { setSetting('bustPollMin', Number(v)); },
+        get bustPollMax()          { return getSetting('bustPollMax', DEFAULTS.bustPollMax); },
+        set bustPollMax(v)         { setSetting('bustPollMax', Number(v)); },
+        get bgCrimeEnabled()       { return !!getSetting('bgCrimeEnabled', DEFAULTS.bgCrimeEnabled); },
+        set bgCrimeEnabled(v)      { setSetting('bgCrimeEnabled', !!v); },
+        get bulletFactoryEnabled() { return !!getSetting('bulletFactoryEnabled', DEFAULTS.bulletFactoryEnabled); },
+        set bulletFactoryEnabled(v){ setSetting('bulletFactoryEnabled', !!v); },
+        get pendingBulletRun()     { return getSetting('pendingBulletRun', null); },
+        set pendingBulletRun(v)    { setSetting('pendingBulletRun', v); },
+        get lastBulletFactoryCheck(){ return Number(getSetting('lastBulletFactoryCheck', 0)); },
+        set lastBulletFactoryCheck(v){ setSetting('lastBulletFactoryCheck', Number(v)); },
+        get qtBgEnabled()          { return !!getSetting('qtBgEnabled', DEFAULTS.qtBgEnabled); },
+        set qtBgEnabled(v)         { setSetting('qtBgEnabled', !!v); },
+        get qtBgThreshold()        { return Number(getSetting('qtBgThreshold', DEFAULTS.qtBgThreshold)) || DEFAULTS.qtBgThreshold; },
+        set qtBgThreshold(v)       { setSetting('qtBgThreshold', Number(v)); },
+        get qtBulletsEnabled()     { return !!getSetting('qtBulletsEnabled', DEFAULTS.qtBulletsEnabled); },
+        set qtBulletsEnabled(v)    { setSetting('qtBulletsEnabled', !!v); },
+        get qtBulletsThreshold()   { return Number(getSetting('qtBulletsThreshold', DEFAULTS.qtBulletsThreshold)) || DEFAULTS.qtBulletsThreshold; },
+        set qtBulletsThreshold(v)  { setSetting('qtBulletsThreshold', Number(v)); },
+        get qtBulletsMin()         { return Number(getSetting('qtBulletsMin', DEFAULTS.qtBulletsMin)); },
+        set qtBulletsMin(v)        { setSetting('qtBulletsMin', Number(v)); },
+        get qtPerkExtendEnabled()  { return !!getSetting('qtPerkExtendEnabled', DEFAULTS.qtPerkExtendEnabled); },
+        set qtPerkExtendEnabled(v) { setSetting('qtPerkExtendEnabled', !!v); },
+        get qtPerkExtendMins()     { return Number(getSetting('qtPerkExtendMins', DEFAULTS.qtPerkExtendMins)) || DEFAULTS.qtPerkExtendMins; },
+        set qtPerkExtendMins(v)    { setSetting('qtPerkExtendMins', Number(v)); },
 
+        // ── Auto Account Creation ─────────────────────────────────────────
+        get accEnabled()   { return getSetting('accEnabled', false); },
+        set accEnabled(v)  { setSetting('accEnabled', v); },
+        get accRetrieve()  { return getSetting('accRetrieve', true); },
+        set accRetrieve(v) { setSetting('accRetrieve', v); },
+        get accUsernames() { return getSetting('accUsernames', []); },
+        set accUsernames(v){ setSetting('accUsernames', v); },
+        get accNameIndex() { return getSetting('accNameIndex', 0); },
+        set accNameIndex(v){ setSetting('accNameIndex', Number(v)); },
+        get qtPollMin()            { return Number(getSetting('qtPollMin', DEFAULTS.qtPollMin)) || DEFAULTS.qtPollMin; },
+        set qtPollMin(v)           { setSetting('qtPollMin', Number(v)); },
+        get qtPollMax()            { return Number(getSetting('qtPollMax', DEFAULTS.qtPollMax)) || DEFAULTS.qtPollMax; },
+        set qtPollMax(v)           { setSetting('qtPollMax', Number(v)); },
+        get qtPointsEnabled()      { return !!getSetting('qtPointsEnabled', DEFAULTS.qtPointsEnabled); },
+        set qtPointsEnabled(v)     { setSetting('qtPointsEnabled', !!v); },
+        get qtPointsThreshold()    { return Number(getSetting('qtPointsThreshold', DEFAULTS.qtPointsThreshold)) || DEFAULTS.qtPointsThreshold; },
+        set qtPointsThreshold(v)   { setSetting('qtPointsThreshold', Number(v)); },
+
+        get qtCarsEnabled()        { return !!getSetting('qtCarsEnabled', DEFAULTS.qtCarsEnabled); },
+        set qtCarsEnabled(v)       { setSetting('qtCarsEnabled', !!v); },
+        get qtCarsScanInterval()   { return Number(getSetting('qtCarsScanInterval', DEFAULTS.qtCarsScanInterval)) || DEFAULTS.qtCarsScanInterval; },
+        set qtCarsScanInterval(v)  { setSetting('qtCarsScanInterval', Number(v)); },
+        get qtCarsTypes()          { return getSetting('qtCarsTypes', DEFAULTS.qtCarsTypes); },
+        set qtCarsTypes(v)         { setSetting('qtCarsTypes', v); },
 
         get bustLoopActive()       { return !!getSetting('bustLoopActive', false); },
         set bustLoopActive(v)      { setSetting('bustLoopActive', !!v); },
@@ -719,6 +973,10 @@
         // Username currently being searched (persists across page reload)
         get killCurrentSearch()       { return getSetting('killCurrentSearch', ''); },
         set killCurrentSearch(v)      { setSetting('killCurrentSearch', String(v || '')); },
+        get killBgWaitUntil()         { return Number(getSetting('killBgWaitUntil', 0)); },
+        set killBgWaitUntil(v)        { setSetting('killBgWaitUntil', Number(v || 0)); },
+        get killLoopCooldownUntil()   { return Number(getSetting('killLoopCooldownUntil', 0)); },
+        set killLoopCooldownUntil(v)  { setSetting('killLoopCooldownUntil', Number(v || 0)); },
         get penaltyDropsAt()          { return Number(getSetting('penaltyDropsAt', 0)); },
         set penaltyDropsAt(v)         { setSetting('penaltyDropsAt', Number(v) || 0); },
         get pendingPenaltyPage()      { return !!getSetting('pendingPenaltyPage', false); },
@@ -726,6 +984,12 @@
 
         // Kill BG check / shoot loop settings
         get killBgCheckEnabled()       { return !!getSetting('killBgCheckEnabled', false); },
+        get killSearchFormRetries()    { return getSetting('killSearchFormRetries', 0); },
+        set killSearchFormRetries(v)   { setSetting('killSearchFormRetries', Number(v)); },
+        get killBgSearchWaits()        { return getSetting('killBgSearchWaits', 0); },
+        set killBgSearchWaits(v)       { setSetting('killBgSearchWaits', Number(v)); },
+        get bfWithdrawFails()          { return getSetting('bfWithdrawFails', 0); },
+        set bfWithdrawFails(v)         { setSetting('bfWithdrawFails', Number(v)); },
         set killBgCheckEnabled(v)      { setSetting('killBgCheckEnabled', !!v); },
 
         get killShootEnabled()         { return !!getSetting('killShootEnabled', false); },
@@ -816,35 +1080,7 @@
         get accumulatedRunMs()     { return Number(getSetting('accumulatedRunMs', 0)); },
         set accumulatedRunMs(v)    { setSetting('accumulatedRunMs', Number(v)); },
 
-        get stats() {
-            return getSetting('stats', {
-                crimes: 0,
-                gtas: 0,
-                melts: 0,
-                bulletsReceived: 0,
-                repairs: 0,
-                deposits: 0,
-                jails: 0,
-                jailEscapes: 0,
-                ctcSolved: 0,
-                ctcFailed: 0,
-                missionsAccepted: 0,
-                missionsDeclined: 0,
-                missionCarsUsed: 0,
-                drugRuns: 0,
-                drugRepairs: 0,
-                swissDeposits: 0,
-                swissWithdrawals: 0,
-                crimeResets: 0,
-                gtaResets: 0,
-                meltResets: 0,
-                bustsSuccess: 0,
-                bustsFailed: 0,
-                pageLoads: 0,
-                lastActionText: 'None'
-            });
-        },
-        set stats(v) { setSetting('stats', v); },
+
 
         get liveLog()  { return getSetting('liveLog', []); },
         set liveLog(v) { setSetting('liveLog', v); }
@@ -879,7 +1115,6 @@
 
     let lastRenderedLogLength = 0;
     let lastRenderedLogFirst  = '';
-    let lastRenderedStatsJson = '';
 
     let toggleBtn                   = null;
     let autoDepositInput            = null;
@@ -897,9 +1132,25 @@
     let bustEnabledInput            = null;
     let bustFastModeInput           = null;
     let bustNoReloadInput           = null;
+    let bustPollMinEl               = null;
+    let bustPollMaxEl               = null;
+    let bgCrimeEnabledInput         = null;
+    let bulletFactoryEnabledInput   = null;
     let killProtectedRecheckInput   = null;
     let killProtectedRecheckMinsEl  = null;
-
+    let qtBgEnabledInput            = null;
+    let qtBgThresholdEl             = null;
+    let qtBulletsEnabledInput       = null;
+    let qtBulletsThresholdEl        = null;
+    let qtCarsEnabledInput          = null;
+    let qtCarsIntervalEl            = null;
+    let qtPerkExtendEnabledInput    = null;
+    let qtPerkExtendMinsEl          = null;
+    let qtBulletsMinEl              = null;
+    let qtPollMinEl                 = null;
+    let qtPollMaxEl                 = null;
+    let qtPointsEnabledInput        = null;
+    let qtPointsThresholdEl         = null;
     let killScanOnlineInput         = null;
     let killScanIntervalEl          = null;
     let killSearchInput             = null;
@@ -911,7 +1162,6 @@
     let resetGTAInput               = null;
     let resetMeltInput              = null;
     let resetTimerMinPointsEl       = null;
-    let statsEl                     = null;
     let logEl                       = null;
     let compactBtn                  = null;
     let hideBtn                     = null;
@@ -933,16 +1183,8 @@
         log(message);
     }
 
-    function updateStats(mutator) {
-        const s = { ...state.stats };
-        mutator(s);
-        state.stats = s;
-        renderStats();
-    }
-
-    function setLastActionText(text) {
-        updateStats(s => { s.lastActionText = text; });
-    }
+    function updateStats(mutator) { /* stats removed */ }
+    function setLastActionText(text) { /* stats removed */ }
 
     function getCurrentRuntimeMs() {
         const base = state.accumulatedRunMs;
@@ -975,32 +1217,6 @@
     }
 
     function resetSessionStats() {
-        state.stats = {
-            crimes: 0,
-            gtas: 0,
-            melts: 0,
-            bulletsReceived: 0,
-            repairs: 0,
-            deposits: 0,
-            jails: 0,
-            jailEscapes: 0,
-            ctcSolved: 0,
-            ctcFailed: 0,
-            missionsAccepted: 0,
-            missionsDeclined: 0,
-            missionCarsUsed: 0,
-            drugRuns: 0,
-            drugRepairs: 0,
-            swissDeposits: 0,
-            swissWithdrawals: 0,
-            crimeResets: 0,
-            gtaResets: 0,
-            meltResets: 0,
-            bustsSuccess: 0,
-            bustsFailed: 0,
-            pageLoads: 0,
-            lastActionText: 'None'
-        };
         state.liveLog           = [];
         state.accumulatedRunMs  = 0;
         state.sessionStartedAt  = state.enabled ? now() : 0;
@@ -1019,9 +1235,62 @@
         state.killCurrentSearch    = '';
         state.pendingKillAction    = null;
         clearPendingMeltResult();
-        renderStats();
         renderLiveLog();
-        addLiveLog('Session stats reset');
+        addLiveLog('Session log cleared');
+    }
+
+    // Dispatch a click with randomised coordinates within the element's bounds,
+    // so the game's click-coordinate bot detection sees realistic values.
+    // Box-Muller transform — generates a normally distributed random number
+    function randGaussian(mean, stdDev) {
+        let u, v;
+        do {
+            u = Math.random();
+            v = Math.random();
+        } while (u === 0);
+        const z = Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
+        return mean + z * stdDev;
+    }
+
+    // Returns a click coordinate clustered towards the centre of a dimension
+    // min/max define the clickable range, result is clamped within it
+    function randClickCoord(min, max) {
+        const centre = (min + max) / 2;
+        const stdDev  = (max - min) / 6; // ~99.7% of clicks within bounds
+        const val     = randGaussian(centre, stdDev);
+        return Math.round(Math.min(max, Math.max(min, val)));
+    }
+
+    function humanClick(el) {
+        if (!el) return;
+        let rect = el.getBoundingClientRect();
+        // OperaGX and some browsers return zero dimensions for elements whose
+        // parent wrapper was recently made visible — walk up to find a valid rect
+        if (rect.width === 0 || rect.height === 0) {
+            let parent = el.parentElement;
+            while (parent && parent !== document.body) {
+                const parentRect = parent.getBoundingClientRect();
+                if (parentRect.width > 0 && parentRect.height > 0) {
+                    rect = parentRect;
+                    break;
+                }
+                parent = parent.parentElement;
+            }
+        }
+        const margin = 3;
+        const xMin = rect.left + margin;
+        const xMax = rect.right  - margin;
+        const yMin = rect.top  + margin;
+        const yMax = rect.bottom - margin;
+        // Fall back to centre click if element is too small for margin
+        const x = xMax > xMin ? randClickCoord(xMin, xMax) : (rect.left + rect.right)  / 2;
+        const y = yMax > yMin ? randClickCoord(yMin, yMax) : (rect.top  + rect.bottom) / 2;
+        const ev = new MouseEvent('click', {
+            bubbles: true, cancelable: true,
+            clientX: x, clientY: y,
+            pageX: x + window.scrollX, pageY: y + window.scrollY,
+        });
+        el.dispatchEvent(ev);
     }
 
     function rand(min, max) {
@@ -1136,13 +1405,20 @@
     window.addEventListener('beforeunload', saveScrollPositions);
 
     function gotoPage(pageName, extraParams = {}) {
+
         saveScrollPositions();
         clearScheduledReload();
         reloadPending = true;
         const url = new URL(window.location.href);
         url.searchParams.set('p', pageName);
-        url.searchParams.delete('a');    // Never carry over the action/type param between pages
-        url.searchParams.delete('page'); // Never carry over pagination — causes ?p=crimes&page=1 jail bug
+
+        // Whitelist approach — only keep params explicitly passed in extraParams.
+        // Delete everything else to prevent URL pollution from other pages
+        // (e.g. ?show=bullet&id=2 from weaponry, ?myrank=19&gun=9 from bullet calculator)
+        const allowedKeys = new Set(['p', ...Object.keys(extraParams)]);
+        for (const key of [...url.searchParams.keys()]) {
+            if (!allowedKeys.has(key)) url.searchParams.delete(key);
+        }
 
         for (const [key, value] of Object.entries(extraParams)) {
             if (value == null || value === '') {
@@ -1192,7 +1468,9 @@
     function parseBulletValue(text) {
         const clean = String(text || '').replace(/\s+/g, ' ').trim();
         if (/none/i.test(clean)) return 0;
-        return Number(clean.replace(/[^0-9.]/g, '')) || 0;
+        // Take only the first number — value may be "276 (-28)" where -28 is the gang cut
+        const match = clean.match(/(\d[\d,]*)/);
+        return match ? Number(match[1].replace(/,/g, '')) : 0;
     }
 
     function parseUnits(text) {
@@ -1245,6 +1523,14 @@
     async function maybeQuickDeposit() {
         if (!state.autoDepositEnabled) return false;
         if (state.autoDrugsEnabled)    return false;
+        // Don't deposit during an active bullet factory run — but clear stale state if feature disabled
+        if (state.pendingBulletRun) {
+            if (!state.bulletFactoryEnabled) {
+                state.pendingBulletRun = null;
+            } else {
+                return false;
+            }
+        }
         if (!isCrimesPage())           return false;
 
         const money     = getPlayerMoney();
@@ -1257,7 +1543,7 @@
         state.lastActionAt = Date.now();
 
         await wait(rand(400, 900));
-        btn.click();
+        humanClick(btn);
 
         updateStats(s => {
             s.deposits += 1;
@@ -1344,6 +1630,11 @@
 
     function isGTAEnabled()   { return state.enabledActions.includes(GTA_DEF.id); }
     function isMeltEnabled()  { return state.enabledActions.includes(MELT_DEF.id); }
+
+    // Melt is only usable once GTA is unlocked — no cars available before that rank
+    function isMeltUsable() {
+        return isMeltEnabled() && !isMeltLocked() && !isGTALocked();
+    }
     function isDrugsEnabled() { return state.autoDrugsEnabled; }
 
     function isInternalGTAReady() { return now() >= state.nextGTAReadyAt; }
@@ -1522,7 +1813,7 @@
         const freshBtn = getCrimeResetButton();
         if (!freshBtn) return false;
 
-        freshBtn.click();
+        humanClick(freshBtn);
         crimeResetUsedThisVisit = true;
 
         updateStats(s => {
@@ -1578,7 +1869,7 @@
         const freshBtn = getGTAResetButton();
         if (!freshBtn) return false;
 
-        freshBtn.click();
+        humanClick(freshBtn);
 
         updateStats(s => {
             s.gtaResets     += 1;
@@ -1628,7 +1919,7 @@
         const freshBtn = getMeltResetButton();
         if (!freshBtn) return false;
 
-        freshBtn.click();
+        humanClick(freshBtn);
 
         updateStats(s => {
             s.meltResets    += 1;
@@ -1766,6 +2057,12 @@
         );
     }
 
+    function hasBankActionFail() {
+        return [...document.querySelectorAll('div.bgm.fail')].some(el =>
+            /don't have that much money/i.test(textOf(el))
+        );
+    }
+
     function hasBankDepositSuccess() {
         return [...document.querySelectorAll('div.bgm.success')].some(el =>
             /deposited/i.test(textOf(el))
@@ -1791,7 +2088,7 @@
         if (!freshInput || !freshAction) return false;
 
         freshInput.value = String(Math.floor(amount));
-        freshAction.click();
+        humanClick(freshAction);
         return true;
     }
 
@@ -1834,13 +2131,75 @@
 
         if (pending.type === 'withdraw' && hasBankWithdrawSuccess()) {
             addLiveLog(`Swiss Bank: withdrew $${pending.amount.toLocaleString()} successfully`);
+            state.bfWithdrawFails = 0; // reset on success
             updateStats(s => {
                 s.swissWithdrawals += 1;
                 s.lastActionText    = `Swiss withdrew $${pending.amount.toLocaleString()}`;
             });
             state.pendingBankAction = null;
             await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
-            gotoPage('drugs');
+            if (pending.source === 'bulletFactory' && pending.substage === 'topup') {
+                // Mid-run top-up — go back to the weaponry page for the current target
+                const run = state.pendingBulletRun;
+                const target = run?.targets?.[0];
+                if (target) {
+                    state.pendingBulletRun = { ...run, stage: 'buy' };
+                    window.location.href = getBulletFactoryUrl(target.countryId);
+                } else {
+                    state.pendingBulletRun = null;
+                    gotoPage('crimes');
+                }
+            } else if (pending.source === 'bulletFactory') {
+                // Initial withdraw confirmed — now advance stage to travel
+                if (state.pendingBulletRun) state.pendingBulletRun = { ...state.pendingBulletRun, stage: 'travel' };
+                gotoPage('cars');
+            } else {
+                gotoPage('drugs');
+            }
+            return;
+        }
+
+        // If the bank returned a failure message, clear and move on immediately
+        if (hasBankActionFail()) {
+            addLiveLog(`Swiss Bank: withdraw failed — insufficient funds in Swiss Bank`);
+            state.pendingBankAction = null;
+            if (pending.source === 'bulletFactory' && !pending.substage) {
+                // Proceed to travel with whatever cash is on hand
+                if (state.pendingBulletRun) state.pendingBulletRun = { ...state.pendingBulletRun, stage: 'travel' };
+                gotoPage('cars');
+            } else if (pending.source === 'bulletFactory' && pending.substage === 'topup') {
+                const run = state.pendingBulletRun;
+                const target = run?.targets?.[0];
+                if (target) {
+                    state.pendingBulletRun = { ...run, stage: 'buy' };
+                    window.location.href = getBulletFactoryUrl(target.countryId);
+                } else {
+                    state.pendingBulletRun = null;
+                    gotoPage('crimes');
+                }
+            } else {
+                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                gotoPage('crimes');
+            }
+            return;
+        }
+
+        // If we've already submitted once and still no success, the bank probably has insufficient funds
+        // Clear the pending action rather than looping forever
+        if (pending.attempts >= 1) {
+            const bfFails = (state.bfWithdrawFails || 0) + 1;
+            state.bfWithdrawFails = bfFails;
+            state.pendingBankAction = null;
+            if (bfFails >= 3) {
+                // 3 consecutive failed withdrawals — abort the entire bullet factory run
+                addLiveLog(`Swiss Bank: withdraw failed ${bfFails} times — aborting bullet factory run`);
+                state.pendingBulletRun = null;
+                state.bfWithdrawFails = 0;
+            } else {
+                addLiveLog(`Swiss Bank: withdraw of $${pending.amount.toLocaleString()} failed (attempt ${bfFails}/3) — retrying`);
+            }
+            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            gotoPage('crimes');
             return;
         }
 
@@ -1857,6 +2216,7 @@
         }
 
         addLiveLog(`Swiss Bank: submitting ${pending.type} of $${pending.amount.toLocaleString()}`);
+        state.pendingBankAction = { ...pending, attempts: (pending.attempts || 0) + 1 };
         const submitted = await submitSwissBankAction(pending.amount, pending.type === 'deposit');
 
         if (!submitted) {
@@ -1958,7 +2318,7 @@
         const freshSell = getDrugSellButton();
         if (!freshSell) return false;
 
-        freshSell.click();
+        humanClick(freshSell);
         addLiveLog('Drug run: Sell submitted');
         return true;
     }
@@ -1987,7 +2347,7 @@
 
         freshSelect.value  = drugOption.value;
         freshAmount.value  = String(amount);
-        freshBuy.click();
+        humanClick(freshBuy);
 
         addLiveLog(`Drug run: buy submitted — ${amount} units of ${drugOption.name}`);
         return true;
@@ -2018,7 +2378,7 @@
         if (!freshSelect || !freshGo) return false;
 
         freshSelect.value = locationValue;
-        freshGo.click();
+        humanClick(freshGo);
 
         // Set a pessimistic placeholder so the bot doesn't think drive is ready
         // immediately on the next page load. The tick sync will correct this.
@@ -2039,7 +2399,6 @@
         }
 
         if (hasCTCChallenge()) {
-            setLastActionText('CTC solving…');
             await maybeSolveCTC();
             return;
         }
@@ -2105,7 +2464,6 @@
         if (!isInternalDriveReady()) {
             const remaining = Math.ceil(getInternalDriveRemainingMs() / 1000);
             addLiveLog(`Drug run: drive not ready (${remaining}s) — returning to crimes`);
-            setLastActionText(`Drug run: drive in ${remaining}s`);
             await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
             gotoPage('crimes');
             return;
@@ -2134,7 +2492,6 @@
                     return;
                 } else {
                     addLiveLog(`Drug run: insufficient funds — cash $${cash.toLocaleString()}, Swiss $${swiss.toLocaleString()}, need $${reserve.toLocaleString()} — skipping this run`);
-                    setLastActionText('Drug run: insufficient funds — skipped');
                     await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
                     gotoPage('crimes');
                     return;
@@ -2166,7 +2523,6 @@
                     return;
                 } else {
                     addLiveLog(`Drug run: insufficient funds — cash $${cash.toLocaleString()}, Swiss $${swiss.toLocaleString()}, need $${reserve.toLocaleString()} for Heroin reserve — skipping this run`);
-                    setLastActionText('Drug run: insufficient funds — skipped');
                     await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
                     gotoPage('crimes');
                     return;
@@ -2214,10 +2570,6 @@
 
         if (hasCarRepairConfirmation()) {
             addLiveLog('Drug run: car repaired successfully — returning to drugs');
-            updateStats(s => {
-                s.drugRepairs   += 1;
-                s.lastActionText = 'Drug run: car repaired';
-            });
             await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
             gotoPage('drugs');
             return;
@@ -2238,7 +2590,7 @@
             const freshRepair = getCarPageRepairButton();
             if (!freshRepair) return;
 
-            freshRepair.click();
+            humanClick(freshRepair);
             addLiveLog('Drug run: repair button clicked');
             return;
         }
@@ -2417,9 +2769,12 @@
     // The calculator auto-selects your rank and gun from your session.
     async function fetchBulletCount(victimRankIndex, victimPrestige) {
         try {
-            // Include myrank and gun in the calculator URL — required for the result to appear
-            const myRankIndex = getPlayerRankIndex() || 20;
-            const myGun       = getPlayerGunValue(); // read actual gun from stats bar
+            // Pass myrank as 1-based index (game convention) and actual gun value
+            // getPlayerRankIndex() is 0-based, so add 1. If rank not found (-1 → 0),
+            // fall back to 20 (Regional Don) as a safe middle-ground default
+            const rawRankIdx  = getPlayerRankIndex(); // 0-based, -1 if not found → 0
+            const myRankIndex = rawRankIdx > 0 ? rawRankIdx + 1 : 20;
+            const myGun       = getPlayerGunValue();
             const url = `?p=kill&show=calc&vrank=${victimRankIndex}&armour=7&prestige=${victimPrestige}&myrank=${myRankIndex}&gun=${myGun}`;
             const resp = await fetch(url, { credentials: 'include' });
             const text = await resp.text();
@@ -2478,7 +2833,10 @@
 
             const prestigeMatch = rankText.match(/\((\d+)(?:st|nd|rd|th)\s+prestige\)/i);
             const prestige  = prestigeMatch ? parseInt(prestigeMatch[1], 10) : 0;
-            const rankName  = rankText.replace(/\s*\([^)]+\)\s*/g, '').trim();
+            const rankName  = rankText
+                .replace(/\s*\([^)]+\)\s*/g, '')  // strip (prestige) etc
+                .replace(/\s*\d+%\s*/g, '')        // strip percentage like "42%"
+                .trim();
             const rankIndex = RANKS.indexOf(rankName) + 1;
             if (rankIndex <= 0) return null;
 
@@ -2882,8 +3240,34 @@
     // 2. Adds any unknown players found there to the list as "alive" — cross-device sync
     // 3. Marks pending players (currently being searched, no result yet) so the bot
     //    doesn't try to re-search them — they just need time to be found (3hr window)
-    function syncKillExpiryFromPage() {
+    function syncKillExpiryFromPage(fromKillLoop = false) {
         const players = state.killPlayers || [];
+
+        // Clear stale bodyguard references:
+        // - Clear if BG is explicitly marked dead in kill list
+        // - Clear if BG is not in kill list AND not currently in Players Found on this page
+        //   (handles case where BG was removed after being killed)
+        // Don't clear if BG was just discovered and may not be in the list yet
+        const foundNamesOnPage = new Set(
+            [...document.querySelectorAll('.bgl.i.wb .bgm.chs:not(.pd) a[href*="?p=profile&u="]')]
+                .map(a => { try { return new URL(a.getAttribute('href'), window.location.href).searchParams.get('u').toLowerCase(); } catch(_){ return ''; } })
+                .filter(Boolean)
+        );
+        let clearedStaleBg = false;
+        for (const p of players) {
+            if (!p.bodyguard) continue;
+            const bgNameLower = p.bodyguard.toLowerCase();
+            const bgPlayer = players.find(b => b.name && b.name.toLowerCase() === bgNameLower);
+            const isDead = bgPlayer && bgPlayer.status === KILL_STATUS.DEAD;
+            const isGoneFromList = !bgPlayer;
+            const isOnPage = foundNamesOnPage.has(bgNameLower);
+            if (isDead || (isGoneFromList && !isOnPage)) {
+                addLiveLog(`Kill scanner: clearing stale BG reference on ${p.name} — ${p.bodyguard} is ${isDead ? 'dead' : 'gone'}`);
+                p.bodyguard = null;
+                clearedStaleBg = true;
+            }
+        }
+        if (clearedStaleBg) saveKillPlayers(players);
 
         // "Your men are out searching for" rows — class chs pd — these are pending
         // searches that haven't completed yet. Mark them so getNextKillTarget skips them.
@@ -2909,6 +3293,19 @@
                         if (relevant) {
                             players[idx].expectedFoundAt = now() + foundInMs;
                         }
+                        // If this pending player is a bodyguard for a kill-only target,
+                        // set killBgWaitUntil so saveSettings doesn't re-enable the kill loop
+                        if (p.isBg && p.bgFor) {
+                            const targetPlayer = players.find(t =>
+                                t.name && p.bgFor && t.name.toLowerCase() === p.bgFor.toLowerCase()
+                            );
+                            if (targetPlayer && isPlayerShootEnabled(targetPlayer.name)) {
+                                const waitUntil = now() + foundInMs + (5 * 60 * 1000); // buffer of 5 mins
+                                if (state.killBgWaitUntil < waitUntil) {
+                                    state.killBgWaitUntil = waitUntil;
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -2932,6 +3329,36 @@
         // "Players found" rows — each has a player link and a "Lost in" timer span
         const rows = [...document.querySelectorAll('.bgl.i.wb .bgm.chs:not(.pd)')];
         if (!rows.length && !pendingNames.size) return;
+
+        // Check if any kill-only player has a bodyguard currently in the pending search section
+        // If so, set killBgWaitUntil to suppress kill loop re-activation while we wait
+        // But don't suppress if the BG is already in Players Found — they're ready to shoot
+        const alreadyFoundNames = new Set([...document.querySelectorAll('.bgl.i.wb .bgm.chs:not(.pd) a[href*="?p=profile&u="]')]
+            .map(a => { try { return new URL(a.getAttribute('href'), window.location.href).searchParams.get('u').toLowerCase(); } catch(_){ return ''; } })
+            .filter(Boolean));
+        for (const p of players) {
+            if (!p.bodyguard || !isPlayerShootEnabled(p.name)) continue;
+            const bgNameLower = p.bodyguard.toLowerCase();
+            if (pendingNames.has(bgNameLower) && !alreadyFoundNames.has(bgNameLower)) {
+                // Find the pending row to get the timer
+                const bgRow = [...document.querySelectorAll('.bgl.i.wb .bgm.chs.pd')]
+                    .find(row => {
+                        const b = row.querySelector('b');
+                        return b && textOf(b).toLowerCase() === bgNameLower;
+                    });
+                if (bgRow) {
+                    const timerSpan = bgRow.querySelector('.chd');
+                    const foundInMs = timerSpan ? parseLostInMs(textOf(timerSpan)) : null;
+                    if (foundInMs != null) {
+                        const waitUntil = now() + foundInMs + (5 * 60 * 1000);
+                        if (state.killBgWaitUntil < waitUntil) {
+                            state.killBgWaitUntil = waitUntil;
+                            addLiveLog(`Kill loop: ${p.name}'s BG ${p.bodyguard} found in ${Math.ceil(foundInMs/60000)}m — suppressing kill loop`);
+                        }
+                    }
+                }
+            }
+        }
 
         let updated    = 0;
         let added      = 0;
@@ -3007,12 +3434,29 @@
 
         // Check if any bodyguard players are now alive (found) — trigger bg_shoot
         // Only if global BG check loop is enabled and penalty not too high
-        if (state.killBgCheckEnabled && !isKillPenaltyTooHigh()) for (const p of players) {
+        // Only queue from the kill loop path — not from the search loop path
+        if (fromKillLoop && state.killBgCheckEnabled && !isKillPenaltyTooHigh()) for (const p of players) {
             if (!p.isBg || !p.bgFor) continue;
             if (p.status !== KILL_STATUS.ALIVE) continue;
             if (!isPlayerShootEnabled(p.bgFor)) continue;
-            // Skip if we know required bullets and don't have enough yet
-            if (p.requiredBullets && getPlayerBullets() < p.requiredBullets) continue;
+            // Check combined bullet cost — need enough for BG shot AND original target
+            // Target cost must account for penalty increasing after killing BG (+0.1x)
+            const bgBullets      = p.requiredBullets || 0;
+            const targetPlayer   = players.find(t => t.name.toLowerCase() === p.bgFor.toLowerCase());
+            let targetBullets    = targetPlayer?.requiredBullets || 0;
+            if (targetBullets && targetPlayer) {
+                // Re-scale cached target bullets from stored penalty to post-kill penalty
+                const currentMult  = getKillPenaltyMultiplier();
+                const postKillMult = currentMult + 0.1;
+                targetBullets = Math.ceil(targetBullets * (postKillMult / Math.max(currentMult, 1.0)));
+            }
+            const totalRequired  = bgBullets + targetBullets;
+            const currentBullets = getPlayerBullets();
+            if (totalRequired > 0 && currentBullets < totalRequired) {
+                addLiveLog(`Kill loop: not enough bullets for BG + target (need ${totalRequired.toLocaleString()}, have ${currentBullets.toLocaleString()}) — waiting`);
+                continue;
+            }
+            if (bgBullets && currentBullets < bgBullets) continue;
             const pa = state.pendingKillAction;
             if (pa && (pa.stage === 'bg_shoot' || pa.targetName === p.name)) continue;
             // Verify bodyguard is actually in Players Found right now before queuing shoot
@@ -3020,13 +3464,23 @@
                 .some(a => { try { return new URL(a.getAttribute('href'), window.location.href).searchParams.get('u').toLowerCase() === p.name.toLowerCase(); } catch(_){ return false; } });
             if (!inFoundNow) continue;
             // Skip if already queued for shoot (persistent flag independent of pendingKillAction)
-            if (p.bgShootQueued) continue;
+            // But if pendingKillAction is gone, the flag is stale — clear it and re-queue
+            if (p.bgShootQueued) {
+                const pa = state.pendingKillAction;
+                if (pa && (pa.stage === 'bg_shoot' || pa.targetName === p.name)) continue;
+                // pendingKillAction was cleared — clear stale flag and re-queue
+                const bgQIdx2 = players.findIndex(pl => pl.name.toLowerCase() === p.name.toLowerCase());
+                if (bgQIdx2 !== -1) { players[bgQIdx2].bgShootQueued = false; saveKillPlayers(players); }
+            }
+            // Respect lastKillAttempt cooldown — don't re-queue if recently failed
+            if (p.lastKillAttempt && (now() - p.lastKillAttempt) < 30000) continue;
             addLiveLog(`Kill loop: bodyguard ${p.name} is now found — queuing shoot for ${p.bgFor}`);
             // Mark as queued so syncKillExpiryFromPage doesn't re-queue on every visit
             const bgQIdx = players.findIndex(pl => pl.name.toLowerCase() === p.name.toLowerCase());
             if (bgQIdx !== -1) { players[bgQIdx].bgShootQueued = true; saveKillPlayers(players); }
             state.pendingKillAction = { stage: 'bg_shoot', targetName: p.name, bgFor: p.bgFor, shootAfterBg: true };
-            state.killLoopActive = true;
+            state.killLoopActive  = true;
+            state.killBgWaitUntil = 0; // BG found — clear any pending wait
             break;
         }
 
@@ -3042,6 +3496,33 @@
             }
         }
         if (clearedExpected) saveKillPlayers(players);
+
+        // ── Death/wipe detection ──────────────────────────────────────────────
+        // If a player is stored as ALIVE but isn't in Players Found or pending
+        // searches, their search has expired or been wiped (e.g. after death).
+        // Reset them to UNKNOWN so they get re-searched on the next cycle.
+        const foundNames = new Set(
+            [...document.querySelectorAll('.bgl.i.wb .bgm.chs:not(.pd) a[href*="?p=profile&u="]')]
+                .map(a => { try { return new URL(a.getAttribute('href'), window.location.href).searchParams.get('u').toLowerCase(); } catch(_){ return ''; } })
+                .filter(Boolean)
+        );
+        let resetCount = 0;
+        for (const p of players) {
+            if (p.status !== KILL_STATUS.ALIVE) continue;
+            const nameLower = p.name.toLowerCase();
+            if (!foundNames.has(nameLower) && !pendingNames.has(nameLower)) {
+                p.status = KILL_STATUS.UNKNOWN;
+                p.lastChecked = 0;
+                delete p.searchExpiresAt;
+                delete p.expectedFoundAt;
+                resetCount++;
+            }
+        }
+        if (resetCount > 0) {
+            saveKillPlayers(players);
+            addLiveLog(`Kill scanner: reset ${resetCount} player(s) to unknown — not in Players Found or pending searches`);
+            renderKillList();
+        }
 
         // Reactivate kill loop only if a player newly appeared in Players Found OR bullets became sufficient
         if (state.killBgCheckEnabled && !state.killLoopActive && (added > 0 || newlyFound > 0)) {
@@ -3060,30 +3541,49 @@
                 if (isPlayerShootEnabled(p.name) && !isPlayerBgCheckEnabled(p.name) && !isKillPenaltyTooHigh()) return true;
                 return false;
             });
-            if (nowActive) {
+            if (nowActive && !(state.killBgWaitUntil > Date.now())) {
                 addLiveLog('Kill loop: target now in Players Found — reactivating');
+                state.killLoopCooldownUntil = 0;
                 state.killLoopActive = true;
             }
         }
 
         // Always check: players already in Players Found with Kill ticked and now sufficient bullets
         // This handles the case where bullets accumulate over time for a player already found
-        if (state.killBgCheckEnabled && !state.killLoopActive && !isKillPenaltyTooHigh()) { // bullets check — only when penalty ok
+        // Skip entirely if a bg_shoot is already queued, or if called from search loop (not kill loop)
+        const alreadyBgShooting = state.pendingKillAction?.stage === 'bg_shoot';
+        if (fromKillLoop && state.killBgCheckEnabled && !state.killLoopActive && !isKillPenaltyTooHigh() && !alreadyBgShooting) {
             const foundLinks = new Set([...document.querySelectorAll('.bgl.i.wb .bgm.chs:not(.pd) a[href*="?p=profile&u="]')]
                 .map(a => { try { return new URL(a.getAttribute('href'), window.location.href).searchParams.get('u').toLowerCase(); } catch(_){ return ''; } })
                 .filter(Boolean));
+            const currentBullets = getPlayerBullets();
             const bulletsReady = players.some(p => {
                 if (p.status !== KILL_STATUS.ALIVE) return false;
+                if (!isPlayerShootEnabled(p.name)) return false;
+                if (p.bodyguard) {
+                    // Player has a pending BG — check if BG is now in Players Found with enough combined bullets
+                    if (!foundLinks.has(p.bodyguard.toLowerCase())) return false;
+                    const bgPlayer = players.find(b => b.name && b.name.toLowerCase() === p.bodyguard.toLowerCase());
+                    const bgBullets     = bgPlayer?.requiredBullets || 0;
+                    const targetBullets = p.requiredBullets || 0;
+                    const totalRequired = bgBullets + targetBullets;
+                    if (totalRequired > 0 && currentBullets < totalRequired) {
+                        addLiveLog(`Kill loop: hoke found but need ${totalRequired.toLocaleString()} bullets total (have ${currentBullets.toLocaleString()}) — waiting`);
+                        return false;
+                    }
+                    return true;
+                }
+                // Direct kill — no pending BG
                 if (!p.requiredBullets) return false;
                 const bulletBuffer = isPlayerBgCheckEnabled(p.name) ? 1 : 0;
-                if (getPlayerBullets() < p.requiredBullets + bulletBuffer) return false;
-                if (!isPlayerShootEnabled(p.name)) return false;
+                if (currentBullets < p.requiredBullets + bulletBuffer) return false;
                 if (!foundLinks.has(p.name.toLowerCase())) return false;
                 return true;
             });
             if (bulletsReady) {
-                addLiveLog('Kill loop: bullets now sufficient for player in Players Found — reactivating');
-                state.killLoopActive = true;
+                addLiveLog('Kill loop: bullets now sufficient — reactivating kill loop');
+                state.killLoopActive  = true;
+                state.killBgWaitUntil = 0;
             }
         }
     }
@@ -3195,7 +3695,6 @@
         }
 
         if (hasCTCChallenge()) {
-            setLastActionText('CTC solving…');
             await maybeSolveCTC();
             // After CTC solve the page reloads — do NOT mark search as complete here.
             // The result will be handled on the next page load via the normal
@@ -3317,9 +3816,21 @@
         const searchBtn     = getKillSearchButton();
 
         if (!usernameInput || !searchBtn) {
-            addLiveLog('Kill scanner: search form not found — retrying next tick');
+            const retries = (state.killSearchFormRetries || 0) + 1;
+            state.killSearchFormRetries = retries;
+            if (retries >= 5) {
+                addLiveLog('Kill scanner: search form not found after 5 retries — reverting to normal script');
+                state.killSearchFormRetries = 0;
+                state.killSearchActive = false;
+                // Don't kill killLoopActive — let the scanner re-activate it naturally
+                // on the next online scan or protected recheck cycle
+                gotoPage('crimes');
+            } else {
+                addLiveLog(`Kill scanner: search form not found — retrying (${retries}/5)`);
+            }
             return;
         }
+        state.killSearchFormRetries = 0;
 
         state.lastActionAt = now();
         await wait(rand(DEFAULTS.actionDelayMin, DEFAULTS.actionDelayMax));
@@ -3336,7 +3847,7 @@
         state.killCurrentSearch = target.name;
         addLiveLog(`Kill scanner: searching ${target.name} (status: ${target.status})`);
 
-        freshSearchBtn.click();
+        humanClick(freshSearchBtn);
         // Page reloads — result handled on next load
     }
 
@@ -3371,7 +3882,7 @@
         for (const [status, group] of Object.entries(groups)) {
             if (!group.players.length) continue;
 
-            const canBgCheck = (status === KILL_STATUS.UNKNOWN || status === KILL_STATUS.ALIVE);
+            const canBgCheck = (status === KILL_STATUS.UNKNOWN || status === KILL_STATUS.ALIVE || status === KILL_STATUS.PROTECTED);
 
             html += `<div class="ug-kill-group-title">${escapeHtml(group.label)} (${group.players.length})</div>`;
 
@@ -3457,7 +3968,27 @@
                 // Bodyguard sub-row
                 if (p.bodyguard) {
                     const cols = canBgCheck ? 5 : 3;
-                    html += `<tr><td colspan="${cols}" style="font-size:9px;color:#f8c84a;padding:0 0 1px 8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">&#8594; ${escapeHtml(p.bodyguard)}</td></tr>`;
+                    // Look up the BG player to get expectedFoundAt
+                    const bgPlayer = players.find(b => b.name && b.name.toLowerCase() === p.bodyguard.toLowerCase());
+                    let bgTimer = '';
+                    if (bgPlayer && bgPlayer.expectedFoundAt) {
+                        const msLeft = bgPlayer.expectedFoundAt - now();
+                        if (msLeft > 0) {
+                            const hrs  = Math.floor(msLeft / 3600000);
+                            const mins = Math.floor((msLeft % 3600000) / 60000);
+                            const secs = Math.floor((msLeft % 60000) / 1000);
+                            bgTimer = hrs > 0
+                                ? ` <span style="color:#aaa;">(found in ${hrs}h ${mins}m)</span>`
+                                : mins > 0
+                                    ? ` <span style="color:#aaa;">(found in ${mins}m ${secs}s)</span>`
+                                    : ` <span style="color:#9fe79f;">(found in ${secs}s)</span>`;
+                        } else {
+                            bgTimer = ` <span style="color:#9fe79f;">(found — shooting soon)</span>`;
+                        }
+                    } else if (bgPlayer) {
+                        bgTimer = ` <span style="color:#aaa;">(searching...)</span>`;
+                    }
+                    html += `<tr><td colspan="${cols}" style="font-size:9px;color:#f8c84a;padding:0 0 1px 8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">&#8594; ${escapeHtml(p.bodyguard)}${bgTimer}</td></tr>`;
                 }
             }
             html += `</table>`;
@@ -3585,7 +4116,7 @@
             // to avoid re-fetch overhead in competitive busting
             await wait(rand(10, 30));
             if (!target.bustBtn.isConnected) return false;
-            target.bustBtn.click();
+            humanClick(target.bustBtn);
             addLiveLog(`Bust attempted: ${textOf(target.row.querySelector('a'))} (${target.timerText})`);
         } else {
             await wait(rand(DEFAULTS.actionDelayMin, DEFAULTS.actionDelayMax));
@@ -3593,7 +4124,7 @@
             const freshCandidates = getBustCandidates();
             if (!freshCandidates.length) return false;
             const freshTarget = freshCandidates[0];
-            freshTarget.bustBtn.click();
+            humanClick(freshTarget.bustBtn);
             addLiveLog(`Bust attempted: ${textOf(freshTarget.row.querySelector('a'))} (${freshTarget.timerText})`);
         }
 
@@ -3639,7 +4170,7 @@
                 const target = freshCandidates[0];
                 if (!target.bustBtn.isConnected) return;
 
-                target.bustBtn.click();
+                humanClick(target.bustBtn);
                 addLiveLog(`Bust (instant): ${textOf(target.row.querySelector('a'))} (${target.timerText})`);
             } finally {
                 bustObserverBusy = false;
@@ -3656,6 +4187,764 @@
             bustObserver = null;
         }
         bustObserverBusy = false;
+    }
+
+    // ── QT Perk Sniper — background polling for bodyguards and bullets ──────────
+    // Safe deposit — retries until success to prevent money being left on hand
+    async function qtSafeDeposit() {
+        let attempts = 0;
+        while (true) {
+            attempts++;
+            try {
+                const resp = await fetch(`/a/quickbank.php?type=deposit&_=${Date.now()}`, { credentials: 'include' });
+                await resp.text();
+                if (attempts > 1) addLiveLog(`QT Sniper: deposit succeeded after ${attempts} attempts`);
+                return; // success
+            } catch (e) {
+                addLiveLog(`QT Sniper: ⚠ deposit attempt ${attempts} failed — retrying in 2s (money on hand!)`);
+                await wait(2000);
+            }
+        }
+    }
+    let qtSniperTimer            = null;
+    let qtSniperActive           = false;
+    let qtSniperConsecutiveErrors = 0;
+    let crimePaused              = false;
+    let qtSniperAbortController  = null; // Abort in-flight QT fetch when crimes page loads
+
+    // ── Perk Extender — runs independently of QT sniper at a slower interval ──
+    let qtPerkExtendTimer  = null;
+    let qtPerkExtendActive = false;
+
+    function startQTPerkExtender() {
+        if (qtPerkExtendActive) return;
+        qtPerkExtendActive = true;
+        doQTPerkExtend();
+    }
+
+    function stopQTPerkExtender() {
+        qtPerkExtendActive = false;
+        if (qtPerkExtendTimer) { clearTimeout(qtPerkExtendTimer); qtPerkExtendTimer = null; }
+    }
+
+    function scheduleQTPerkExtend() {
+        if (!qtPerkExtendActive) return;
+        const intervalMs = state.qtPerkExtendMins * 60 * 1000;
+        const lastRun    = Number(getSetting('qtPerkExtendLastRun', 0));
+        const elapsed    = Date.now() - lastRun;
+        const delay      = Math.max(0, intervalMs - elapsed);
+        qtPerkExtendTimer = setTimeout(doQTPerkExtend, delay);
+    }
+
+    async function doQTPerkExtend() {
+        if (!qtPerkExtendActive || !state.enabled || !state.qtPerkExtendEnabled || crimePaused || isCrimesPage() || hasCrimePageMarkers()) {
+            scheduleQTPerkExtend();
+            return;
+        }
+
+        // Check if enough time has elapsed since last run
+        const intervalMs = state.qtPerkExtendMins * 60 * 1000;
+        const lastRun    = Number(getSetting('qtPerkExtendLastRun', 0));
+        if (Date.now() - lastRun < intervalMs) {
+            scheduleQTPerkExtend();
+            return;
+        }
+
+        setSetting('qtPerkExtendLastRun', Date.now());
+
+        try {
+            const resp = await fetch('/?p=perks', { credentials: 'include', cache: 'no-store' });
+            const text = await resp.text();
+            const parser = new DOMParser();
+            const doc = parser.parseFromString(text, 'text/html');
+            const toExtend = [];
+            const minBullets = state.qtBulletsMin;
+
+            // Bullet perks — extend if expiry = 1 and count >= qtBulletsMin
+            const bulletRows = [...doc.querySelectorAll('table.pb tr.sortable-row')];
+            for (const row of bulletRows) {
+                const id = row.dataset.id;
+                const nameEl = row.querySelector('.lm');
+                const cells = row.querySelectorAll('td');
+                const expiryEl = cells[2];
+                if (!id || !nameEl || !expiryEl) continue;
+                const bulletMatch = nameEl.textContent.match(/[\d,]+/);
+                const bulletCount = bulletMatch ? parseInt(bulletMatch[0].replace(/,/g, ''), 10) : 0;
+                const expiry = parseInt(expiryEl.textContent.trim(), 10);
+                if (expiry === 1 && bulletCount >= minBullets) {
+                    toExtend.push({ id, name: `${bulletCount.toLocaleString()} bullets` });
+                }
+            }
+
+            // BG perks (personal + robot) — always extend if expiry = 1
+            const bgPerkRows = [...doc.querySelectorAll('table.ppbot tr.sortable-row, table.pbot tr.sortable-row')];
+            for (const row of bgPerkRows) {
+                const id = row.dataset.id;
+                const nameEl = row.querySelector('.lm');
+                const cells = row.querySelectorAll('td');
+                const expiryEl = cells[2];
+                if (!id || !nameEl || !expiryEl) continue;
+                const expiry = parseInt(expiryEl.textContent.trim(), 10);
+                if (expiry === 1) toExtend.push({ id, name: nameEl.textContent.trim() });
+            }
+
+            if (toExtend.length > 0) {
+                const points = getPlayerPoints();
+                const needed = toExtend.length * 10;
+                if (points >= needed) {
+                    for (const p of toExtend) {
+                        const form = new FormData();
+                        form.append('exin', '1');
+                        await fetch(`/?p=perks&id=${p.id}`, { method: 'POST', body: form, credentials: 'include' });
+                        addLiveLog(`QT Perks: ✓ Extended ${p.name} (perk #${p.id}) to 2 deaths`);
+                    }
+                } else {
+                    addLiveLog(`QT Perks: not enough points to extend ${toExtend.length} perk(s) — need ${needed}, have ${points}`);
+                }
+            }
+        } catch (e) {
+            addLiveLog(`QT Perks: extend check error — ${e.message}`);
+        }
+
+        scheduleQTPerkExtend();
+    }
+
+    function startQTSniper() {
+        if (qtSniperActive) return;
+        qtSniperActive = true;
+        scheduleQTSniperPoll();
+    }
+
+    function stopQTSniper() {
+        qtSniperActive = false;
+        if (qtSniperTimer) { clearTimeout(qtSniperTimer); qtSniperTimer = null; }
+    }
+
+    function scheduleQTSniperPoll() {
+        if (!qtSniperActive) return;
+        qtSniperTimer = setTimeout(doQTSniperPoll, rand(state.qtPollMin, state.qtPollMax));
+    }
+
+    async function doQTSniperPoll() {
+        if (!qtSniperActive || !state.enabled || crimePaused || isCrimesPage() || hasCrimePageMarkers()) { scheduleQTSniperPoll(); return; }
+        if (!state.qtBgEnabled && !state.qtBulletsEnabled && !state.qtPointsEnabled) { scheduleQTSniperPoll(); return; }
+        if (hasCTCChallenge()) { scheduleQTSniperPoll(); return; }
+        if (actionInFlight) { scheduleQTSniperPoll(); return; }
+
+        try {
+            qtSniperAbortController = new AbortController();
+            const resp = await fetch('/?p=qt&a=perks', { credentials: 'include', cache: 'no-store', signal: qtSniperAbortController.signal });
+            const text = await resp.text();
+            const parser = new DOMParser();
+            const doc = parser.parseFromString(text, 'text/html');
+
+            let anyBought = false;
+
+            // ── Bodyguards (Personal + Robot) ────────────────────────────────
+            if (state.qtBgEnabled) {
+                const bgTables = [...doc.querySelectorAll('table.ppbot, table.pbot')];
+                for (const table of bgTables) {
+                    const rows = [...table.querySelectorAll('tr')].filter(r => r.querySelector('input[type="radio"]'));
+                    for (const row of rows) {
+                        const cells = row.querySelectorAll('td');
+                        if (cells.length < 2) continue;
+                        const priceText = cells[1] ? cells[1].textContent.trim() : '';
+                        const priceMatch = priceText.match(/[\d,]+/);
+                        if (!priceMatch) continue;
+                        const price = parseInt(priceMatch[0].replace(/,/g, ''), 10);
+                        if (price > state.qtBgThreshold) continue;
+                        // Check points balance
+                        const points = getPlayerPoints();
+                        if (points < price) {
+                            addLiveLog(`QT Sniper: BG costs ${price} points but only have ${points} — skipping`);
+                            continue;
+                        }
+                        const radio = row.querySelector('input[type="radio"]');
+                        if (!radio) continue;
+                        const form = new FormData();
+                        form.append('perk', radio.value);
+                        const buyResp = await fetch('/?p=qt&a=perks', { method: 'POST', body: form, credentials: 'include' });
+                        const buyText = await buyResp.text();
+                        if (/purchased|success|bought|thank/i.test(buyText) || !buyText.includes('error')) {
+                            addLiveLog(`QT Sniper: ✓ Bought BG for ${price} points`);
+                            anyBought = true;
+                        } else {
+                            addLiveLog(`QT Sniper: BG buy failed for ${price} points`);
+                        }
+                    }
+                }
+            }
+
+            // ── Bullets ───────────────────────────────────────────────────────
+            if (state.qtBulletsEnabled) {
+                const bulletTable = doc.querySelector('table.pb');
+                if (bulletTable) {
+                    const rows = [...bulletTable.querySelectorAll('tr')].filter(r => r.querySelector('input[type="radio"]'));
+
+                    // Collect all eligible listings first
+                    const eligible = [];
+                    for (const row of rows) {
+                        const cells = row.querySelectorAll('td');
+                        if (cells.length < 2) continue;
+                        const bulletMatch = cells[0].textContent.match(/[\d,]+/);
+                        if (!bulletMatch) continue;
+                        const bulletCount = parseInt(bulletMatch[0].replace(/,/g, ''), 10);
+                        const priceMatch = cells[1].textContent.match(/[\d,]+/);
+                        if (!priceMatch) continue;
+                        const totalPrice = parseInt(priceMatch[0].replace(/,/g, ''), 10);
+                        const pricePerBullet = totalPrice / bulletCount;
+                        if (pricePerBullet > state.qtBulletsThreshold) {
+                            continue;
+                        }
+                        if (state.qtBulletsMin > 0 && bulletCount < state.qtBulletsMin) {
+                            continue;
+                        }
+                        addLiveLog(`QT Sniper: bullet listing found — ${bulletCount.toLocaleString()} bullets @ $${Math.round(pricePerBullet).toLocaleString()}/bullet (threshold: $${state.qtBulletsThreshold.toLocaleString()})`);
+                        const radio = row.querySelector('input[type="radio"]');
+                        if (!radio) continue;
+                        eligible.push({ bulletCount, totalPrice, pricePerBullet, radio });
+                    }
+
+                    if (eligible.length > 0) {
+                        // Check total wealth once
+                        const totalNeeded = eligible.reduce((sum, e) => sum + e.totalPrice, 0);
+                        const cash  = getPlayerMoney();
+                        const swiss = getPlayerSwiss();
+                        if (cash + swiss < totalNeeded) {
+                            addLiveLog(`QT Sniper: insufficient funds for bullet purchases — skipping`);
+                        } else {
+                            // Single withdraw if needed, then buy all, then single deposit
+                            let didWithdraw = false;
+                            if (cash < totalNeeded) {
+                                try {
+                                    const wResp = await fetch(`/a/quickbank.php?type=withdraw&_=${Date.now()}`, { credentials: 'include' });
+                                    await wResp.text();
+                                    didWithdraw = true;
+                                    await wait(150);
+                                } catch (e) {
+                                    addLiveLog(`QT Sniper: withdraw failed — ${e.message}`);
+                                }
+                            }
+                            try {
+                                for (const e of eligible) {
+                                    const form = new FormData();
+                                    form.append('perk', e.radio.value);
+                                    const buyResp = await fetch('/?p=qt&a=perks', { method: 'POST', body: form, credentials: 'include' });
+                                    const buyText = await buyResp.text();
+                                    if (buyText && e.bulletCount > 0) {
+                                        addLiveLog(`QT Sniper: ✓ Bought ${e.bulletCount.toLocaleString()} bullets for $${e.totalPrice.toLocaleString()} ($${e.pricePerBullet.toLocaleString()}/bullet)`);
+                                        anyBought = true;
+                                    } else {
+                                        addLiveLog(`QT Sniper: bullet buy failed`);
+                                    }
+                                }
+                            } finally {
+                                // Always deposit after buying — even if withdraw failed, cash may have been used
+                                await qtSafeDeposit();
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── Points ───────────────────────────────────────────────────────
+            if (state.qtPointsEnabled) {
+                const qtResp = await fetch('/?p=qt', { credentials: 'include', cache: 'no-store' });
+                const qtText = await qtResp.text();
+                const qtDoc = parser.parseFromString(qtText, 'text/html');
+
+                // Only target the "Points for sale" form — has buy=points hidden input
+                const pointsForm = [...qtDoc.querySelectorAll('form')].find(f =>
+                    f.querySelector('input[name="buy"][value="points"]')
+                );
+                if (pointsForm) {
+                    const rows = [...pointsForm.querySelectorAll('tr')].filter(r => r.querySelector('input[name="id"]'));
+
+                    // Collect all eligible listings first
+                    const eligible = [];
+                    for (const row of rows) {
+                        const idInput = row.querySelector('input[name="id"]');
+                        if (!idInput) continue;
+                        const id = idInput.value;
+                        const cells = row.querySelectorAll('td');
+                        if (cells.length < 4) continue;
+                        const pointsText = cells[1].textContent.trim();
+                        if (pointsText.startsWith('$')) continue;
+                        const pointsCount = parseInt(pointsText.replace(/,/g, ''), 10);
+                        const totalPrice = parseInt(cells[2].textContent.replace(/[^0-9]/g, ''), 10);
+                        const perPoint = parseInt(cells[3].textContent.replace(/[^0-9]/g, ''), 10);
+                        if (isNaN(pointsCount) || isNaN(totalPrice) || isNaN(perPoint)) continue;
+                        if (perPoint > state.qtPointsThreshold) continue;
+                        eligible.push({ id, pointsCount, totalPrice, perPoint });
+                    }
+
+                    if (eligible.length > 0) {
+                        const totalNeeded = eligible.reduce((sum, e) => sum + e.totalPrice, 0);
+                        const cash  = getPlayerMoney();
+                        const swiss = getPlayerSwiss();
+                        if (cash + swiss < totalNeeded) {
+                            addLiveLog(`QT Sniper: insufficient funds for points purchases — skipping`);
+                        } else {
+                            // Always withdraw first and deposit after — ensures money
+                            // never sits exposed on hand after points purchases
+                            let didWithdraw = false;
+                            try {
+                                const wResp = await fetch(`/a/quickbank.php?type=withdraw&_=${Date.now()}`, { credentials: 'include' });
+                                await wResp.text();
+                                didWithdraw = true;
+                                await wait(150);
+                            } catch (we) {
+                                addLiveLog(`QT Sniper: withdraw failed — ${we.message}`);
+                            }
+                            try {
+                                for (const e of eligible) {
+                                    const buyForm = new FormData();
+                                    buyForm.append('buy', 'points');
+                                    buyForm.append('id', e.id);
+                                    const buyResp = await fetch('/?p=qt', { method: 'POST', body: buyForm, credentials: 'include' });
+                                    await buyResp.text();
+                                    addLiveLog(`QT Sniper: ✓ Bought ${e.pointsCount.toLocaleString()} points for $${e.totalPrice.toLocaleString()} ($${e.perPoint.toLocaleString()}/point)`);
+                                    anyBought = true;
+                                }
+                            } finally {
+                                if (didWithdraw) {
+                                    await qtSafeDeposit();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── Perk expiry extension ─────────────────────────────────────────
+            // After all purchases, fetch ?p=perks once and extend any BG or
+            // bullet perks (5000+ bullets) with expiry of 1 death
+            if (anyBought) {
+                const perksResp = await fetch('/?p=perks', { credentials: 'include', cache: 'no-store' });
+                const perksText = await perksResp.text();
+                const perksDoc = parser.parseFromString(perksText, 'text/html');
+                const toExtend = [];
+
+                // Check bullet perks — only extend if 5000+ bullets and expiry = 1
+                const bulletRows = [...perksDoc.querySelectorAll('table.pb tr.sortable-row')];
+                for (const row of bulletRows) {
+                    const id = row.dataset.id;
+                    const nameEl = row.querySelector('.lm');
+                    const cells = row.querySelectorAll('td');
+                    const expiryEl = cells[2];
+                    if (!id || !nameEl || !expiryEl) continue;
+                    const bulletMatch = nameEl.textContent.match(/[\d,]+/);
+                    const bulletCount = bulletMatch ? parseInt(bulletMatch[0].replace(/,/g, ''), 10) : 0;
+                    const expiry = parseInt(expiryEl.textContent.trim(), 10);
+                    if (expiry === 1 && bulletCount >= 5000) toExtend.push({ id, name: `${bulletCount.toLocaleString()} bullets` });
+                }
+
+                // Check BG perks (personal + robot) — always extend if expiry = 1
+                const bgPerkRows = [...perksDoc.querySelectorAll('table.ppbot tr.sortable-row, table.pbot tr.sortable-row')];
+                for (const row of bgPerkRows) {
+                    const id = row.dataset.id;
+                    const nameEl = row.querySelector('.lm');
+                    const cells = row.querySelectorAll('td');
+                    const expiryEl = cells[2];
+                    if (!id || !nameEl || !expiryEl) continue;
+                    const expiry = parseInt(expiryEl.textContent.trim(), 10);
+                    if (expiry === 1) toExtend.push({ id, name: nameEl.textContent.trim() });
+                }
+
+                if (toExtend.length > 0) {
+                    const points = getPlayerPoints();
+                    if (points >= toExtend.length * 10) {
+                        await Promise.all(toExtend.map(async p => {
+                            const form = new FormData();
+                            form.append('exin', '1');
+                            await fetch(`/?p=perks&id=${p.id}`, { method: 'POST', body: form, credentials: 'include' });
+                            addLiveLog(`QT Sniper: ✓ Extended ${p.name} (perk #${p.id}) to 2 deaths`);
+                        }));
+                    } else {
+                        addLiveLog(`QT Sniper: not enough points to extend ${toExtend.length} perk(s) — need ${toExtend.length * 10}, have ${points}`);
+                    }
+                }
+            }
+
+        } catch (e) {
+            qtSniperConsecutiveErrors++;
+            if (qtSniperConsecutiveErrors === 1 || qtSniperConsecutiveErrors % 10 === 0) {
+                addLiveLog(`QT Sniper: error — ${e.message}${qtSniperConsecutiveErrors > 1 ? ` (x${qtSniperConsecutiveErrors})` : ''}`);
+            }
+        } finally {
+            scheduleQTSniperPoll();
+        }
+    }
+
+    // ── QT Car Scanner ───────────────────────────────────────────────────────
+    let qtCarScanTimer  = null;
+    let qtCarScanActive = false;
+
+    function startQTCarScanner() {
+        if (qtCarScanActive) return;
+        qtCarScanActive = true;
+        scheduleQTCarScan();
+    }
+
+    function stopQTCarScanner() {
+        qtCarScanActive = false;
+        if (qtCarScanTimer) { clearTimeout(qtCarScanTimer); qtCarScanTimer = null; }
+    }
+
+    function scheduleQTCarScan() {
+        if (!qtCarScanActive) return;
+        const intervalMs = state.qtCarsScanInterval * 1000;
+        qtCarScanTimer = setTimeout(doQTCarScan, intervalMs);
+    }
+
+    async function doQTCarScan() {
+        if (!qtCarScanActive || !state.enabled || !state.qtCarsEnabled || crimePaused || isCrimesPage() || hasCrimePageMarkers()) { scheduleQTCarScan(); return; }
+        if (hasCTCChallenge()) { scheduleQTCarScan(); return; }
+        if (actionInFlight) { scheduleQTCarScan(); return; }
+
+        const carTypes = state.qtCarsTypes || DEFAULTS.qtCarsTypes;
+        const enabled  = carTypes.filter(t => t.enabled);
+        if (!enabled.length) { scheduleQTCarScan(); return; }
+
+        try {
+            const parser = new DOMParser();
+            let totalSpent = 0;
+            let didWithdraw = false;
+
+            for (const carType of enabled) {
+                // Fetch this car type's QT page
+                const resp = await fetch(`/?p=qt&a=cars&b=${carType.b}`, { credentials: 'include', cache: 'no-store' });
+                const text = await resp.text();
+                const doc  = parser.parseFromString(text, 'text/html');
+
+                // Find all cars in the table under the max price
+                const rows = [...doc.querySelectorAll('table.rdt tr')].filter(r => r.querySelector('input[type="checkbox"]'));
+                const eligible = [];
+
+                for (const row of rows) {
+                    const checkbox = row.querySelector('input[type="checkbox"]');
+                    if (!checkbox) continue;
+                    const carId = Object.keys(Object.fromEntries([...checkbox.name.matchAll(/id\[(\d+)\]/g)].map(m => [m[1], true])))[0]
+                        || checkbox.name.match(/id\[(\d+)\]/)?.[1];
+                    if (!carId) continue;
+                    const price = parseInt(checkbox.value, 10);
+                    if (isNaN(price) || price > carType.maxPrice) continue;
+                    // Get car name for logging
+                    const nameEl = row.querySelector('th a');
+                    const carName = nameEl ? nameEl.textContent.trim() : `Car #${carId}`;
+                    eligible.push({ carId, price, carName });
+                }
+
+                if (!eligible.length) continue;
+
+                // Check we have enough funds
+                const totalNeeded = eligible.reduce((s, e) => s + e.price, 0);
+                const cash  = getPlayerMoney();
+                const swiss = getPlayerSwiss();
+
+                if (cash + swiss < totalNeeded) {
+                    addLiveLog(`QT Cars: insufficient funds for ${carType.name} — need $${totalNeeded.toLocaleString()}, have $${(cash + swiss).toLocaleString()}`);
+                    continue;
+                }
+
+                // Quick withdraw if needed
+                if (!didWithdraw && cash < totalNeeded) {
+                    try {
+                        const wResp = await fetch(`/a/quickbank.php?type=withdraw&_=${Date.now()}`, { credentials: 'include' });
+                        await wResp.text();
+                        didWithdraw = true;
+                        await wait(200);
+                    } catch (e) {
+                        addLiveLog(`QT Cars: withdraw failed — ${e.message}`);
+                        continue;
+                    }
+                }
+
+                // Buy each eligible car
+                for (const car of eligible) {
+                    try {
+                        // Step 1: POST to select the car and get confirmation page
+                        const buyForm = new FormData();
+                        buyForm.append(`id[${car.carId}]`, String(car.price));
+                        buyForm.append('buy', 'Buy');
+                        const buyResp = await fetch(`/?p=qt&a=cars&b=${carType.b}`, {
+                            method: 'POST',
+                            body: buyForm,
+                            credentials: 'include'
+                        });
+                        const buyText = await buyResp.text();
+                        const buyDoc  = parser.parseFromString(buyText, 'text/html');
+
+                        // Check if confirmation is present
+                        const confirmBtn = buyDoc.querySelector('input[name="confirm"]');
+                        if (!confirmBtn) {
+                            addLiveLog(`QT Cars: no confirm button for ${car.carName} — may have sold already`);
+                            continue;
+                        }
+
+                        // Step 2: POST confirmation
+                        const confirmForm = new FormData();
+                        confirmForm.append(`id[${car.carId}]`, String(car.price));
+                        confirmForm.append('buy', 'Buy');
+                        confirmForm.append('confirm', 'Confirm');
+                        const confirmResp = await fetch(`/?p=qt&a=cars&b=${carType.b}`, {
+                            method: 'POST',
+                            body: confirmForm,
+                            credentials: 'include'
+                        });
+                        const confirmText = await confirmResp.text();
+
+                        if (/successfully|bought/i.test(confirmText)) {
+                            addLiveLog(`QT Cars: ✓ Bought ${car.carName} for $${car.price.toLocaleString()}`);
+                            totalSpent += car.price;
+                        } else {
+                            addLiveLog(`QT Cars: failed to buy ${car.carName} — may have sold`);
+                        }
+
+                        await wait(rand(150, 300));
+                    } catch (e) {
+                        addLiveLog(`QT Cars: error buying ${car.carName} — ${e.message}`);
+                    }
+                }
+            }
+
+            // Quick deposit after all purchases if we withdrew
+            if (didWithdraw || totalSpent > 0) {
+                try {
+                    await fetch(`/a/quickbank.php?type=deposit&_=${Date.now()}`, { credentials: 'include' });
+                } catch (_) {}
+            }
+        } catch (e) {
+            addLiveLog(`QT Cars: scan error — ${e.message}`);
+        }
+
+        scheduleQTCarScan();
+    }
+    let bgCrimeTimer  = null;
+    let bgCrimeActive = false;
+    let bgCrimeToken  = null;
+    let bgCrimeCooldowns = {};
+
+    function startBgCrime() {
+        if (bgCrimeActive) return;
+        bgCrimeActive = true;
+        scheduleBgCrimePoll();
+    }
+
+    function stopBgCrime() {
+        bgCrimeActive = false;
+        if (bgCrimeTimer) { clearTimeout(bgCrimeTimer); bgCrimeTimer = null; }
+        bgCrimeToken = null;
+        bgCrimeCooldowns = {};
+    }
+
+    function scheduleBgCrimePoll() {
+        if (!bgCrimeActive) return;
+        const crimeIds = ['7', '6', '5', '4', '3', 'drug', '2', '1'];
+        // bgCrimeCooldowns stores absolute timestamps (ms) when each crime is ready
+        const nowMs = Date.now();
+        const available = crimeIds.some(id => (bgCrimeCooldowns[id] ?? 0) <= nowMs);
+        let delay = 1000;
+        if (!available) {
+            const soonestAt = crimeIds
+                .filter(id => bgCrimeCooldowns[id] !== undefined && bgCrimeCooldowns[id] > nowMs)
+                .map(id => bgCrimeCooldowns[id])
+                .sort((a, b) => a - b)[0];
+            delay = soonestAt ? Math.max(200, soonestAt - nowMs) : 5000;
+        }
+        bgCrimeTimer = setTimeout(doBgCrimePoll, delay);
+    }
+
+    async function doBgCrimePoll() {
+        if (!bgCrimeActive || !state.bgCrimeEnabled || !state.enabled || crimePaused) { scheduleBgCrimePoll(); return; }
+        if (hasCTCChallenge()) { scheduleBgCrimePoll(); return; }
+
+        try {
+            const crimeIds = ['7', '6', '5', '4', '3', 'drug', '2', '1'];
+
+            // Only fetch crimes page if we don't have a cached token
+            // After initial fetch, we chain tokens from each crime response
+            if (!bgCrimeToken) {
+                const pageResp = await fetch('/?p=crimes', { credentials: 'include', cache: 'no-store' });
+                const pageText = await pageResp.text();
+                const parser = new DOMParser();
+                const doc = parser.parseFromString(pageText, 'text/html');
+
+                // Check for jail
+                if (doc.querySelector('#jailn') || pageText.includes('jailn')) {
+                    scheduleBgCrimePoll();
+                    return;
+                }
+
+                // Get token
+                const scripts = [...doc.querySelectorAll('script')];
+                const crimeScript = scripts.find(s => s.textContent.includes('unluckykidda'));
+                const token = crimeScript?.textContent.match(/var unluckykidda\s*=\s*["']([a-f0-9]+)["']/)?.[1];
+                if (!token) { scheduleBgCrimePoll(); return; }
+
+                bgCrimeToken = token;
+
+                // Get initial cooldowns — convert relative seconds to absolute timestamps
+                const timingMatches = [...(crimeScript?.textContent.matchAll(/timing\["([^"]+)"\]\s*=\s*"?(-?\d+)"?/g) || [])];
+                timingMatches.forEach(m => {
+                    const secs = parseInt(m[2]);
+                    bgCrimeCooldowns[m[1]] = secs <= 0 ? 0 : Date.now() + (secs * 1000);
+                });
+            }
+
+            // Commit all available crimes using cached cooldowns
+            const nowMs = Date.now();
+            const available = crimeIds.filter(id => (bgCrimeCooldowns[id] ?? 0) <= nowMs);
+            for (const id of available) {
+                if (!bgCrimeToken) break;
+                if (!bgCrimeActive || !state.bgCrimeEnabled) break;
+
+                const resp = await fetch(`/a/crime.php?id=${id}&noob=${bgCrimeToken}&unlucky=${rand(4,196)}&kidda=${rand(4,18)}&_=${Date.now()}`, {
+                    credentials: 'include'
+                });
+                const text = await resp.text();
+
+                // Check for CTC in response
+                if (/match the letters|captcha/i.test(text)) {
+                    scheduleBgCrimePoll();
+                    return;
+                }
+
+                const newToken = text.match(/var unluckykidda\s*=\s*["']([a-f0-9]+)["']/)?.[1];
+                const result = text.match(/^([^<\n]+)/)?.[1]?.trim();
+
+                if (newToken) {
+                    bgCrimeToken = newToken;
+                    // Update cooldown as absolute timestamp
+                    const timingMatch = text.match(new RegExp(`timing\\["${id}"\\]\\s*=\\s*"?(\\d+)"?`));
+                    if (timingMatch) bgCrimeCooldowns[id] = Date.now() + (parseInt(timingMatch[1]) * 1000);
+                    addLiveLog(`BG Crime: ${result || 'committed crime ' + id}`);
+                } else {
+                    // Token rejected — clear it so next poll re-fetches crimes page
+                    bgCrimeToken = null;
+                    break;
+                }
+                await wait(150);
+            }
+        } catch (e) {
+            addLiveLog(`BG Crime: error — ${e.message}`);
+            bgCrimeToken = null; // clear token on error so next poll re-fetches
+        }
+        scheduleBgCrimePoll();
+    }
+
+    // ── Bullet Factory System ─────────────────────────────────────────────────
+    // Checks the Global Owners page every 30 minutes (on the half-hour).
+    // Finds countries with bullet factories that have 300+ bullets, withdraws
+    // cash and travels to each to buy all available stock.
+
+    const BULLET_FACTORY_CHECK_INTERVAL_MS = 30 * 60 * 1000; // 30 minutes
+    const BULLET_FACTORY_MIN_STOCK         = 300;
+    const BULLET_FACTORY_COST_PER_BULLET   = 10000; // safe upper bound
+
+    // Returns the timestamp of the most recent half-hour boundary (e.g. 12:30, 13:00)
+    // with a 30-second grace period to allow the server to restock
+    function lastHalfHourBoundary() {
+        const now = Date.now();
+        const interval = BULLET_FACTORY_CHECK_INTERVAL_MS; // 30 min in ms
+        const boundary = Math.floor(now / interval) * interval;
+        const gracePeriod = 5 * 1000; // 5 seconds
+        // Only consider this boundary "passed" if we're at least 30s past it
+        return (now - boundary >= gracePeriod) ? boundary : boundary - interval;
+    }
+
+    function isBulletFactoryCheckDue() {
+        if (!state.bulletFactoryEnabled) return false;
+        if (state.pendingBulletRun) return false;
+        // Fire if we haven't run since the most recent half-hour boundary
+        // This means: fire immediately on enable, fire again whenever a new
+        // boundary passes (1:00, 1:30, 2:00 etc.), and catch up if missed
+        return state.lastBulletFactoryCheck < lastHalfHourBoundary();
+    }
+
+    // Fetches the Global Owners page and returns countries with 300+ bullet stock
+    // sorted by stock descending (most bullets first)
+    async function fetchBulletFactoryStocks() {
+        try {
+            const resp = await fetch('/?p=property', { credentials: 'include', cache: 'no-store' });
+            const text = await resp.text();
+            const parser = new DOMParser();
+            const doc = parser.parseFromString(text, 'text/html');
+
+            // Find the Bullet Factory row in the Criminal Properties table
+            const rows = [...doc.querySelectorAll('table.rdt tr')];
+            const bfRow = rows.find(r => /bullet factory/i.test(r.querySelector('th')?.textContent || ''));
+            if (!bfRow) return [];
+
+            const cells = [...bfRow.querySelectorAll('td')];
+            const countries = ['England', 'Mexico', 'Russia', 'South Africa', 'USA'];
+            const results = [];
+
+            cells.forEach((cell, i) => {
+                const country = countries[i];
+                if (!country) return;
+                const stockEl = cell.querySelector('.cg');
+                if (!stockEl) return;
+                const match = stockEl.textContent.match(/([\d,]+)\s*bullet/i);
+                if (!match) return;
+                const stock = parseInt(match[1].replace(/,/g, ''), 10);
+                if (stock >= BULLET_FACTORY_MIN_STOCK) {
+                    results.push({ country, stock, countryId: i + 1 });
+                }
+            });
+
+            // Sort: current country first (no drive needed), then by stock descending
+            const playerCountry = getPlayerLocation().toLowerCase();
+            results.sort((a, b) => {
+                const aHome = a.country.toLowerCase() === playerCountry;
+                const bHome = b.country.toLowerCase() === playerCountry;
+                if (aHome && !bHome) return -1;
+                if (bHome && !aHome) return 1;
+                return b.stock - a.stock;
+            });
+            return results;
+        } catch (e) {
+            addLiveLog(`Bullet factory: error fetching property page — ${e.message}`);
+            return [];
+        }
+    }
+
+    // Starts a bullet factory run — checks stock and sets up pending run state
+    async function startBulletFactoryRun() {
+        addLiveLog('Bullet factory: checking Global Owners page for stock...');
+        // Record the current boundary as checked — next trigger will be the NEXT boundary
+        state.lastBulletFactoryCheck = lastHalfHourBoundary();
+
+        const stocks = await fetchBulletFactoryStocks();
+        if (!stocks.length) {
+            addLiveLog('Bullet factory: no countries have 300+ bullets — skipping');
+            return;
+        }
+
+        const totalBullets = stocks.reduce((sum, s) => sum + s.stock, 0);
+        const withdrawAmount = totalBullets * BULLET_FACTORY_COST_PER_BULLET;
+
+        // If we already have enough cash on hand, skip the bank withdraw entirely
+        const cashOnHand = getPlayerMoney();
+        if (cashOnHand >= withdrawAmount) {
+            addLiveLog(`Bullet factory: found ${totalBullets} bullets across ${stocks.length} countries — enough cash on hand, skipping withdraw`);
+            state.pendingBulletRun = { targets: stocks, withdrawAmount, stage: 'travel' };
+            return;
+        }
+
+        addLiveLog(`Bullet factory: found ${totalBullets} bullets across ${stocks.length} countries — withdrawing $${withdrawAmount.toLocaleString()}`);
+
+        // Store the pending run
+        state.pendingBulletRun = {
+            targets: stocks,
+            withdrawAmount,
+            stage: 'withdraw'
+        };
+    }
+
+    // Returns the weaponry page URL for a given country ID
+    function getBulletFactoryUrl(countryId) {
+        return `/?p=weaponry&show=bullet&id=${countryId}`;
     }
 
     // ── No Reload Bust — background fetch polling ─────────────────────────────
@@ -3678,12 +4967,12 @@
 
     function scheduleNoReloadBustPoll() {
         if (!noReloadBustActive) return;
-        const delay = rand(800, 1200);
+        const delay = rand(state.bustPollMin, state.bustPollMax);
         noReloadBustTimer = setTimeout(doNoReloadBustPoll, delay);
     }
 
     async function doNoReloadBustPoll() {
-        if (!noReloadBustActive || !state.bustNoReload || !state.enabled) {
+        if (!noReloadBustActive || !state.bustNoReload || !state.enabled || crimePaused) {
             scheduleNoReloadBustPoll();
             return;
         }
@@ -3712,10 +5001,8 @@
                 );
                 const bustText = await bustResp.text();
                 if (/helped .+ out of jail/i.test(bustText)) {
-                    updateStats(s => { s.bustsSuccess = (s.bustsSuccess || 0) + 1; });
                     addLiveLog(`No reload bust: ✓ busted ${player}`);
                 } else if (/failed helping/i.test(bustText)) {
-                    updateStats(s => { s.bustsFailed = (s.bustsFailed || 0) + 1; });
                 }
             }
         } catch (e) {
@@ -3738,7 +5025,6 @@
 
         // Handle CTC first
         if (hasCTCChallenge()) {
-            setLastActionText('CTC solving…');
             await maybeSolveCTC();
             return;
         }
@@ -3747,7 +5033,6 @@
         const ownRow = getOwnJailRow();
         if (ownRow) {
             addLiveLog('Jailed after failed bust');
-            updateStats(s => { s.jails += 1; });
             if (state.leaveJailEnabled) {
                 const didLeave = await tryLeaveJail();
                 if (didLeave) {
@@ -3762,7 +5047,6 @@
             jailPassiveMode = true;
             jailHadOwnRow   = true;
             const jailMs = getOwnJailTimerMs();
-            setLastActionText(jailMs != null ? `Busting: in jail (${Math.ceil(jailMs / 1000)}s)` : 'Busting: in jail');
             return;
         }
 
@@ -3770,18 +5054,15 @@
         if (!bustResultHandledThisLoad) {
             if (hasBustSuccess()) {
                 bustResultHandledThisLoad = true;
-                updateStats(s => { s.bustsSuccess += 1; s.lastActionText = 'Bust: success'; });
                 addLiveLog('Bust successful');
             } else if (hasBustFailure()) {
                 bustResultHandledThisLoad = true;
-                updateStats(s => { s.bustsFailed += 1; s.lastActionText = 'Bust: failed'; });
                 addLiveLog('Bust failed');
             }
         }
 
         // If jail is empty, just wait — the game's AJAX refreshes #jailn every 3s
         if (isBustJailEmpty()) {
-            setLastActionText('Busting: jail empty — waiting');
             return;
         }
 
@@ -3792,13 +5073,11 @@
             // Also attempt an immediate bust for any already-present targets
             const didBust = await doBust(true);
             if (!didBust) {
-                setLastActionText('Busting: waiting for prisoners (instant mode)');
             }
         } else {
             stopBustObserver();
             const didBust = await doBust(false);
             if (!didBust) {
-                setLastActionText('Busting: no targets');
             }
         }
     }
@@ -3852,20 +5131,43 @@
     async function waitForCrimeStateChange(id, token) {
         const start        = now();
         const initialState = getCrimeState(id);
+        // Pause QT sniper during settle window so its fetches don't interfere
+        // with the crime AJAX response
+        crimePaused = true;
+        const showmessi = document.querySelector('#showmessi');
+        if (showmessi) showmessi.textContent = '';
 
-        while (now() - start < SAFETY.postClickSettleMs) {
-            if (!isRunValid(token)) return 'cancelled';
-            if (isLikelyJailPage()) return 'jail';
-            if (hasCTCChallenge())  return 'ctc';
+        try {
+            while (now() - start < SAFETY.postClickSettleMs) {
+                if (!isRunValid(token)) return 'cancelled';
+                if (isLikelyJailPage()) return 'jail';
+                if (hasCTCChallenge())  return 'ctc';
 
-            const currentState = getCrimeState(id);
-            if (initialState === 'available' && currentState !== 'available') return 'changed';
-            if (!isCrimesPage() && !hasCrimePageMarkers()) return 'changed';
+                const currentState = getCrimeState(id);
+                if (initialState === 'available' && currentState !== 'available') return 'changed';
+                if (!isCrimesPage() && !hasCrimePageMarkers()) return 'changed';
+                if (showmessi && showmessi.textContent.trim().length > 0) return 'changed';
 
-            await wait(SAFETY.postClickPollMs);
+                await wait(SAFETY.postClickPollMs);
+            }
+
+            return 'timeout';
+        } finally {
+            crimePaused = false;
+            // Reschedule all background loops that were cancelled during the crime window
+            if (qtSniperActive)     scheduleQTSniperPoll();
+            if (qtPerkExtendActive) scheduleQTPerkExtend();
+            if (qtCarScanActive)    scheduleQTCarScan();
+            if (bgCrimeActive)      scheduleBgCrimePoll();
+            if (noReloadBustActive) scheduleNoReloadBustPoll();
         }
+    }
 
-        return 'timeout';
+    // Reads the unluckykidda token from the current crimes page script tag
+    function getCrimeToken() {
+        const scripts = [...document.querySelectorAll('script')];
+        const crimeScript = scripts.find(s => s.textContent.includes('unluckykidda'));
+        return crimeScript?.textContent.match(/var unluckykidda\s*=\s*["']([a-f0-9]+)["']/)?.[1] || null;
     }
 
     async function clickCrimeById(id, token, useBurstDelay = false) {
@@ -3895,7 +5197,7 @@
 
             state.lastActionAt = now();
             lastCrimeClick     = { id, at: now() };
-            freshBtn.click();
+            humanClick(freshBtn);
 
             return true;
         } finally {
@@ -3939,7 +5241,6 @@
 
             if (outcome === 'ctc') {
                 addLiveLog('CTC appeared mid-burst — pausing burst, solver will handle it');
-                updateStats(s => { s.lastActionText = 'CTC solving…'; });
                 break;
             }
 
@@ -3981,11 +5282,9 @@
             if (!isRunValid(token)) break;
             if (hasCTCChallenge()) {
                 addLiveLog('CTC appeared during fast burst — pausing to solve');
-                updateStats(s => { s.lastActionText = 'CTC solving…'; });
                 break;
             }
             if (isLikelyJailPage()) {
-                updateStats(s => { s.jails += 1; s.lastActionText = 'Jailed during fast burst'; });
                 addLiveLog('Jailed during fast burst');
                 break;
             }
@@ -4005,7 +5304,7 @@
 
                 state.lastActionAt = now();
                 lastCrimeClick     = { id, at: now() };
-                btn.click();
+                humanClick(btn);
                 actions++;
 
                 updateStats(s => {
@@ -4054,13 +5353,8 @@
         const freshBtn = getGTAStealButton();
         if (!freshBtn || freshBtn.disabled) return false;
 
-        freshBtn.click();
+        humanClick(freshBtn);
         markGTACooldownStarted();
-
-        updateStats(s => {
-            s.gtas          += 1;
-            s.lastActionText = 'GTA attempted';
-        });
         addLiveLog('GTA attempted');
 
         return true;
@@ -4199,7 +5493,7 @@
         freshRadio.checked       = true;
         state.pendingMeltBullets = candidate.bulletValue;
         state.pendingMeltCarText = `${candidate.name} #${candidate.id}`;
-        freshSubmit.click();
+        humanClick(freshSubmit);
         markMeltCooldownStarted();
         resetMeltSearchState();
 
@@ -4262,7 +5556,7 @@
         const freshSelectAll = getCarsSelectAllLink();
         if (!freshSelectAll) return false;
 
-        freshSelectAll.click();
+        humanClick(freshSelectAll);
         addLiveLog('Cars: Select All clicked');
 
         await wait(SAFETY.repairAfterSelectAllMs);
@@ -4275,7 +5569,7 @@
         }
 
         state.lastActionAt = now();
-        freshRepair.click();
+        humanClick(freshRepair);
 
         updateStats(s => {
             s.repairs       += 1;
@@ -4320,7 +5614,7 @@
         const freshBtn = getLeaveJailButton();
         if (!freshBtn) return false;
 
-        freshBtn.click();
+        humanClick(freshBtn);
 
         updateStats(s => {
             s.jailEscapes   += 1;
@@ -4411,7 +5705,6 @@
 
             if (ownRow) {
                 jailHadOwnRow = true;
-                setLastActionText(jailMs != null ? `In jail (${Math.ceil(jailMs / 1000)}s)` : 'In jail');
                 return;
             }
 
@@ -4479,7 +5772,6 @@
             }
 
             const jailMs = getOwnJailTimerMs();
-            setLastActionText(jailMs != null ? `In jail (${Math.ceil(jailMs / 1000)}s)` : 'In jail');
             return;
         }
 
@@ -4510,26 +5802,17 @@
         addLiveLog(message);
 
         if (message.startsWith('CTC solved')) {
-            updateStats(s => {
-                s.ctcSolved     += 1;
-                s.lastActionText = message;
-            });
         } else if (
             message.includes('below floor') ||
             message.includes('timed out') ||
             message.includes('error') ||
             message.includes('too close')
         ) {
-            updateStats(s => {
-                s.ctcFailed     += 1;
-                s.lastActionText = message;
-            });
         } else if (
             message.includes('attempting auto-solve') ||
             message.includes('visible on load') ||
             message.includes('became visible')
         ) {
-            setLastActionText('CTC solving…');
         }
     }
 
@@ -4687,7 +5970,7 @@
         const freshBtn = getMissionAcceptButton();
         if (!freshBtn || freshBtn.disabled) return false;
 
-        freshBtn.click();
+        humanClick(freshBtn);
         return true;
     }
 
@@ -4701,7 +5984,7 @@
         const freshBtn = getMissionDeclineButton();
         if (!freshBtn || freshBtn.disabled) return false;
 
-        freshBtn.click();
+        humanClick(freshBtn);
         return true;
     }
 
@@ -4715,7 +5998,7 @@
         const selectAllLink = getMissionSelectAllLink();
         if (selectAllLink) {
             await wait(rand(120, 260));
-            selectAllLink.click();
+            humanClick(selectAllLink);
             await wait(rand(180, 320));
 
             const checkedAfterSelectAll = getChecked().length;
@@ -4740,7 +6023,7 @@
                 const freshSubmit = getUseForMissionButton();
                 if (!freshSubmit) return false;
 
-                freshSubmit.click();
+                humanClick(freshSubmit);
                 addLiveLog(`Submitted ${requiredAmount} cars for mission`);
                 return true;
             }
@@ -4772,7 +6055,7 @@
         const freshSubmit = getUseForMissionButton();
         if (!freshSubmit) return false;
 
-        freshSubmit.click();
+        humanClick(freshSubmit);
         addLiveLog(`Submitted ${requiredAmount} cars for mission (manual selection)`);
         return true;
     }
@@ -4971,10 +6254,6 @@
                 addLiveLog('Mission Here link not found — declining');
                 const didDecline = await clickMissionDecline();
                 if (didDecline) {
-                    updateStats(s => {
-                        s.missionsDeclined += 1;
-                        s.lastActionText    = `Declined car mission: no Here link`;
-                    });
                 }
                 return true;
             }
@@ -4997,23 +6276,441 @@
     }
 
     // =========================================================================
+    // AUTO ACCOUNT CREATION
+    // =========================================================================
+
+    function isLoginPage() {
+        return !!document.querySelector('#logincon input[name="login"]');
+    }
+
+    function isUsernamePage() {
+        return !!document.querySelector('form input[name="username"][type="text"]') &&
+               !!document.querySelector('form input[name="create"]');
+    }
+
+    function isRulesPage() {
+        return !!document.querySelector('input[name="agree"]');
+    }
+
+    function isTutorialPage() {
+        return !!document.querySelector('input[name="tutorial"]');
+    }
+
+    function hasUsernameTakenError() {
+        // Inline error next to field
+        const newuserEl = document.querySelector('#newuser');
+        if (newuserEl && /username taken/i.test(newuserEl.textContent)) return true;
+        // Top-level fail message after form submit
+        return [...document.querySelectorAll('.bgm.fail')].some(el =>
+            /username taken/i.test(el.textContent)
+        );
+    }
+
+    function sanitiseUsername(raw) {
+        // Strip disallowed chars, trim to 20 chars
+        return raw.replace(/[^a-z0-9 ]/gi, '').slice(0, 20).trim();
+    }
+
+    function generateRandomUsernames(count = 100) {
+        const adjectives = ['Dark', 'Fast', 'Bold', 'Sly', 'Wild', 'Cool', 'Grim', 'Iron',
+            'Slick', 'Sharp', 'Swift', 'Raw', 'Real', 'True', 'Big', 'Mad',
+            'Gold', 'Dead', 'Cold', 'Lone', 'Free', 'Sly', 'Lucky', 'Dirty'];
+        const nouns = ['Gang', 'Boss', 'King', 'Ghost', 'Wolf', 'Shark', 'Blade', 'Smoke',
+            'Stone', 'Hawk', 'Fox', 'Viper', 'Ace', 'Rider', 'Claw', 'Fang',
+            'Storm', 'Blaze', 'Drake', 'Raven', 'Frost', 'Rebel', 'Outlaw', 'Shadow'];
+        const pick = arr => arr[Math.floor(Math.random() * arr.length)];
+        const names = new Set();
+        let attempts = 0;
+        while (names.size < count && attempts < count * 10) {
+            attempts++;
+            const style = Math.floor(Math.random() * 5);
+            let name = '';
+            if (style === 0) {
+                name = pick(adjectives) + pick(nouns);
+            } else if (style === 1) {
+                name = pick(adjectives) + ' ' + pick(nouns);
+            } else if (style === 2) {
+                name = pick(nouns) + Math.floor(Math.random() * 999);
+            } else if (style === 3) {
+                name = pick(adjectives) + pick(nouns) + Math.floor(Math.random() * 99);
+            } else {
+                name = pick(adjectives) + ' ' + pick(nouns) + ' ' + Math.floor(Math.random() * 9);
+            }
+            name = sanitiseUsername(name);
+            if (name.length >= 3 && name.length <= 20) names.add(name);
+        }
+        return [...names];
+    }
+
+    async function handleLoginPage() {
+        if (!state.accEnabled) return;
+        addLiveLog('Auto login: login page detected — waiting for autofill');
+        await wait(1500); // Allow browser autofill to populate fields
+        const emailInput = document.querySelector('#login-email');
+        const passwordInput = document.querySelector('#login-password');
+        const loginBtn = document.querySelector('#login-button');
+        if (!emailInput || !passwordInput || !loginBtn) {
+            addLiveLog('Auto login: form elements not found — aborting');
+            return;
+        }
+        if (!emailInput.value || !passwordInput.value) {
+            addLiveLog('Auto login: fields not autofilled — ensure one login is saved in browser');
+            return;
+        }
+        addLiveLog('Auto login: credentials found — clicking Enter');
+        await wait(rand(500, 1000));
+        humanClick(loginBtn);
+    }
+
+    function removeCurrentAccName() {
+        const usernames = state.accUsernames;
+        if (usernames.length > 0) {
+            const removed = usernames[state.accNameIndex] || usernames[0];
+            usernames.splice(state.accNameIndex, 1);
+            state.accUsernames = usernames;
+            // Keep index pointing at the same position (now the next name)
+            // but clamp it so it doesn't go out of bounds
+            if (state.accNameIndex >= usernames.length) {
+                state.accNameIndex = Math.max(0, usernames.length - 1);
+            }
+            // Update the textarea in the panel if visible
+            const ta = document.querySelector('#ug-bot-acc-names');
+            if (ta) ta.value = usernames.join('\n');
+            const statusEl = document.querySelector('#ug-bot-acc-status');
+            if (statusEl) statusEl.textContent = usernames.length + ' name(s) remaining';
+            return removed;
+        }
+        return null;
+    }
+
+    async function handleUsernamePage() {
+        if (!state.accEnabled) return;
+
+        // First time we land on username page = confirmed death.
+        // Disable settings that would break new account protection,
+        // but only if they haven't already been disabled this death cycle.
+        if (!GM_getValue('accDeathSettingsReset', false)) {
+            GM_setValue('accDeathSettingsReset', true);
+            const disabled = [];
+            if (state.autoDrugsEnabled) {
+                state.autoDrugsEnabled = false;
+                if (autoDrugsInput) autoDrugsInput.checked = false;
+                disabled.push('autoDrugs');
+            }
+            if (state.killSearchEnabled) {
+                state.killSearchEnabled = false;
+                if (killSearchInput) killSearchInput.checked = false;
+                disabled.push('killSearch');
+            }
+            if (state.killProtectedRecheckEnabled) {
+                state.killProtectedRecheckEnabled = false;
+                if (killProtectedRecheckInput) killProtectedRecheckInput.checked = false;
+                disabled.push('killProtectedRecheck');
+            }
+            if (state.killBgCheckEnabled) {
+                state.killBgCheckEnabled = false;
+                if (killBgCheckInput) killBgCheckInput.checked = false;
+                disabled.push('killBgCheck');
+            }
+            if (disabled.length > 0) {
+                // Store which settings were auto-disabled so we can re-enable them at Don
+                GM_setValue('accAutoDisabled', JSON.stringify(disabled));
+                const labels = {
+                    autoDrugs: 'Drug run', killSearch: 'Search players',
+                    killProtectedRecheck: 'Protected re-search', killBgCheck: 'BG check loop'
+                };
+                addLiveLog('Auto login: disabled on new account — ' + disabled.map(k => labels[k]).join(', '));
+            }
+        }
+
+        // Check for taken error from a previous submit attempt
+        if (hasUsernameTakenError()) {
+            addLiveLog('Auto login: username taken — removing from list');
+            removeCurrentAccName();
+        }
+
+        const usernames = state.accUsernames;
+        let idx = state.accNameIndex;
+
+        if (!usernames.length) {
+            addLiveLog('Auto login: no usernames in list — cannot create account');
+            return;
+        }
+
+        if (idx >= usernames.length) {
+            addLiveLog('Auto login: all usernames exhausted — cannot create account');
+            return;
+        }
+
+        const username = sanitiseUsername(usernames[idx]);
+        if (!username) {
+            removeCurrentAccName();
+            addLiveLog('Auto login: invalid username — removed from list');
+            await wait(rand(300, 600));
+            location.reload();
+            return;
+        }
+
+        addLiveLog(`Auto login: trying username "${username}" (${idx + 1}/${usernames.length})`);
+
+        const usernameInput = document.querySelector('form input[name="username"]');
+        const confirmBtn = document.querySelector('form input[name="create"]');
+        if (!usernameInput || !confirmBtn) {
+            addLiveLog('Auto login: username form not found');
+            return;
+        }
+
+        // Set the full username at once then trigger the live availability check.
+        // Character-by-character was unreliable — partial values could be submitted
+        // if the handler was re-entered before typing completed.
+        usernameInput.value = username;
+        usernameInput.dispatchEvent(new Event('keyup', { bubbles: true }));
+
+        // Wait for live availability AJAX to respond
+        await wait(2000);
+
+        if (hasUsernameTakenError()) {
+            addLiveLog(`Auto login: "${username}" already taken — removing from list`);
+            removeCurrentAccName();
+            await wait(rand(400, 800));
+            location.reload();
+            return;
+        }
+
+        addLiveLog(`Auto login: submitting username "${username}"`);
+        await wait(rand(300, 600));
+        humanClick(confirmBtn);
+    }
+
+    async function handleRulesPage() {
+        if (!state.accEnabled) return;
+        addLiveLog('Auto login: rules page — accepting');
+
+        // Decline tutorial — find the form with hidden input value="end" and submit it
+        const tutorialForm = [...document.querySelectorAll('form')].find(f => {
+            const hidden = f.querySelector('input[name="tutorial"]');
+            return hidden && hidden.value === 'end';
+        });
+        if (tutorialForm) {
+            await wait(rand(500, 900));
+            tutorialForm.submit();
+            await wait(rand(800, 1200));
+            return; // page will reload, handler will run again for rules
+        }
+
+        // Accept rules — must click the submit button, not call form.submit(),
+        // so the button value (agree=I agree) is included in the POST body
+        const agreeBtn = document.querySelector('input[name="agree"][type="submit"]');
+        if (agreeBtn) {
+            await wait(rand(500, 900));
+            humanClick(agreeBtn);
+            addLiveLog('Auto login: rules accepted — retrieving assets from previous account');
+            // Remove used name from list so it won't be reused
+            removeCurrentAccName();
+            // Clear the death-settings-reset flag so next death triggers a fresh reset
+            GM_setValue('accDeathSettingsReset', false);
+            // Auto-start the bot on the new account
+            if (!state.enabled) {
+                state.enabled = true;
+                state.pausedReason = '';
+                state.sessionStartedAt = now();
+                addLiveLog('Auto login: bot started on new account');
+            }
+            // Navigate to email stats page to retrieve assets from previous account
+            if (state.accRetrieve) {
+                GM_setValue('accPendingRetrieve', true);
+                await wait(rand(1000, 1500));
+                gotoPage('my-stats', { s: 'email' });
+            } else {
+                await wait(rand(500, 900));
+                gotoPage('crimes');
+            }
+            return;
+        }
+
+        addLiveLog('Auto login: rules/tutorial page — no form found, skipping');
+    }
+
+    // =========================================================================
     // PAGE HANDLERS
     // =========================================================================
+
+    // =========================================================================
+    // MY-STATS EMAIL RETRIEVE — transfers assets from previous account
+    // =========================================================================
+
+    function isMyStatsEmailPage() {
+        const p = currentPage();
+        const s = new URL(window.location.href).searchParams.get('s') || '';
+        return p === 'my-stats' && (s === 'email' || s === '');
+    }
+
+    async function handleMyStatsRetrieve() {
+        if (!GM_getValue('accPendingRetrieve', false)) return false;
+
+        const url  = new URL(window.location.href);
+        const uParam = url.searchParams.get('u');
+
+        // Step 1 — on the account list page, click the most recent previous account
+        if (!uParam) {
+            // Accounts are listed highest number first — index 0 is the current account,
+            // index 1 is the most recent previous account
+            const rows = [...document.querySelectorAll('td.veg.lettuce a')];
+            const prevLink = rows[1];
+            if (!prevLink) {
+                addLiveLog('Auto retrieve: no previous account found — skipping');
+                GM_setValue('accPendingRetrieve', false);
+                gotoPage('crimes');
+                return true;
+            }
+            const prevName = prevLink.textContent.trim();
+            addLiveLog(`Auto retrieve: found previous account "${prevName}" — retrieving assets`);
+            await wait(rand(500, 900));
+            window.location.href = prevLink.getAttribute('href');
+            return true;
+        }
+
+        // Step 2 — on the specific account page, retrieve Swiss bank, points, and cars
+        // Use fetch POST rather than form.submit() so page doesn't reload between steps
+        addLiveLog(`Auto retrieve: retrieving assets from "${uParam}"`);
+        const postUrl = window.location.href;
+
+        // Retrieve Swiss bank (type=1)
+        const swissCell = [...document.querySelectorAll('td.veg.sprouts')].find(td => td.textContent.includes('Swiss bank'));
+        if (swissCell) {
+            const swissMatch = swissCell.textContent.match(/Swiss bank\s*\$([\d,]+)/);
+            if (swissMatch) {
+                const swissAmount = swissMatch[1].replace(/,/g, '');
+                addLiveLog(`Auto retrieve: Swiss bank $${swissMatch[1]}`);
+                const fd = new FormData();
+                fd.append('type', '1');
+                fd.append('amount', swissAmount);
+                await fetch(postUrl, { method: 'POST', body: fd, credentials: 'include' });
+                await wait(rand(600, 1000));
+            }
+        }
+
+        // Retrieve points (type=2)
+        const pointsCell = [...document.querySelectorAll('td.veg.sprouts')].find(td => td.textContent.includes('Points'));
+        if (pointsCell) {
+            const pointsMatch = pointsCell.textContent.match(/Points\s*([\d,]+)/);
+            if (pointsMatch) {
+                const pointsAmount = pointsMatch[1].replace(/,/g, '');
+                addLiveLog(`Auto retrieve: ${pointsMatch[1]} points`);
+                const fd = new FormData();
+                fd.append('type', '2');
+                fd.append('amount', pointsAmount);
+                await fetch(postUrl, { method: 'POST', body: fd, credentials: 'include' });
+                await wait(rand(600, 1000));
+            }
+        }
+
+        // Retrieve cars
+        const carForm = [...document.querySelectorAll('form')].find(f =>
+            f.querySelector('input[type="checkbox"][name="id[]"]')
+        );
+        if (carForm) {
+            const carIds = [...carForm.querySelectorAll('input[type="checkbox"][name="id[]"]')].map(cb => cb.value);
+            const carNames = [...carForm.querySelectorAll('a')].map(a => a.textContent.trim()).join(', ');
+            if (carIds.length > 0) {
+                addLiveLog(`Auto retrieve: cars — ${carNames}`);
+                const fd = new FormData();
+                carIds.forEach(id => fd.append('id[]', id));
+                fd.append('retrieve', 'Retrieve');
+                await fetch(postUrl, { method: 'POST', body: fd, credentials: 'include' });
+                await wait(rand(600, 1000));
+            }
+        }
+
+        addLiveLog('Auto retrieve: complete — navigating to crimes');
+        GM_setValue('accPendingRetrieve', false);
+        await wait(rand(500, 900));
+        gotoPage('crimes');
+        return true;
+    }
 
     async function handleCrimesPage() {
         stopJailObserver();
         resetMeltSearchState();
         clearPendingMeltResult();
 
+        // Abort any in-flight QT sniper fetch — server blocks crime commits
+        // when a QT fetch is in progress, even if it started on a previous page
+        if (qtSniperAbortController) {
+            qtSniperAbortController.abort();
+            qtSniperAbortController = null;
+        }
+
+        // Detect server-side crimes page block (empty #maincen)
+        // This happens when the game detects bot-like behaviour on the crimes page
+        if (!document.querySelector('#maincen')?.textContent.trim()) {
+            addLiveLog('Crimes page blocked by server — switching to other actions');
+            // Try to do something else useful instead
+            const gtaUsable   = isGTAEnabled()  && !isGTALocked();
+            const meltUsable  = isMeltUsable();
+            const drugsUsable = isDrugsEnabled();
+            if (drugsUsable && isInternalDriveReady()) {
+                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                gotoPage('drugs');
+            } else if (gtaUsable && isInternalGTAReady()) {
+                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                gotoPage('gta');
+            } else if (meltUsable && isInternalMeltReady()) {
+                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                gotoCleanMeltPage(1);
+            } else {
+                // Nothing else to do — good opportunity for a human page visit
+                if (await maybeVisitHumanPage()) return;
+                await wait(rand(15000, 30000));
+                gotoPage('crimes');
+            }
+            return;
+        }
+
         // Reset the crime reset flag each time we arrive at the crimes page fresh.
         // This allows a reset on the next visit if needed, while preventing a
         // double-reset within the same AJAX-based crimes page session.
         crimeResetUsedThisVisit = false;
 
+        // When background crimes is enabled, skip crime committing entirely and
+        // immediately route to the next available non-crime action
+        if (state.bgCrimeEnabled) {
+            const gtaUsable   = isGTAEnabled()  && !isGTALocked();
+            const meltUsable  = isMeltUsable();
+            const drugsUsable = isDrugsEnabled();
+
+            if (drugsUsable && isInternalDriveReady() && !state.killLoopActive) {
+                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                gotoPage('drugs');
+                return;
+            }
+            if (gtaUsable && isInternalGTAReady()) {
+                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                gotoPage('gta');
+                return;
+            }
+            if (meltUsable && isInternalMeltReady()) {
+                resetMeltSearchState();
+                clearPendingMeltResult();
+                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                gotoCleanMeltPage(1);
+                return;
+            }
+            // Nothing ready — good opportunity for a human page visit
+            maybeVisitHumanPage(); // fire and forget — heartbeat will re-check shortly
+            const nextGtaMs   = gtaUsable   ? getInternalGTARemainingMs()   : null;
+            const nextMeltMs  = meltUsable  ? getInternalMeltRemainingMs()  : null;
+            const nextDriveMs = drugsUsable ? getInternalDriveRemainingMs() : null;
+            const parts = [];
+            if (nextGtaMs   != null && nextGtaMs   > 0) parts.push(`GTA ${Math.ceil(nextGtaMs / 1000)}s`);
+            if (nextMeltMs  != null && nextMeltMs  > 0) parts.push(`melt ${Math.ceil(nextMeltMs / 1000)}s`);
+            if (nextDriveMs != null && nextDriveMs > 0) parts.push(`drive ${Math.ceil(nextDriveMs / 1000)}s`);
+            return;
+        }
+
 
 
         if (hasCTCChallenge()) {
-            setLastActionText('CTC solving…');
             await maybeSolveCTC();
             return;
         }
@@ -5076,10 +6773,10 @@
             }
 
             // Stay on crimes page — don't navigate away to GTA/melt/drugs
-            setLastActionText('Crime reset mode — waiting');
             return;
         }
 
+        // Normal mode — commit crimes then navigate to other actions as usual
         // Normal mode — commit crimes then navigate to other actions as usual
         let totalBurst = 0;
         let burstCount = 0;
@@ -5095,7 +6792,7 @@
         if (totalBurst > 0) return;
 
         const gtaUsable   = isGTAEnabled()  && !isGTALocked();
-        const meltUsable  = isMeltEnabled() && !isMeltLocked();
+        const meltUsable  = isMeltUsable();
         const drugsUsable = isDrugsEnabled();
 
         if (drugsUsable && isInternalDriveReady() && !state.killLoopActive) {
@@ -5130,11 +6827,8 @@
         if (nextDriveMs != null && nextDriveMs > 0) parts.push(`drive ${Math.ceil(nextDriveMs / 1000)}s`);
 
         if (parts.length) {
-            setLastActionText(`Waiting for ${parts.join(' / ')}`);
             return;
         }
-
-        setLastActionText('Waiting for actions');
     }
 
     async function handleGTAPage() {
@@ -5161,7 +6855,6 @@
         // Without this check the bot would see no Steal button and no reset button and
         // incorrectly treat it as a reset failure, exiting the loop.
         if (hasCTCChallenge()) {
-            setLastActionText('CTC solving…');
             await maybeSolveCTC();
             return;
         }
@@ -5212,6 +6905,7 @@
         if (!synced) state.nextGTAReadyAt = now() + 15000;
 
         addLiveLog('GTA not ready yet — returning to crimes');
+        if (await maybeVisitHumanPage()) return;
         await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
         gotoPage('crimes');
     }
@@ -5240,7 +6934,6 @@
         }
 
         if (hasCTCChallenge()) {
-            setLastActionText('CTC solving…');
             await maybeSolveCTC();
             return;
         }
@@ -5344,7 +7037,6 @@
             if (state.meltRecoveryCount < 1) {
                 state.meltRecoveryCount += 1;
                 addLiveLog(`Melt page ${pagination.page} empty/incomplete — retrying once`);
-                setLastActionText(`Melt page ${pagination.page} retrying`);
                 await wait(rand(600, 1100));
                 gotoCleanMeltPage(pagination.page);
                 return;
@@ -5353,7 +7045,6 @@
             if (pagination.hasNext) {
                 resetMeltSearchState();
                 addLiveLog(`Melt page ${pagination.page} still empty — checking page ${pagination.nextPage}`);
-                setLastActionText(`Checking melt page ${pagination.nextPage}`);
                 await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
                 gotoCleanMeltPage(pagination.nextPage);
                 return;
@@ -5361,7 +7052,6 @@
 
             // No meltable cars across all pages and not in reset loop — return to crimes
             addLiveLog(`No meltable cars found — returning to crimes`);
-            setLastActionText('No meltable cars');
             resetMeltSearchState();
             clearPendingMeltResult();
             await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
@@ -5374,7 +7064,6 @@
         if (protectedOnly && pagination.hasNext) {
             resetMeltSearchState();
             addLiveLog(`No safe meltable cars on page ${pagination.page} — checking page ${pagination.nextPage}`);
-            setLastActionText(`Checking melt page ${pagination.nextPage}`);
             await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
             gotoCleanMeltPage(pagination.nextPage);
             return;
@@ -5383,7 +7072,6 @@
         if (protectedOnly) {
             // Only protected cars across all pages — exit melt reset loop
             addLiveLog('No safe meltable cars across checked pages — exiting melt reset loop, reverting to normal');
-            setLastActionText('No safe melt target');
             state.meltResetLoopActive = false;
             state.resetMeltEnabled    = false;
             resetMeltSearchState();
@@ -5417,6 +7105,7 @@
         addLiveLog('Melt not ready yet — returning to crimes');
         resetMeltSearchState();
         clearPendingMeltResult();
+        if (await maybeVisitHumanPage()) return;
         await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
         gotoPage('crimes');
     }
@@ -5492,7 +7181,7 @@
                     state.lastActionAt = now();
                     await wait(rand(DEFAULTS.actionDelayMin, DEFAULTS.actionDelayMax));
                     const freshRepair = document.querySelector('form input[type="submit"][name="repair"]');
-                    if (freshRepair) freshRepair.click();
+                    if (freshRepair) humanClick(freshRepair);
                     return; // Page reloads — next tick handles post-repair
                 }
             }
@@ -5501,7 +7190,6 @@
             if (!isInternalDriveReady()) {
                 const remaining = Math.ceil(getInternalDriveRemainingMs() / 1000);
                 addLiveLog(`Kill loop: drive not ready yet (${remaining}s) — returning to crimes to wait`);
-                setLastActionText(`Kill loop: drive in ${remaining}s (waiting for ${pending.travelTo})`);
                 // Keep pendingKillAction so we resume travel when drive is ready
                 await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
                 gotoPage('crimes');
@@ -5515,6 +7203,8 @@
 
             if (!locationRadio || !goBtn) {
                 addLiveLog('Kill loop: drive form not found on car detail page — drive may still be on cooldown, returning to crimes');
+                // Push drive timer forward to prevent tight loop — game cooldown may be longer than our internal timer
+                state.nextDriveReadyAt = now() + 15000;
                 // Don't clear pendingKillAction — retry when drive is ready
                 await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
                 gotoPage('crimes');
@@ -5528,10 +7218,24 @@
             const freshGo    = document.querySelector('form input[type="submit"][name="subm"][value="Go"]');
             if (!freshRadio || !freshGo) return;
 
-            freshRadio.checked     = true;
+            // Increment drive attempts — if stuck too many times, abandon this travel
+            const attempts = (pending.driveAttempts || 0) + 1;
+            if (attempts > 5) {
+                addLiveLog(`Kill loop: drive to ${pending.travelTo} failed after ${attempts} attempts — abandoning`);
+                state.pendingKillAction = null;
+                state.nextDriveReadyAt  = now() + 15000;
+                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                gotoPage('kill');
+                return;
+            }
+            state.pendingKillAction = { ...pending, driveAttempts: attempts };
+
+            freshRadio.checked = true;
+            freshRadio.dispatchEvent(new Event('change', { bubbles: true }));
             state.nextDriveReadyAt = now() + 120000;
-            freshGo.click();
-            addLiveLog(`Kill loop: driving to ${pending.travelTo}`);
+            humanClick(freshGo);
+            addLiveLog(`Kill loop: driving to ${pending.travelTo} (attempt ${attempts})`);
+            state.pendingKillAction = { stage: 'bgcheck', targetName: pending.targetName, shootAfterBg: pending.shootAfterBg, deferred: pending.deferred };
             state.pendingKillAction = { stage: 'bgcheck', targetName: pending.targetName, shootAfterBg: pending.shootAfterBg, deferred: pending.deferred }; // travelTo cleared intentionally
             return;
         }
@@ -5574,7 +7278,23 @@
                     addLiveLog(`Kill scanner: ${cur} — search confirmed (post-CTC)`);
                     state.killCurrentSearch = '';
                     renderKillList();
+                } else {
+                    // No result message and not in pending section — stale search, clear it
+                    addLiveLog(`Kill scanner: ${cur} — no search result found, clearing`);
+                    killSearchResultHandledThisLoad = true;
+                    state.killCurrentSearch = '';
                 }
+            }
+            // After processing any search result, return to crimes — don't fall through
+            if (killSearchResultHandledThisLoad) {
+                // Only set killLoopActive false if there's no active BG shoot pending
+                const pa = state.pendingKillAction;
+                if (!pa || pa.stage !== 'bg_shoot') {
+                    state.killLoopActive = false;
+                }
+                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                gotoPage('crimes');
+                return;
             }
         }
 
@@ -5596,8 +7316,13 @@
             return;
         }
 
-        // Sync expiry data from kill page
-        syncKillExpiryFromPage();
+        // Sync expiry data from kill page — skip if already mid bg_shoot sequence
+        // to prevent re-queuing the shoot on every visit
+        const pendingBgShoot = state.pendingKillAction?.stage === 'bg_shoot';
+        if (!pendingBgShoot) syncKillExpiryFromPage(true);
+
+        // Re-read pendingKillAction — syncKillExpiryFromPage may have queued a bg_shoot
+        const pendingAfterSync = state.pendingKillAction;
 
         // If penalty exceeds threshold and penaltyDropsAt not set, trigger penalty page
         const livePenalty = getKillPenaltyMultiplier();
@@ -5633,7 +7358,8 @@
             const target = pending.targetName;
             // Check page for shoot result messages
             const failEl    = document.querySelector('.bgm.fail');
-            const successEl  = document.querySelector('.bgm.success, .bgm.cg');
+            const successEl  = document.querySelector('.bgm.success, .bgm.cg') ||
+                               [...document.querySelectorAll('.bgm')].find(el => /you killed/i.test(textOf(el))) || null;
             // Check ALL .bgm.cred elements — active bodyguards produce multiple cred divs
             const credEls    = [...document.querySelectorAll('.bgm.cred')];
             const credEl     = credEls.find(el => /failed to kill/i.test(textOf(el))) || null;
@@ -5686,9 +7412,11 @@
                                     if (hoursInput) hoursInput.value = '24';
                                     state.killCurrentSearch = bgName;
                                     state.pendingKillAction = null;
+                                    state.killLoopActive    = false;
+                                    state.killBgWaitUntil   = now() + (24 * 60 * 60 * 1000); // wait up to 24hrs
                                     state.lastActionAt = now();
                                     await wait(rand(DEFAULTS.actionDelayMin, DEFAULTS.actionDelayMax));
-                                    submitBtn.click();
+                                    humanClick(submitBtn);
                                     addLiveLog(`Kill loop: search submitted for bodyguard ${bgName}`);
                                     return;
                                 }
@@ -5727,6 +7455,8 @@
                                 // Still searching (pending) — let search loop find them, then shoot
                                 addLiveLog(`Kill loop: ${bgName} already being searched — will shoot when found`);
                                 state.killSearchLoopActive = true;
+                                state.killLoopActive       = false;
+                                state.killBgWaitUntil      = now() + (24 * 60 * 60 * 1000);
                             }
                         }
 
@@ -5737,9 +7467,9 @@
                         renderKillList();
                     }
                     state.pendingKillAction = null;
-                    // Go directly to kill page so the search loop immediately searches the bodyguard
+                    // Go to crimes — kill loop is paused until BG search resolves
                     await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
-                    gotoPage('kill');
+                    gotoPage('crimes');
                     return;
                 }
 
@@ -5791,7 +7521,7 @@
                 }
 
                 // If shoot toggle is on for this player, proceed to shoot
-                if (pending.shootAfterBg) {
+                if (pendingNow.shootAfterBg) {
                     addLiveLog(`Kill loop: no BG on ${tName} — fetching profile for bullet calc`);
                     state.pendingKillAction = { stage: 'fetch_profile', targetName: tName };
                     // Stay on kill page — profile fetch is async
@@ -5855,8 +7585,9 @@
                         stage:       'shoot_result',
                         targetName:  bgFor,
                         shootAfterBg: true,
-                        recheck:     true  // signal this is a re-BG-check after killing bodyguard
+                        recheck:     true
                     };
+                    state.killBgWaitUntil = 0; // BG killed — clear wait
                     await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
                     gotoPage('kill');
                     return;
@@ -5882,14 +7613,30 @@
             if (bgSearchConfirmed) {
                 addLiveLog(`Kill loop: bodyguard search confirmed for ${target} — continuing`);
                 state.pendingKillAction = null;
+                state.killLoopActive    = false; // pause until BG is found
                 await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
-                gotoPage('kill');
+                gotoPage('crimes');
                 return;
             }
 
             // Genuinely unknown result — clear and move on
+            // If this was a BG shoot, also clear the bodyguard reference on the original target
+            // so the kill loop doesn't get stuck waiting for a BG that may already be dead
             addLiveLog(`Kill loop: unknown shoot result for ${target} — clearing`);
+            const unknownPa = state.pendingKillAction;
+            if (unknownPa?.bgFor) {
+                const bgForIdx = (state.killPlayers || []).findIndex(p =>
+                    p.name.toLowerCase() === unknownPa.bgFor.toLowerCase()
+                );
+                if (bgForIdx !== -1) {
+                    const pl = state.killPlayers || [];
+                    pl[bgForIdx].bodyguard = null;
+                    saveKillPlayers(pl);
+                    addLiveLog(`Kill loop: cleared bodyguard reference on ${unknownPa.bgFor}`);
+                }
+            }
             state.pendingKillAction = null;
+            state.killLoopActive    = false;
             await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
             gotoPage('crimes');
             return;
@@ -5907,9 +7654,11 @@
         }
 
         // ── Stage: bg_shoot — shoot a known bodyguard (already found, no BG check needed) ──
-        if (pending && pending.stage === 'bg_shoot') {
-            const bgName = pending.targetName;
-            const bgFor  = pending.bgFor;
+        // Re-read pendingKillAction here — syncKillExpiryFromPage may have queued a new bg_shoot
+        const pendingNow = state.pendingKillAction;
+        if (pendingNow && pendingNow.stage === 'bg_shoot') {
+            const bgName = pendingNow.targetName;
+            const bgFor  = pendingNow.bgFor;
 
             // If penalty too high, skip the bodyguard shoot — BG check only, no kills
             if (isKillPenaltyTooHigh()) {
@@ -5952,22 +7701,27 @@
             const myLoc = getPlayerLocation();
             const needsBgTravel = myLoc && bgCountry && myLoc.toLowerCase() !== bgCountry.toLowerCase();
 
+            if (needsBgTravel) {
+                // Sync drive timer from quick link before checking — cached value may be stale
+                syncDriveReadyFromQuickLink();
+            }
+
             if (needsBgTravel && !isInternalDriveReady()) {
                 const remaining = Math.ceil(getInternalDriveRemainingMs() / 1000);
                 addLiveLog(`Kill loop: drive not ready (${remaining}s) — waiting to travel to bodyguard ${bgName}`);
-                setLastActionText(`Kill loop: waiting for drive to shoot BG ${bgName}`);
-                // Don't lock into travel stage — clear pending and let the main BG check
-                // logic continue processing other due players in the current country
-                state.pendingKillAction = null;
+                // Update nextDriveReadyAt so the tick doesn't immediately re-enable killLoopActive
+                state.nextDriveReadyAt = now() + getInternalDriveRemainingMs();
+                // Keep pendingKillAction set so the bg_shoot isn't re-queued next visit
+                // Go to crimes so the search loop can run while we wait for the drive
                 await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
-                gotoPage('kill');
+                gotoPage('crimes');
                 return;
             }
 
             if (needsBgTravel) {
                 addLiveLog(`Kill loop: travelling to ${bgCountry} to shoot bodyguard ${bgName}`);
                 state.pendingKillAction = { stage: 'travel', travelTo: bgCountry, targetName: bgName,
-                    afterTravel: { stage: 'bg_shoot', targetName: bgName, bgFor, shootAfterBg: pending.shootAfterBg } };
+                    afterTravel: { stage: 'bg_shoot', targetName: bgName, bgFor, shootAfterBg: pendingNow.shootAfterBg } };
                 await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
                 gotoPage('cars');
                 return;
@@ -5975,7 +7729,7 @@
 
             // In same country — calculate combined cost before shooting bodyguard
             // Fetch target profile to get bullets needed AFTER killing BG (penalty +0.1x)
-            if (pending.shootAfterBg && isPlayerShootEnabled(bgFor)) {
+            if (pendingNow.shootAfterBg && isPlayerShootEnabled(bgFor)) {
                 addLiveLog(`Kill loop: calculating combined cost for ${bgFor} + bodyguard ${bgName}`);
                 const targetProfile = await fetchPlayerProfile(bgFor);
                 const bgProfile     = await fetchPlayerProfile(bgName);
@@ -6001,11 +7755,14 @@
                     if (bIdx3 !== -1) { pls3[bIdx3].requiredBullets = bgBullets; }
                     if (tIdx3 !== -1 || bIdx3 !== -1) saveKillPlayers(pls3);
                     if (available < totalNeeded) {
-                        addLiveLog(`Kill loop: insufficient bullets for ${bgFor} + ${bgName} — skipping`);
-                        state.pendingKillAction = null;
-                        // Clear bgShootQueued so it re-queues when bullets sufficient
-                        if (bIdx3 !== -1) { delete pls3[bIdx3].bgShootQueued; saveKillPlayers(pls3); }
-                        // Don't navigate — let loop continue to next player
+                        addLiveLog(`Kill loop: not enough bullets for BG + target (need ${totalNeeded.toLocaleString()}, have ${available.toLocaleString()}) — waiting`);
+                        // Keep pendingKillAction and bgShootQueued set — we're waiting for bullets
+                        // Set killLoopActive = false so normal script runs and accumulates bullets
+                        // The tick will re-enable killLoopActive once bullets are sufficient
+                        state.killLoopActive = false;
+                        state.nextDriveReadyAt = now(); // don't suppress on drive grounds
+                        await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                        gotoPage('crimes');
                         return;
                     }
                     // Check penalty won't exceed threshold after killing BG
@@ -6072,6 +7829,8 @@
             if (p.lastKillAttempt && (now() - p.lastKillAttempt) < KILL_ATTEMPT_COOLDOWN_MS) return false;
             // Skip if we know required bullets and don't have enough yet
             if (p.requiredBullets && currentBullets < p.requiredBullets) return false;
+            // Skip if player has a known bodyguard currently being searched
+            if (p.bodyguard) return false;
             // If BG ticked and interval is due — handle via BG check path, not here
             if (isPlayerBgCheckEnabled(p.name) && getBgCheckDueMs(p) <= 0) return false;
             // Must be in Players Found right now — skip if dead, pending, or not found
@@ -6082,7 +7841,7 @@
         });
 
         // Sync country data from Players Found so foundMap is always fresh
-        syncKillExpiryFromPage();
+        syncKillExpiryFromPage(true);
 
         // Helper: get country from live Players Found only — no stale p.country fallback
         // If a player isn't in Players Found right now (dead, not yet found, moved),
@@ -6090,6 +7849,8 @@
         const getPlayerCountry = (p) => foundMap.get(p.name.toLowerCase()) || '';
 
         // ── Kill-only: Kill ticked, BG not ticked — shoot directly ──────────
+        // Only shoot if killLoopActive — skip if we're only here for a search
+        if (state.killLoopActive) {
         // Sort by requiredBullets ascending — unknowns (no stored value) go last
         killOnlyPlayers.sort((a, b) => {
             const aCost = a.requiredBullets || Infinity;
@@ -6122,6 +7883,8 @@
                 if (!isInternalDriveReady()) {
                     const rem = Math.ceil(getInternalDriveRemainingMs() / 1000);
                     addLiveLog(`Kill loop: drive not ready (${rem}s) — waiting to travel for ${tgt.name}`);
+                    // Update nextDriveReadyAt so the tick doesn't immediately re-enable killLoopActive
+                    state.nextDriveReadyAt = now() + getInternalDriveRemainingMs();
                     // Set travel stage so tick intercept knows to wait rather than bounce to kill page
                     state.pendingKillAction = { stage: 'travel', travelTo: bestCountry, targetName: tgt.name, shootAfterBg: false, killOnly: true };
                     await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
@@ -6142,14 +7905,58 @@
             gotoPage('crimes');
             return;
         }
+        } // end killLoopActive guard for kill-only
 
         // ── BG check targets ─────────────────────────────────────────────────
+        // Check if all kill-only players are skipped due to pending bodyguards
+        const allSkippedForBg = players.some(p =>
+            isPlayerShootEnabled(p.name) && p.status === KILL_STATUS.ALIVE && p.bodyguard
+        );
         if (!duePlayers.length) {
-            addLiveLog('Kill loop: no actionable targets — reverting to normal script');
-            state.killLoopActive    = false;
-            state.pendingKillAction = null;
-            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
-            gotoPage('crimes');
+            if (allSkippedForBg) {
+                // Kill-only players have pending BGs — set a 3hr wait so the kill loop
+                // doesn't re-activate until the search completes, then revert to normal script
+                const waitUntil = Date.now() + (3 * 60 * 60 * 1000);
+                state.killBgWaitUntil = waitUntil;
+                addLiveLog('Kill loop: bodyguard search pending — waiting 3hrs for result');
+                state.killLoopActive = false;
+                if (!state.pendingKillAction || state.pendingKillAction.stage !== 'bg_shoot') {
+                    state.pendingKillAction = null;
+                }
+                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                gotoPage('crimes');
+                return;
+            } else {
+                addLiveLog('Kill loop: no actionable targets — reverting to normal script');
+                state.killLoopActive    = false;
+                state.pendingKillAction = null;
+
+                // Set cooldown based on the exact time Kill-ticked players will be found
+                // so we don't keep hitting the kill page unnecessarily
+                let longestWaitMs = 60000; // default 60s fallback
+                const killPlayers = getKillPlayers();
+                for (const kp of killPlayers) {
+                    if (!isPlayerShootEnabled(kp.name)) continue;
+                    // Find this player in the pending search section
+                    const pendingRow = [...document.querySelectorAll('.bgl.i.wb .bgm.chs.pd')]
+                        .find(row => {
+                            const b = row.querySelector('b');
+                            return b && textOf(b).toLowerCase() === kp.name.toLowerCase();
+                        });
+                    if (pendingRow) {
+                        const timerSpan = pendingRow.querySelector('.chd');
+                        const foundInMs = timerSpan ? parseLostInMs(textOf(timerSpan)) : null;
+                        if (foundInMs != null && foundInMs > longestWaitMs) {
+                            longestWaitMs = foundInMs;
+                        }
+                    }
+                }
+                state.killLoopCooldownUntil = now() + longestWaitMs;
+                addLiveLog(`Kill loop: waiting ${Math.ceil(longestWaitMs / 60000)}m for player to be found`);
+
+                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                gotoPage('crimes');
+            }
             return;
         }
 
@@ -6245,7 +8052,6 @@
         if (needsTravel && !isInternalDriveReady()) {
             const remaining = Math.ceil(getInternalDriveRemainingMs() / 1000);
             addLiveLog(`Kill loop: drive not ready (${remaining}s) — waiting before travelling to ${targetCountry}`);
-            setLastActionText(`Kill loop: waiting for drive (${remaining}s)`);
             // Set travel stage so tick intercept waits rather than bouncing to kill page
             state.pendingKillAction = { stage: 'travel', travelTo: targetCountry, targetName: bgTarget.name,
                 shootAfterBg: isPlayerShootEnabled(bgTarget.name), deferred };
@@ -6290,7 +8096,6 @@
         if (bullets < 1) {
             addLiveLog('Kill loop: no bullets available — pausing');
             state.killLoopActive = false;
-            setLastActionText('Kill loop paused — no bullets');
             await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
             gotoPage('crimes');
             return;
@@ -6318,7 +8123,7 @@
                 usernameSelect.value = bgTarget.name;
                 bulletsInput.value   = '1';
                 if (showCheckbox) showCheckbox.checked = !state.killAnonymousShooting;
-                submitBtn.click();
+                humanClick(submitBtn);
                 addLiveLog(`Kill loop: BG check shot fired at ${bgTarget.name}`);
                 return;
             }
@@ -6383,7 +8188,6 @@
         const available = getPlayerBullets();
         if (available < requiredBullets) {
             addLiveLog(`Kill loop: insufficient bullets (${available}/${requiredBullets}) for ${targetName} — waiting for more bullets`);
-            setLastActionText(`Kill loop: need ${requiredBullets} bullets for ${targetName}, have ${available}`);
             // Clear bgShootQueued so it re-queues when bullets are sufficient
             const plsBQ = state.killPlayers || [];
             const bqIdx = plsBQ.findIndex(p => p.name.toLowerCase() === targetName.toLowerCase());
@@ -6411,7 +8215,7 @@
                 usernameSelect.value = targetName;
                 bulletsInput.value   = String(requiredBullets);
                 if (showCheckbox) showCheckbox.checked = !state.killAnonymousShooting;
-                submitBtn.click();
+                humanClick(submitBtn);
                 addLiveLog(`Kill loop: kill shot fired at ${targetName} (${requiredBullets} bullets)`);
                 return;
             }
@@ -6479,6 +8283,32 @@
     async function tick() {
         if (!state.enabled || loopBusy || reloadPending) return;
 
+        // ── Auto account creation — highest priority, runs before all loop logic ──
+        // Must be checked first so death pages are handled even if kill/search loops are active
+        if (state.accEnabled) {
+            if (isLoginPage()) {
+                loopBusy = true;
+                try { await handleLoginPage(); } finally { loopBusy = false; }
+                return;
+            }
+            if (isUsernamePage()) {
+                loopBusy = true;
+                try { await handleUsernamePage(); } finally { loopBusy = false; }
+                return;
+            }
+            if (isRulesPage() || isTutorialPage()) {
+                loopBusy = true;
+                try { await handleRulesPage(); } finally { loopBusy = false; }
+                return;
+            }
+            // Retrieve assets from previous account after creation
+            if (isMyStatsEmailPage() && GM_getValue('accPendingRetrieve', false)) {
+                loopBusy = true;
+                try { await handleMyStatsRetrieve(); } finally { loopBusy = false; }
+                return;
+            }
+        }
+
         // ── Kill penalty page — handle immediately, skip all other tick logic ──
         // Prevents any other navigation (search loop, online scanner etc.) from
         // navigating away before the penalty page is parsed.
@@ -6517,7 +8347,6 @@
             if (needsDrive && !isInternalDriveReady()) {
                 // Let normal script handle this tick — don't bounce to kill page
                 const remSec = Math.ceil(getInternalDriveRemainingMs() / 1000);
-                setLastActionText(`Kill loop: waiting for drive (${remSec}s)`);
                 // Fall through to normal script handling below
             } else {
             // Handle travel stages
@@ -6571,24 +8400,82 @@
         // Kill search mode — only runs when kill loop is not mid-chain
         // Kill loop takes priority: if there is a pending kill action in progress,
         // reactivate the kill loop rather than letting the search loop interrupt.
+        // Exception: bg_shoot while drive isn't ready — let search loop run in the meantime.
         if (!state.killLoopActive && state.pendingKillAction && state.killBgCheckEnabled) {
             const pa = state.pendingKillAction;
             if (pa.stage && pa.stage !== 'bgcheck') {
-                // Mid-chain — reactivate kill loop
-                // BG check chains always allowed; kill-only blocked later in doKillShootFlow
-                if (!isKillPenaltyTooHigh() || pa.stage === 'bg_shoot' || pa.stage === 'travel') {
+                // Don't re-enable if waiting for drive
+                const waitingForDrive = (pa.stage === 'bg_shoot' || pa.stage === 'travel') && !isInternalDriveReady();
+                // Don't re-enable bg_shoot if insufficient bullets
+                let waitingForBullets = false;
+                if (pa.stage === 'bg_shoot') {
+                    const pls = getKillPlayers();
+                    const bgP = pls.find(p => p.name.toLowerCase() === (pa.targetName || '').toLowerCase());
+                    const tgtP = pls.find(p => p.name.toLowerCase() === (pa.bgFor || '').toLowerCase());
+                    const bgB = bgP?.requiredBullets || 0;
+                    const tgtB = tgtP?.requiredBullets || 0;
+                    if (bgB && tgtB && getPlayerBullets() < bgB + tgtB) waitingForBullets = true;
+                }
+                if (!waitingForDrive && !waitingForBullets && (!isKillPenaltyTooHigh() || pa.stage === 'bg_shoot' || pa.stage === 'travel')) {
                     state.killLoopActive = true;
                 }
             }
         }
 
-        // Kill search mode — dedicated loop, searches players one by one
+        // Auto re-activate kill search loop if due targets exist but loop was deactivated
+        // Runs regardless of killLoopActive — search and kill loops are independent
+        if (state.killSearchEnabled && !state.killSearchLoopActive) {
+            const nowMs = now();
+            const players = getKillPlayers();
+            const hasUnknowns = players.some(p => p.status === KILL_STATUS.UNKNOWN);
+            const RESCAN_BUFFER_MS = 3 * 60 * 60 * 1000;
+            const hasExpiringAlives = players.some(p => {
+                if (p.status !== KILL_STATUS.ALIVE) return false;
+                if (p.searchExpiresAt) return (p.searchExpiresAt - nowMs) < RESCAN_BUFFER_MS;
+                return (nowMs - p.lastChecked) >= KILL_SCANNER_RESCAN_MS;
+            });
+            const protectedIntervalMs = state.killProtectedRecheckMs || KILL_SCANNER_PROTECTED_RESCAN_MS;
+            const hasProtectedDue = players.some(p =>
+                p.status === KILL_STATUS.PROTECTED &&
+                (nowMs - p.lastChecked) >= protectedIntervalMs
+            );
+            if (hasUnknowns || hasExpiringAlives || hasProtectedDue) {
+                state.killSearchLoopActive = true;
+            }
+        }
+
+        // Re-activate kill loop if there are kill-only players already found (in Players Found)
+        // Don't re-enable for players still pending search — they'll trigger when found
+        // Don't re-enable if we're already mid bg_shoot sequence or on cooldown
+        const midBgShoot = state.pendingKillAction?.stage === 'bg_shoot' && !isInternalDriveReady();
+        const killLoopOnCooldown = state.killLoopCooldownUntil > now();
+        if (state.killBgCheckEnabled && !state.killLoopActive && !state.pendingKillAction && !midBgShoot && !killLoopOnCooldown) {
+            const players = getKillPlayers();
+            const hasKillReady = players.some(p => {
+                if (!isPlayerShootEnabled(p.name)) return false;
+                if (p.status !== KILL_STATUS.ALIVE) return false; // skip Protected, Unknown, Dead etc.
+                if (p.bodyguard) return false;
+                if (!p.searchExpiresAt || p.searchExpiresAt < now()) return false;
+                return true;
+            });
+            if (hasKillReady && !(state.killBgWaitUntil > Date.now())) state.killLoopActive = true;
+        }
         // Also runs if kill loop is active but waiting for drive (needsDrive && !driveReady)
         const killLoopWaitingForDrive = state.killLoopActive &&
             state.pendingKillAction &&
             (state.pendingKillAction.stage === 'travel' || state.pendingKillAction.stage === 'travel_car') &&
             !isInternalDriveReady();
-        if (state.killSearchLoopActive && (!state.killLoopActive || killLoopWaitingForDrive)) {
+        // Kill loop blocks the search loop only when it has an active action to execute right now.
+        // If kill loop is active but has no pendingKillAction, the search loop can run freely.
+        // Also allow search loop when bg_shoot is pending but drive isn't ready yet.
+        const bgShootWaitingForDrive = state.killLoopActive &&
+            state.pendingKillAction?.stage === 'bg_shoot' &&
+            !isInternalDriveReady();
+        const killLoopBlocksSearch = state.killLoopActive &&
+            state.pendingKillAction !== null &&
+            !killLoopWaitingForDrive &&
+            !bgShootWaitingForDrive;
+        if (state.killSearchLoopActive && !killLoopBlocksSearch) {
             // Don't intercept jail page — kill page is accessible whilst jailed,
             // so continue searching. Jail observer handles release separately.
             if (hasCTCChallenge()) {
@@ -6729,7 +8616,6 @@
             if (ownRow) {
                 jailHadOwnRow = true;
                 const jailMs  = getOwnJailTimerMs();
-                setLastActionText(jailMs != null ? `In jail (${Math.ceil(jailMs / 1000)}s)` : 'In jail');
                 return;
             }
 
@@ -6761,7 +8647,6 @@
             if (recentlyActed(600)) return;
 
             if (hasCTCChallenge()) {
-                setLastActionText('CTC solving…');
                 await maybeSolveCTC();
                 return;
             }
@@ -6790,10 +8675,115 @@
                 return;
             }
 
+
+            // Bullet factory check — fires every 30 minutes on the half-hour
+            // Start a run if due and no other dedicated loop is active
+            if (isBulletFactoryCheckDue() && !state.bustLoopActive && !state.killLoopActive &&
+                !state.gtaResetLoopActive && !state.meltResetLoopActive) {
+                await startBulletFactoryRun();
+                return;
+            }
+
+            // Bullet factory run in progress — route based on stage
+            // Defer to kill loop if it needs the drive, and for travel_car only intercept when drive is actually ready
+            const killNeedsDrive = state.killLoopActive && state.pendingKillAction &&
+                (state.pendingKillAction.stage === 'travel' || state.pendingKillAction.stage === 'travel_car');
+            if (state.pendingBulletRun && !killNeedsDrive &&
+                !(state.pendingBulletRun.stage === 'travel_car' && !isInternalDriveReady())) {
+                const run = state.pendingBulletRun;
+                const page = currentPage();
+                const url  = window.location.href;
+
+                // Complete stage — run finished, clear state and return to crimes
+                if (run.stage === 'complete') {
+                    addLiveLog('Bullet factory: run complete — clearing state');
+                    state.pendingBulletRun = null;
+                    return;
+                }
+
+                if (run.stage === 'withdraw') {
+                    // Navigate to bank if not already there
+                    if (!isBankPage()) {
+                        addLiveLog('Bullet factory: navigating to bank to withdraw');
+                        state.pendingBankAction = { type: 'withdraw', amount: run.withdrawAmount, source: 'bulletFactory' };
+                        await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                        gotoPage('bank');
+                        return;
+                    }
+                    // Already on bank page — ensure pendingBankAction is set, then fall through
+                    if (!state.pendingBankAction) {
+                        state.pendingBankAction = { type: 'withdraw', amount: run.withdrawAmount, source: 'bulletFactory' };
+                    }
+                }
+
+                if (run.stage === 'topup') {
+                    // Mid-run bank topup — navigate to bank if not there, then fall through
+                    if (!isBankPage()) {
+                        addLiveLog(`Bullet factory: navigating to bank for mid-run top-up`);
+                        state.pendingBankAction = { type: 'withdraw', amount: run.withdrawAmount, source: 'bulletFactory', substage: 'topup' };
+                        await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                        gotoPage('bank');
+                        return;
+                    }
+                    // On bank page — ensure pendingBankAction is set, then fall through to handleBankPage
+                    if (!state.pendingBankAction) {
+                        state.pendingBankAction = { type: 'withdraw', amount: run.withdrawAmount, source: 'bulletFactory', substage: 'topup' };
+                    }
+                }
+
+                if (run.stage === 'travel') {
+                    // If on bank page, let handleBankPage handle it (mid-run topup or initial withdraw)
+                    if (isBankPage()) {
+                        // fall through to handleBankPage below
+                    } else if (!isInternalDriveReady()) {
+                        // Drive not ready yet — fall through to normal script handling
+                        // tick will naturally retry bullet factory when drive becomes available
+                    } else if (!isCarsPage() && !hasCarsPageMarkers()) {
+                        addLiveLog(`Bullet factory: navigating to cars page to travel to ${run.targets[0]?.country}`);
+                        await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                        gotoPage('cars');
+                        return;
+                    } else {
+                        await handleBulletFactoryTravelPage();
+                        return;
+                    }
+                }
+
+                if (run.stage === 'travel_car') {
+                    // Drive ready — on car detail page, drive to destination
+                    if (!isCarPage()) {
+                        if (run.travelCarUrl) {
+                            window.location.href = run.travelCarUrl;
+                        } else {
+                            state.pendingBulletRun = { ...run, stage: 'travel' };
+                            gotoPage('cars');
+                        }
+                        return;
+                    }
+                    await handleBulletFactoryTravelCarPage();
+                    return;
+                }
+
+                if (run.stage === 'buy') {
+                    // On weaponry page — buy bullets
+                    const target = run.targets[0];
+                    const onBuyPage = url.includes('p=weaponry') && url.includes('show=bullet');
+                    if (target && !onBuyPage) {
+                        addLiveLog(`Bullet factory: navigating to bullet factory in ${target?.country}`);
+                        await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                        window.location.href = getBulletFactoryUrl(target.countryId);
+                        return;
+                    }
+                    await handleBulletFactoryPage();
+                    return;
+                }
+            }
+
             // Players Online scan — fires opportunistically during normal script.
             // Only runs when no dedicated loop is active and scan is due.
             if (isKillOnlineScanDue() && !state.bustLoopActive && !state.gtaResetLoopActive &&
-                !state.meltResetLoopActive && !state.resetCrimesEnabled && !isKillPenaltyPage()) {
+                !state.meltResetLoopActive && !state.resetCrimesEnabled && !isKillPenaltyPage() &&
+                !state.pendingBulletRun) {
                 addLiveLog('Kill scanner: online scan due — navigating to Players Online');
                 gotoPage('online');
                 return;
@@ -6833,6 +8823,20 @@
             }
 
             // Kill penalty page handled at top of tick — nothing to do here
+
+            // Auto account creation — handle login, username and rules pages
+            if (isLoginPage()) {
+                await handleLoginPage();
+                return;
+            }
+            if (isUsernamePage()) {
+                await handleUsernamePage();
+                return;
+            }
+            if (isRulesPage() || isTutorialPage()) {
+                await handleRulesPage();
+                return;
+            }
 
             if (isBankPage()) {
                 await handleBankPage();
@@ -6884,12 +8888,301 @@
 
     let protectedRecheckHandle = null;
 
+    // ── Bullet Factory Page Handler ───────────────────────────────────────────
+    // Handles the weaponry page (?p=weaponry&show=bullet&id=X) during a bullet run
+    async function handleBulletFactoryPage() {
+        const run = state.pendingBulletRun;
+        if (!run || !run.targets || !run.targets.length) {
+            addLiveLog('Bullet factory: no pending run — returning to crimes');
+            state.pendingBulletRun = null;
+            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            gotoPage('crimes');
+            return;
+        }
+
+        const target = run.targets[0];
+        addLiveLog(`Bullet factory: arrived at ${target.country} factory (${run.targets.length} countries remaining)`);
+
+        // Check for successful purchase message — this fires when we've just bought
+        const successEl = document.querySelector('.bgm.success, .bgm.cg');
+        const successText = successEl ? successEl.textContent.trim() : '';
+        if (successEl && /bought/i.test(successText)) {
+            addLiveLog(`Bullet factory: purchase confirmed at ${target.country} — "${successText.slice(0, 60)}"`);
+            const newTargets = run.targets.slice(1);
+            if (!newTargets.length) {
+                addLiveLog('Bullet factory: all countries done — run complete');
+                // Keep pendingBulletRun alive until after navigation so kill scanner stays suppressed
+                state.pendingBulletRun = { ...run, targets: [], stage: 'complete' };
+                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                state.pendingBulletRun = null;
+                gotoPage('crimes');
+                return;
+            }
+            addLiveLog(`Bullet factory: moving to next country (${newTargets[0].country})`);
+            state.pendingBulletRun = { ...run, targets: newTargets, stage: 'travel' };
+            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            if (isInternalDriveReady()) {
+                gotoPage('cars');
+            } else {
+                // Drive not ready yet — return to crimes and let the normal tick handle it
+                // when drive becomes available
+                gotoPage('crimes');
+            }
+            return;
+        }
+
+        // Find the stock
+        const stockLabelEl = [...document.querySelectorAll('.bgd.myc')].find(el => el.textContent.trim() === 'Stock');
+        const stockText = stockLabelEl?.nextSibling?.textContent?.trim() || '0';
+        const stock = parseInt(stockText.replace(/,/g, ''), 10) || 0;
+        addLiveLog(`Bullet factory: stock check at ${target.country} — read "${stockText}" → ${stock} bullets`);
+
+        if (!stock) {
+            addLiveLog(`Bullet factory: no stock at ${target.country} — moving to next`);
+            const newTargets = run.targets.slice(1);
+            if (!newTargets.length) {
+                addLiveLog('Bullet factory: all countries done — run complete');
+                state.pendingBulletRun = { ...run, targets: [], stage: 'complete' };
+                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                state.pendingBulletRun = null;
+                gotoPage('crimes');
+                return;
+            }
+            state.pendingBulletRun = { ...run, targets: newTargets, stage: 'travel' };
+            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            if (isInternalDriveReady()) {
+                gotoPage('cars');
+            } else {
+                gotoPage('crimes');
+            }
+            return;
+        }
+
+        // Buy whatever is on the page — don't enforce minimum here since we've already travelled
+
+        // Find the buy form — specifically the form containing the bullets input
+        const bulletsInput = document.querySelector('input[name="bullets"]');
+        const buyForm      = bulletsInput?.closest('form');
+        const buyBtn       = buyForm?.querySelector('input[type="submit"][value="Buy"]');
+
+        if (!bulletsInput || !buyBtn) {
+            addLiveLog(`Bullet factory: buy form not found at ${target.country} — moving to next`);
+            const newTargets = run.targets.slice(1);
+            if (!newTargets.length) {
+                state.pendingBulletRun = { ...run, targets: [], stage: 'complete' };
+                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                state.pendingBulletRun = null;
+                gotoPage('crimes');
+                return;
+            }
+            state.pendingBulletRun = { ...run, targets: newTargets, stage: 'travel' };
+            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            if (isInternalDriveReady()) {
+                gotoPage('cars');
+            } else {
+                gotoPage('crimes');
+            }
+            return;
+        }
+
+        // Buy all available stock
+        addLiveLog(`Bullet factory: buying ${stock} bullets at ${target.country} (Global Owners reported ${target.stock})`);
+
+        // Check we have enough cash — QT sniper may have deposited mid-run
+        const priceLabelEl = [...document.querySelectorAll('.bgd.myc')].find(el => el.textContent.trim() === 'Price per bullet');
+        const priceText = priceLabelEl?.nextSibling?.textContent?.trim().replace(/[^0-9]/g, '') || '';
+        const pricePerBullet = priceText ? parseInt(priceText, 10) : BULLET_FACTORY_COST_PER_BULLET;
+        const totalCost = stock * pricePerBullet;
+        const cashOnHand = getPlayerMoney();
+
+        if (cashOnHand < totalCost) {
+            // Calculate how much we need for all remaining countries
+            const remainingCost = run.targets.reduce((sum, t) => sum + (t.stock * BULLET_FACTORY_COST_PER_BULLET), 0);
+            addLiveLog(`Bullet factory: insufficient cash ($${cashOnHand.toLocaleString()} < $${totalCost.toLocaleString()}) — withdrawing $${remainingCost.toLocaleString()} from bank`);
+            // Use 'topup' stage — preserves targets so we return to the right country after withdraw
+            state.pendingBulletRun  = { ...run, stage: 'topup' };
+            state.pendingBankAction = { type: 'withdraw', amount: remainingCost, source: 'bulletFactory', substage: 'topup' };
+            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            gotoPage('bank');
+            return;
+        }
+
+        state.lastActionAt = now();
+        await wait(rand(DEFAULTS.actionDelayMin, DEFAULTS.actionDelayMax));
+
+        const freshInput = document.querySelector('input[name="bullets"]');
+        const freshForm  = freshInput?.closest('form');
+        const freshBtn   = freshForm?.querySelector('input[type="submit"][value="Buy"]');
+        if (!freshInput || !freshBtn) return;
+
+        // Advance state BEFORE clicking — if page reloads we won't re-enter this buy loop
+        const newTargets = run.targets.slice(1);
+        if (!newTargets.length) {
+            // Last country — keep pendingBulletRun alive until page reloads after buy
+            // so kill scanner stays suppressed during the click and page navigation
+            state.pendingBulletRun = { ...run, targets: [], stage: 'complete' };
+        } else {
+            state.pendingBulletRun = { ...run, targets: newTargets, stage: 'travel' };
+        }
+
+        freshInput.value = String(stock);
+        humanClick(freshBtn);
+    }
+
+    // Handles the bullet factory travel stage — on the cars list page
+    async function handleBulletFactoryTravelPage() {
+        const run = state.pendingBulletRun;
+        if (!run || !run.targets || !run.targets.length) {
+            state.pendingBulletRun = null;
+            gotoPage('crimes');
+            return;
+        }
+
+        const target = run.targets[0];
+        const playerCountry = getPlayerLocation();
+
+        // If already in target country, go directly to weaponry page
+        if (playerCountry.toLowerCase() === target.country.toLowerCase()) {
+            addLiveLog(`Bullet factory: already in ${target.country} — going to buy`);
+            state.pendingBulletRun = { ...run, stage: 'buy' };
+            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            window.location.href = getBulletFactoryUrl(target.countryId);
+            return;
+        }
+
+        // Re-check Global Owners page to see if stock is still available before wasting a drive
+        try {
+            const freshStocks = await fetchBulletFactoryStocks();
+            const freshTarget = freshStocks.find(s => s.country.toLowerCase() === target.country.toLowerCase());
+            if (!freshTarget) {
+                addLiveLog(`Bullet factory: ${target.country} has no stock — skipping travel`);
+                // Remove this target and try the next one
+                const newTargets = run.targets.slice(1).filter(t =>
+                    freshStocks.some(s => s.country.toLowerCase() === t.country.toLowerCase())
+                );
+                if (!newTargets.length) {
+                    addLiveLog('Bullet factory: no more countries with stock — run complete');
+                    state.pendingBulletRun = null;
+                    await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                    gotoPage('crimes');
+                } else {
+                    state.pendingBulletRun = { ...run, targets: newTargets, stage: 'travel' };
+                    await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                    gotoPage('cars');
+                }
+                return;
+            }
+            addLiveLog(`Bullet factory: ${target.country} confirmed ${freshTarget.stock} bullets — travelling`);
+        } catch (e) {
+            // If fetch fails, proceed anyway — handle 0 stock on the weaponry page
+            addLiveLog(`Bullet factory: could not verify ${target.country} stock — proceeding`);
+        }
+
+        // Need to travel — find best car
+        const travelCarUrl = findBestTravelCarUrl();
+        if (!travelCarUrl) {
+            addLiveLog('Bullet factory: no travel car found — aborting run');
+            state.pendingBulletRun = null;
+            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            gotoPage('crimes');
+            return;
+        }
+
+        addLiveLog(`Bullet factory: travelling to ${target.country}`);
+        state.pendingBulletRun = { ...run, stage: 'travel_car', travelCarUrl };
+        window.location.href = travelCarUrl;
+    }
+
+    // Handles the bullet factory travel_car stage — on the car detail page
+    async function handleBulletFactoryTravelCarPage() {
+        const run = state.pendingBulletRun;
+        if (!run || !run.targets || !run.targets.length) {
+            state.pendingBulletRun = null;
+            gotoPage('crimes');
+            return;
+        }
+
+        const target = run.targets[0];
+        const locationValue = getLocationValueForCountry(target.country);
+
+        if (!locationValue) {
+            addLiveLog(`Bullet factory: unknown country "${target.country}" — skipping`);
+            const newTargets = run.targets.slice(1);
+            state.pendingBulletRun = newTargets.length ? { ...run, targets: newTargets, stage: 'travel' } : null;
+            gotoPage('crimes');
+            return;
+        }
+
+        // Check if car is too damaged
+        const driveSection = [...document.querySelectorAll('.tac.mb .bgl.i')]
+            .find(el => /too much damage to drive/i.test(textOf(el)));
+        if (driveSection) {
+            const repairBtn = document.querySelector('form input[type="submit"][name="repair"]');
+            if (repairBtn) {
+                addLiveLog('Bullet factory: car damaged — repairing');
+                state.lastActionAt = now();
+                await wait(rand(DEFAULTS.actionDelayMin, DEFAULTS.actionDelayMax));
+                humanClick(document.querySelector('form input[type="submit"][name="repair"]'));
+                return;
+            }
+            // No repair button — try another car
+            addLiveLog('Bullet factory: car damaged, no repair button — finding another car');
+            state.pendingBulletRun = { ...run, stage: 'travel' };
+            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            gotoPage('cars');
+            return;
+        }
+
+        // Check drive cooldown
+        if (!isInternalDriveReady()) {
+            const remaining = Math.ceil(getInternalDriveRemainingMs() / 1000);
+            return;
+        }
+
+        const locationRadio = document.querySelector(`form input[type="radio"][name="location"][value="${locationValue}"]`);
+        const goBtn         = document.querySelector('form input[type="submit"][name="subm"][value="Go"]');
+
+        if (!goBtn) {
+            addLiveLog('Bullet factory: drive form not found — waiting');
+            return;
+        }
+
+        if (!locationRadio) {
+            // Radio for target country not present — we're probably already in that country
+            // Go straight to the buy stage
+            addLiveLog(`Bullet factory: already in ${target.country} — going to buy`);
+            state.pendingBulletRun = { ...run, stage: 'buy' };
+            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            window.location.href = getBulletFactoryUrl(target.countryId);
+            return;
+        }
+
+        state.lastActionAt = now();
+        await wait(rand(DEFAULTS.actionDelayMin, DEFAULTS.actionDelayMax));
+
+        const freshRadio = document.querySelector(`form input[type="radio"][name="location"][value="${locationValue}"]`);
+        const freshGo    = document.querySelector('form input[type="submit"][name="subm"][value="Go"]');
+        if (!freshRadio || !freshGo) return;
+
+        freshRadio.checked     = true;
+        state.nextDriveReadyAt = now() + 120000;
+        humanClick(freshGo);
+        addLiveLog(`Bullet factory: driving to ${target.country}`);
+        // After drive — go buy bullets
+        state.pendingBulletRun = { ...run, stage: 'buy' };
+    }
+
     function startHeartbeat() {
         stopHeartbeat();
         startRuntimeIfNeeded();
         heartbeatHandle = setInterval(() => tick(), DEFAULTS.heartbeatMs);
         setTimeout(() => tick(), 400);
         addLiveLog('Heartbeat started');
+        // Refresh kill list every 10s so BG countdown timers tick live
+        if (window._ugKillListRefresh) clearInterval(window._ugKillListRefresh);
+        window._ugKillListRefresh = setInterval(() => {
+            if (document.querySelector('#ug-bot-kill-list')) renderKillList();
+        }, 10000);
         // Start independent protected recheck checker — runs every 10s regardless of loopBusy
         // Just sets the flag — the next heartbeat tick handles navigation naturally
         if (protectedRecheckHandle) clearInterval(protectedRecheckHandle);
@@ -6951,44 +9244,6 @@
         }
 
         el.textContent = `At ${multiplier}× — deposits when cash exceeds ${fmt(trigger)}, keeping ${fmt(reserve)} on hand.`;
-    }
-
-    function renderStats() {
-        if (!statsEl) return;
-        const s = state.stats;
-
-        // Only rebuild the DOM when values have actually changed.
-        // This preserves text selection between heartbeat ticks.
-        const currentJson = JSON.stringify(s);
-        if (currentJson === lastRenderedStatsJson) return;
-        lastRenderedStatsJson = currentJson;
-
-        statsEl.innerHTML = `
-            <div><b>Crimes:</b> ${s.crimes}</div>
-            <div><b>Crime resets:</b> ${s.crimeResets || 0}</div>
-            <div><b>GTAs:</b> ${s.gtas}</div>
-            <div><b>GTA resets:</b> ${s.gtaResets || 0}</div>
-            <div><b>Melts:</b> ${s.melts}</div>
-            <div><b>Melt resets:</b> ${s.meltResets || 0}</div>
-            <div><b>Busts successful:</b> ${s.bustsSuccess || 0}</div>
-            <div><b>Busts failed:</b> ${s.bustsFailed || 0}</div>
-            <div><b>Bullets received:</b> ${s.bulletsReceived.toLocaleString()}</div>
-            <div><b>Repairs:</b> ${s.repairs}</div>
-            <div><b>Deposits:</b> ${s.deposits}</div>
-            <div><b>Jails:</b> ${s.jails}</div>
-            <div><b>Jail escapes (1pt):</b> ${s.jailEscapes || 0}</div>
-            <div><b>CTC solved:</b> ${s.ctcSolved}</div>
-            <div><b>CTC failed:</b> ${s.ctcFailed}</div>
-            <div><b>Missions accepted:</b> ${s.missionsAccepted}</div>
-            <div><b>Missions declined:</b> ${s.missionsDeclined}</div>
-            <div><b>Mission cars used:</b> ${s.missionCarsUsed}</div>
-            <div><b>Drug runs:</b> ${s.drugRuns}</div>
-            <div><b>Drug car repairs:</b> ${s.drugRepairs}</div>
-            <div><b>Swiss deposits:</b> ${s.swissDeposits}</div>
-            <div><b>Swiss withdrawals:</b> ${s.swissWithdrawals}</div>
-            <div><b>Page loads:</b> ${s.pageLoads}</div>
-            <div><b>Last action:</b> ${s.lastActionText}</div>
-        `;
     }
 
     function renderLiveLog() {
@@ -7079,11 +9334,9 @@
     let activeTab = getSetting('activeTab', 'crimes');
     if (activeTab === 'stats' || activeTab === 'log') activeTab = 'statslog';
     // Ensure activeTab is a valid tab that exists in the current version
-    const validTabs = ['crimes', 'gta', 'drugs', 'points', 'kill', 'statslog'];
+    const validTabs = ['crimes', 'gta', 'drugs', 'points', 'kill', 'statslog', 'qt', 'acc'];
     if (!validTabs.includes(activeTab)) activeTab = 'crimes';
 
-    // Active sub-tab within Stats/Log combined tab
-    let activeStatsLogTab = getSetting('activeStatsLogTab', 'stats');
 
     function saveSettings() {
         const checked            = [...document.querySelectorAll('.ug-action-cb:checked')].map(cb => cb.dataset.id);
@@ -7129,8 +9382,54 @@
             state.bustFastMode = bustFastModeInput ? bustFastModeInput.checked : state.bustFastMode;
         }
         state.bustNoReload = bustNoReloadInput ? bustNoReloadInput.checked : state.bustNoReload;
+        if (bustPollMinEl) state.bustPollMin = Math.max(100, parseInt(bustPollMinEl.value) || DEFAULTS.bustPollMin);
+        if (bustPollMaxEl) state.bustPollMax = Math.max(100, parseInt(bustPollMaxEl.value) || DEFAULTS.bustPollMax);
+        if (bgCrimeEnabledInput) {
+            state.bgCrimeEnabled = bgCrimeEnabledInput.checked;
+            if (state.bgCrimeEnabled) startBgCrime();
+            else stopBgCrime();
+        }
+        if (bulletFactoryEnabledInput) {
+            state.bulletFactoryEnabled = bulletFactoryEnabledInput.checked;
+        }
         if (killProtectedRecheckInput)  state.killProtectedRecheckEnabled = killProtectedRecheckInput.checked;
         if (killProtectedRecheckMinsEl) state.killProtectedRecheckMins    = Number(killProtectedRecheckMinsEl.value) || DEFAULTS.killProtectedRecheckMins;
+        if (qtBgEnabledInput)      state.qtBgEnabled       = qtBgEnabledInput.checked;
+        if (qtBgThresholdEl)       state.qtBgThreshold     = Number(qtBgThresholdEl.value) || DEFAULTS.qtBgThreshold;
+        if (qtBulletsEnabledInput) state.qtBulletsEnabled  = qtBulletsEnabledInput.checked;
+        if (qtBulletsThresholdEl)  state.qtBulletsThreshold = Number(qtBulletsThresholdEl.value) || DEFAULTS.qtBulletsThreshold;
+        if (qtBulletsMinEl)        state.qtBulletsMin        = Number(qtBulletsMinEl.value) || 0;
+        if (qtPollMinEl)           state.qtPollMin          = Number(qtPollMinEl.value) || DEFAULTS.qtPollMin;
+        if (qtPollMaxEl)           state.qtPollMax          = Number(qtPollMaxEl.value) || DEFAULTS.qtPollMax;
+        if (qtPointsEnabledInput)  state.qtPointsEnabled    = qtPointsEnabledInput.checked;
+        if (qtPointsThresholdEl)   state.qtPointsThreshold  = Number(qtPointsThresholdEl.value) || DEFAULTS.qtPointsThreshold;
+        if (qtCarsEnabledInput)    state.qtCarsEnabled      = qtCarsEnabledInput.checked;
+        if (qtCarsIntervalEl)      state.qtCarsScanInterval = Number(qtCarsIntervalEl.value) || DEFAULTS.qtCarsScanInterval;
+        if (qtPerkExtendEnabledInput) state.qtPerkExtendEnabled = qtPerkExtendEnabledInput.checked;
+        if (qtPerkExtendMinsEl)    state.qtPerkExtendMins   = Number(qtPerkExtendMinsEl.value) || DEFAULTS.qtPerkExtendMins;
+        // Save per-car-type settings from the rendered list
+        const carTypes = (state.qtCarsTypes || DEFAULTS.qtCarsTypes).map(t => ({ ...t }));
+        carTypes.forEach(t => {
+            const cb = document.querySelector(`#ug-bot-qt-car-enabled-${t.b}`);
+            const px = document.querySelector(`#ug-bot-qt-car-price-${t.b}`);
+            if (cb) t.enabled  = cb.checked;
+            if (px) t.maxPrice = parseInt(px.value.replace(/,/g, ''), 10) || t.maxPrice;
+        });
+        state.qtCarsTypes = carTypes;
+        // Start or stop QT car scanner
+        if (state.qtCarsEnabled) { startQTCarScanner(); } else { stopQTCarScanner(); }
+        // Start or stop QT sniper
+        if (state.qtBgEnabled || state.qtBulletsEnabled) {
+            startQTSniper();
+        } else {
+            stopQTSniper();
+        }
+        // Start or stop perk extender
+        if (state.qtPerkExtendEnabled) {
+            startQTPerkExtender();
+        } else {
+            stopQTPerkExtender();
+        }
         state.killScanOnlineEnabled  = killScanOnlineInput   ? killScanOnlineInput.checked   : state.killScanOnlineEnabled;
         state.killScanOnlineInterval = killScanIntervalEl    ? Number(killScanIntervalEl.value) : state.killScanOnlineInterval;
         state.killSearchEnabled      = killSearchInput       ? killSearchInput.checked       : state.killSearchEnabled;
@@ -7154,7 +9453,11 @@
         // Also force scan and search on — the kill loop requires both to function.
         if (state.killBgCheckEnabled) {
             const hasBgTargets = (state.killBgCheckPlayers || []).length > 0;
-            if (hasBgTargets) state.killLoopActive = true;
+            // Clear killBgWaitUntil if a bg_shoot is already queued — BG was found
+            if (state.pendingKillAction?.stage === 'bg_shoot') state.killBgWaitUntil = 0;
+            // Don't re-enable kill loop if we're explicitly waiting for a BG search to complete
+            const waitingForBg = state.killBgWaitUntil > Date.now();
+            if (hasBgTargets && !waitingForBg) state.killLoopActive = true;
             // Force scan online and search players on
             state.killScanOnlineEnabled = true;
             state.killSearchEnabled     = true;
@@ -7275,16 +9578,7 @@
         autoSaveTimer = setTimeout(() => { autoSaveTimer = null; saveSettings(); }, 800);
     }
 
-    function switchStatsLogTab(subtab) {
-        activeStatsLogTab = subtab;
-        setSetting('activeStatsLogTab', subtab);
-        document.querySelectorAll('.ug-subtab-btn').forEach(btn => {
-            btn.classList.toggle('ug-subtab-active', btn.dataset.subtab === subtab);
-        });
-        document.querySelectorAll('.ug-subtab-pane').forEach(pane => {
-            pane.style.display = pane.dataset.subtab === subtab ? 'block' : 'none';
-        });
-    }
+
 
     function switchTab(tab) {
         activeTab = tab;
@@ -7303,7 +9597,6 @@
 
         // When switching to the statslog tab, restore the active sub-tab
         if (tab === 'statslog') {
-            switchStatsLogTab(activeStatsLogTab);
         }
     }
 
@@ -7336,7 +9629,9 @@
                     <button class="ug-tab-btn" data-tab="drugs">Drugs</button>
                     <button class="ug-tab-btn" data-tab="points">Points</button>
                     <button class="ug-tab-btn" data-tab="kill">Kill</button>
-                    <button class="ug-tab-btn" data-tab="statslog">Stats/Log</button>
+                    <button class="ug-tab-btn" data-tab="qt">QT</button>
+                    <button class="ug-tab-btn" data-tab="statslog">Log</button>
+                    <button class="ug-tab-btn" data-tab="acc">Acc</button>
                 </div>
 
                 <div id="ug-bot-tab-content">
@@ -7345,6 +9640,10 @@
                 <div class="ug-tab-pane" data-tab="crimes">
                     <div class="ug-row ug-check">
                         <label><input id="ug-bot-autodeposit" type="checkbox" /> Enable auto quick deposit</label>
+                    </div>
+                    <div class="ug-row ug-check">
+                        <label><input id="ug-bot-bg-crime" type="checkbox" /> Enable background crimes</label>
+                        <div class="ug-helptext" style="margin-top:2px;">Commits crimes in the background while doing GTA, melt, drugs etc. Uses the crime AJAX endpoint.</div>
                     </div>
                     <div class="ug-row">
                         <div class="ug-subtitle">Auto deposit threshold</div>
@@ -7377,6 +9676,11 @@
                             <label class="ug-action-label">
                                 <input id="ug-bot-autogivecars" type="checkbox" /> Enable give car missions
                             </label>
+                            <div class="ug-action-divider"></div>
+                            <label class="ug-action-label">
+                                <input id="ug-bot-bullet-factory" type="checkbox" /> Enable bullet factory buying
+                            </label>
+                            <div class="ug-helptext" style="margin-top:2px;">Every 30 minutes, checks the Global Owners page for bullet factory stock (300+ bullets per country), withdraws cash and buys all available bullets by travelling to each country.</div>
                         </div>
                     </div>
                 </div>
@@ -7414,6 +9718,17 @@
                                 <input id="ug-bot-bust-noreload" type="checkbox" />
                                 No reload bust — busts in background via fetch, no page navigation needed
                             </label>
+                            <div class="ug-helptext" style="margin:6px 0 4px;">No reload bust poll interval</div>
+                            <div style="display:flex;gap:8px;margin-top:4px;">
+                                <div style="flex:1;">
+                                    <div class="ug-subtitle" style="margin-bottom:4px;">Min (ms)</div>
+                                    <input id="ug-bot-bust-poll-min" type="number" min="100" step="100" style="width:100%;box-sizing:border-box;padding:7px 8px;border:1px solid #555;border-radius:6px;background:#111;color:#fff;font-size:12px;" />
+                                </div>
+                                <div style="flex:1;">
+                                    <div class="ug-subtitle" style="margin-bottom:4px;">Max (ms)</div>
+                                    <input id="ug-bot-bust-poll-max" type="number" min="100" step="100" style="width:100%;box-sizing:border-box;padding:7px 8px;border:1px solid #555;border-radius:6px;background:#111;color:#fff;font-size:12px;" />
+                                </div>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -7480,12 +9795,16 @@
                             <div style="margin-top:6px;">
                                 <div class="ug-subtitle" style="margin-bottom:4px;">Scan interval</div>
                                 <select id="ug-bot-kill-scan-interval" data-role="none" style="width:100%;box-sizing:border-box;padding:7px 8px;border:1px solid #555;border-radius:6px;background:#111;color:#fff;font-size:12px;">
+                                    <option value="0.5">Every 30 seconds</option>
+                                    <option value="1">Every 1 minute</option>
+                                    <option value="1.5">Every 1 min 30 secs</option>
+                                    <option value="2">Every 2 minutes</option>
+                                    <option value="2.5">Every 2 mins 30 secs</option>
+                                    <option value="3">Every 3 minutes</option>
+                                    <option value="3.5">Every 3 mins 30 secs</option>
+                                    <option value="4">Every 4 minutes</option>
+                                    <option value="4.5">Every 4 mins 30 secs</option>
                                     <option value="5">Every 5 minutes</option>
-                                    <option value="10">Every 10 minutes</option>
-                                    <option value="15">Every 15 minutes</option>
-                                    <option value="20">Every 20 minutes</option>
-                                    <option value="30">Every 30 minutes</option>
-                                    <option value="60">Every 60 minutes</option>
                                 </select>
                             </div>
                         </div>
@@ -7588,8 +9907,9 @@
                             <div class="ug-subtitle" style="margin-bottom:6px;">Player list <span id="ug-bot-kill-count" style="font-weight:normal;color:#aaa;font-size:11px;"></span></div>
                             <div id="ug-bot-kill-list" class="ug-kill-list"></div>
                             <div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap;">
-                                <button id="ug-bot-kill-clear" type="button" style="font-size:11px;padding:4px 8px;">Clear list</button>
-                                <button id="ug-bot-kill-copy" type="button" style="font-size:11px;padding:4px 8px;">Copy names</button>
+                                <button id="ug-bot-kill-clear" type="button" style="font-size:11px;padding:4px 8px;">Clear</button>
+                                <button id="ug-bot-kill-copy" type="button" style="font-size:11px;padding:4px 8px;">Copy</button>
+                                <button id="ug-bot-kill-import" type="button" style="font-size:11px;padding:4px 8px;">Import</button>
                                 <button id="ug-bot-kill-select-all-bg" type="button" style="font-size:11px;padding:4px 8px;">All BG</button>
                                 <button id="ug-bot-kill-select-all-shoot" type="button" style="font-size:11px;padding:4px 8px;">All Kill</button>
                             </div>
@@ -7597,27 +9917,158 @@
                     </div>
                 </div>
 
+
+                <!-- ACC TAB -->
+                <div class="ug-tab-pane" data-tab="acc">
+                    <div class="ug-row">
+                        <div class="ug-section-box">
+                            <div class="ug-section-title">Auto Account Creation</div>
+                            <div class="ug-helptext" style="margin-bottom:6px;">When enabled, automatically logs in after death, picks the next available username from the list below, accepts the rules and declines the tutorial, then resumes normal script operation.</div>
+                            <label class="ug-action-label">
+                                <input id="ug-bot-acc-enabled" type="checkbox"> Enable auto account creation
+                            </label>
+                            <div class="ug-helptext" style="margin-top:4px;color:#f8c84a;">Requires a single saved login in your browser for this site. If multiple logins are saved, delete all but one.</div>
+                            <label class="ug-action-label" style="margin-top:8px;">
+                                <input id="ug-bot-acc-retrieve" type="checkbox"> Auto-retrieve assets from previous account
+                            </label>
+                            <div class="ug-helptext" style="margin-top:4px;">After creating a new account, automatically retrieves Swiss bank, points and cars from the most recent previous account.</div>
+                            <button id="ug-bot-acc-retrieve-now" type="button" style="margin-top:8px;font-size:11px;padding:4px 10px;">Retrieve now</button>
+                            <div class="ug-helptext" style="margin-top:4px;">Manually trigger a retrieve from your previous account — useful if the bot was updated mid-session.</div>
+                        </div>
+                    </div>
+                    <div class="ug-row">
+                        <div class="ug-section-box">
+                            <div class="ug-section-title">Username List</div>
+                            <div class="ug-helptext" style="margin-bottom:6px;">Usernames are used in order from top to bottom. If a name is taken the script automatically skips to the next. Max 20 chars, a-z 0-9 and spaces only.</div>
+                            <div style="display:flex;gap:6px;margin-bottom:6px;flex-wrap:wrap;">
+                                <button id="ug-bot-acc-generate" type="button" style="font-size:11px;padding:4px 8px;">Generate random names</button>
+                                <button id="ug-bot-acc-clear-names" type="button" style="font-size:11px;padding:4px 8px;">Clear list</button>
+                            </div>
+                            <textarea id="ug-bot-acc-names" placeholder="One username per line&#10;e.g.&#10;Saka7&#10;Gunners 99&#10;North London" style="width:100%;box-sizing:border-box;height:200px;padding:7px 8px;border:1px solid #555;border-radius:6px;background:#1b1b1b;color:#fff;font-size:11px;resize:vertical;font-family:monospace;"></textarea>
+                            <div id="ug-bot-acc-status" style="margin-top:6px;font-size:11px;color:#9fe79f;min-height:14px;"></div>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- STATS/LOG COMBINED TAB -->
+                <!-- QT TAB -->
+                <div class="ug-tab-pane" data-tab="qt">
+                    <!-- QT sub-tabs -->
+                    <div style="display:flex;gap:4px;margin-bottom:10px;flex-wrap:wrap;">
+                        <button class="ug-qt-sub-btn ug-qt-sub-active" data-qt-tab="perks" type="button" style="font-size:11px;padding:4px 10px;border-radius:5px;border:1px solid #555;background:#333;color:#fff;cursor:pointer;">Perks</button>
+                        <button class="ug-qt-sub-btn" data-qt-tab="cars" type="button" style="font-size:11px;padding:4px 10px;border-radius:5px;border:1px solid #555;background:#222;color:#aaa;cursor:pointer;">Cars</button>
+                    </div>
+
+                    <!-- PERKS sub-tab -->
+                    <div class="ug-qt-sub-pane" data-qt-pane="perks">
+                    <div class="ug-row">
+                        <div class="ug-section-box">
+                            <div class="ug-section-title">Bodyguards</div>
+                            <div class="ug-helptext" style="margin-bottom:6px;">Buys Personal and Robot Bodyguard perks below threshold. Price in points.</div>
+                            <label class="ug-action-label">
+                                <input id="ug-bot-qt-bg-enabled" type="checkbox" /> Enable BG sniper
+                            </label>
+                            <div style="margin-top:6px;">
+                                <div class="ug-subtitle" style="margin-bottom:4px;">Max price (points)</div>
+                                <input id="ug-bot-qt-bg-threshold" type="number" min="1" step="1" style="width:100%;box-sizing:border-box;padding:7px 8px;border:1px solid #555;border-radius:6px;background:#111;color:#fff;font-size:12px;" />
+                            </div>
+                        </div>
+                    </div>
+                    <div class="ug-row">
+                        <div class="ug-section-box">
+                            <div class="ug-section-title">Points</div>
+                            <div class="ug-helptext" style="margin-bottom:6px;">Buys points from the game's Points for Sale listings below your max price per point threshold. Uses Quick Withdraw if needed, deposits back immediately after.</div>
+                            <label class="ug-action-label">
+                                <input id="ug-bot-qt-points-enabled" type="checkbox" /> Enable points sniper
+                            </label>
+                            <div style="margin-top:6px;">
+                                <div class="ug-subtitle" style="margin-bottom:4px;">Max price per point ($)</div>
+                                <input id="ug-bot-qt-points-threshold" type="number" min="1" step="1" style="width:100%;box-sizing:border-box;padding:7px 8px;border:1px solid #555;border-radius:6px;background:#111;color:#fff;font-size:12px;" />
+                            </div>
+                        </div>
+                    </div>
+                    <div class="ug-row">
+                        <div class="ug-section-box">
+                            <div class="ug-section-title">Poll Interval</div>
+                            <div class="ug-helptext" style="margin-bottom:6px;">How often to check the QT perks page. Lower = faster reaction but more requests.</div>
+                            <div style="display:flex;gap:8px;margin-top:4px;">
+                                <div style="flex:1;">
+                                    <div class="ug-subtitle" style="margin-bottom:4px;">Min (ms)</div>
+                                    <input id="ug-bot-qt-poll-min" type="number" min="2000" step="100" style="width:100%;box-sizing:border-box;padding:7px 8px;border:1px solid #555;border-radius:6px;background:#111;color:#fff;font-size:12px;" />
+                                </div>
+                                <div style="flex:1;">
+                                    <div class="ug-subtitle" style="margin-bottom:4px;">Max (ms)</div>
+                                    <input id="ug-bot-qt-poll-max" type="number" min="2000" step="100" style="width:100%;box-sizing:border-box;padding:7px 8px;border:1px solid #555;border-radius:6px;background:#111;color:#fff;font-size:12px;" />
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="ug-row">
+                        <div class="ug-section-box">
+                            <div class="ug-section-title">Bullets</div>
+                            <div class="ug-helptext" style="margin-bottom:6px;">Buys bullet listings below price-per-bullet threshold. If insufficient cash, Quick Withdraw is used then Quick Deposit immediately after.</div>
+                            <label class="ug-action-label">
+                                <input id="ug-bot-qt-bullets-enabled" type="checkbox" /> Enable bullet sniper
+                            </label>
+                            <div style="margin-top:6px;">
+                                <div class="ug-subtitle" style="margin-bottom:4px;">Max price per bullet ($)</div>
+                                <input id="ug-bot-qt-bullets-threshold" type="number" min="1" step="1" style="width:100%;box-sizing:border-box;padding:7px 8px;border:1px solid #555;border-radius:6px;background:#111;color:#fff;font-size:12px;" />
+                            </div>
+                            <div style="margin-top:6px;">
+                                <div class="ug-subtitle" style="margin-bottom:4px;">Min bullets per listing (0 = any)</div>
+                                <input id="ug-bot-qt-bullets-min" type="number" min="0" step="1" style="width:100%;box-sizing:border-box;padding:7px 8px;border:1px solid #555;border-radius:6px;background:#111;color:#fff;font-size:12px;" />
+                            </div>
+                        </div>
+                    </div>
+                    <div class="ug-row">
+                        <div class="ug-section-box">
+                            <div class="ug-section-title">Auto-Extend Expiring Perks</div>
+                            <div class="ug-helptext" style="margin-bottom:6px;">Periodically checks your perks page and extends any bullet or BG perks with 1 death remaining. Bullet perks must meet your minimum bullets threshold. Useful for catching overnight competition wins.</div>
+                            <label class="ug-action-label">
+                                <input id="ug-bot-qt-perk-extend-enabled" type="checkbox" /> Enable auto-extend
+                            </label>
+                            <div style="margin-top:6px;">
+                                <div class="ug-subtitle" style="margin-bottom:4px;">Check interval (minutes)</div>
+                                <input id="ug-bot-qt-perk-extend-mins" type="number" min="1" step="1" style="width:100%;box-sizing:border-box;padding:7px 8px;border:1px solid #555;border-radius:6px;background:#111;color:#fff;font-size:12px;" />
+                                <div class="ug-helptext">How often to check for expiring perks. Default 5 minutes.</div>
+                            </div>
+                        </div>
+                    </div>
+                    </div>
+                    <div class="ug-qt-sub-pane" data-qt-pane="cars" style="display:none;">
+                    <div class="ug-row">
+                        <div class="ug-section-box">
+                            <div class="ug-section-title">Car Sniper</div>
+                            <div class="ug-helptext" style="margin-bottom:6px;">Scans QT for rare cars below your max price. Uses Quick Withdraw/Deposit automatically. Only enabled car types are scanned.</div>
+                            <label class="ug-action-label">
+                                <input id="ug-bot-qt-cars-enabled" type="checkbox" /> Enable car sniper
+                            </label>
+                            <div style="margin-top:8px;">
+                                <div class="ug-subtitle" style="margin-bottom:4px;">Scan interval (seconds)</div>
+                                <input id="ug-bot-qt-cars-interval" type="number" min="5" step="1" style="width:100%;box-sizing:border-box;padding:7px 8px;border:1px solid #555;border-radius:6px;background:#111;color:#fff;font-size:12px;" />
+                            </div>
+                        </div>
+                    </div>
+                    <div class="ug-row">
+                        <div class="ug-section-box">
+                            <div class="ug-section-title">Car Types</div>
+                            <div class="ug-helptext" style="margin-bottom:8px;">Enable each car type and set the max price you're willing to pay.</div>
+                            <div id="ug-bot-qt-cars-list"></div>
+                        </div>
+                    </div>
+                    </div>
+                </div>
+
                 <div class="ug-tab-pane" data-tab="statslog">
-                    <div class="ug-statslog-subtabs">
-                        <button class="ug-subtab-btn" data-subtab="stats">Stats</button>
-                        <button class="ug-subtab-btn" data-subtab="log">Log</button>
-                        <button id="ug-bot-reset" type="button" class="ug-reset-stats-btn">Reset Stats</button>
+                    <div class="ug-row" style="margin-bottom:6px;display:flex;gap:6px;flex-wrap:wrap;">
+                        <button id="ug-bot-copy-log" type="button" style="font-size:11px;padding:4px 8px;">Copy log</button>
+                        <button id="ug-bot-clear-log" type="button" style="font-size:11px;padding:4px 8px;">Clear log</button>
+                        <button id="ug-bot-personality-reset" type="button" style="font-size:11px;padding:4px 8px;">Reset Personality</button>
                     </div>
-                    <div class="ug-subtab-pane" data-subtab="stats">
-                        <div class="ug-row">
-                            <div id="ug-bot-stats"></div>
-                        </div>
+                    <div class="ug-row">
+                        <div id="ug-bot-log"></div>
                     </div>
-                    <div class="ug-subtab-pane" data-subtab="log">
-                        <div class="ug-row" style="margin-bottom:6px;display:flex;gap:6px;">
-                            <button id="ug-bot-copy-log" type="button" style="font-size:11px;padding:4px 8px;">Copy log</button>
-                            <button id="ug-bot-clear-log" type="button" style="font-size:11px;padding:4px 8px;">Clear log</button>
-                        </div>
-                        <div class="ug-row">
-                            <div id="ug-bot-log"></div>
-                        </div>
-                    </div>
+
                 </div>
 
                 </div>
@@ -7715,14 +10166,6 @@
             #ug-bot-panel .ug-check label { display: flex; align-items: center; gap: 8px; font-size: 12px; }
             .ug-subtitle { font-size: 12px; font-weight: bold; margin-bottom: 6px; color: #d8d8d8; }
             .ug-helptext { margin-top: 5px; font-size: 11px; color: #aaa; line-height: 1.35; }
-            #ug-bot-stats {
-                font-size: 12px;
-                line-height: 1.45;
-                background: #1b1b1b;
-                border: 1px solid #444;
-                border-radius: 6px;
-                padding: 8px;
-            }
             #ug-bot-log {
                 font-size: 11px;
                 line-height: 1.35;
@@ -7780,46 +10223,16 @@
                 margin-left: auto;
             }
             .ug-action-divider { border-top: 1px solid #444; margin: 3px 0; }
-            .ug-statslog-subtabs {
+            .ug-statslog-subtabs_REMOVED {
                 display: flex;
                 align-items: center;
                 gap: 4px;
                 margin-bottom: 10px;
             }
-            .ug-subtab-btn {
-                flex: 1;
-                padding: 4px 8px !important;
-                font-size: 11px !important;
-                margin: 0 !important;
-                border: 1px solid #555 !important;
-                border-radius: 5px !important;
-                background: #222 !important;
-                color: #aaa !important;
-                cursor: pointer;
-            }
-            .ug-subtab-btn.ug-subtab-active {
-                background: #444 !important;
-                color: #fff !important;
-                border-color: #888 !important;
-            }
-            .ug-reset-stats-btn {
-                margin-left: auto !important;
-                padding: 4px 8px !important;
-                font-size: 11px !important;
-                margin-bottom: 0 !important;
-                margin-right: 0 !important;
-                border: 1px solid #555 !important;
-                border-radius: 5px !important;
-                background: #222 !important;
-                color: #aaa !important;
-                cursor: pointer;
-                flex-shrink: 0;
-            }
-            .ug-reset-stats-btn:hover {
-                background: #333 !important;
-                color: #fff !important;
-            }
-            .ug-subtab-pane { display: none; }
+
+
+
+
             .ug-drug-calc-info {
                 margin-top: 6px;
                 font-size: 11px;
@@ -7951,9 +10364,45 @@
         bustEnabledInput         = document.querySelector('#ug-bot-bust-enabled');
         bustFastModeInput        = document.querySelector('#ug-bot-bust-fast');
         bustNoReloadInput           = document.querySelector('#ug-bot-bust-noreload');
+        bustPollMinEl               = document.querySelector('#ug-bot-bust-poll-min');
+        bustPollMaxEl               = document.querySelector('#ug-bot-bust-poll-max');
+        bgCrimeEnabledInput         = document.querySelector('#ug-bot-bg-crime');
+        bulletFactoryEnabledInput   = document.querySelector('#ug-bot-bullet-factory');
         killProtectedRecheckInput   = document.querySelector('#ug-bot-kill-protected-recheck');
         killProtectedRecheckMinsEl  = document.querySelector('#ug-bot-kill-protected-recheck-mins');
+        qtBgEnabledInput         = document.querySelector('#ug-bot-qt-bg-enabled');
+        qtBgThresholdEl          = document.querySelector('#ug-bot-qt-bg-threshold');
+        qtBulletsEnabledInput    = document.querySelector('#ug-bot-qt-bullets-enabled');
+        qtBulletsThresholdEl     = document.querySelector('#ug-bot-qt-bullets-threshold');
+        qtBulletsMinEl           = document.querySelector('#ug-bot-qt-bullets-min');
+        qtPollMinEl              = document.querySelector('#ug-bot-qt-poll-min');
+        qtPollMaxEl              = document.querySelector('#ug-bot-qt-poll-max');
+        qtPointsEnabledInput     = document.querySelector('#ug-bot-qt-points-enabled');
+        qtCarsEnabledInput       = document.querySelector('#ug-bot-qt-cars-enabled');
+        qtCarsIntervalEl         = document.querySelector('#ug-bot-qt-cars-interval');
+        qtPerkExtendEnabledInput = document.querySelector('#ug-bot-qt-perk-extend-enabled');
+        qtPerkExtendMinsEl       = document.querySelector('#ug-bot-qt-perk-extend-mins');
 
+        // QT sub-tab switching
+        document.querySelectorAll('.ug-qt-sub-btn').forEach(btn => {
+            if (btn.dataset.qtTabListenerAttached) return;
+            btn.dataset.qtTabListenerAttached = '1';
+            btn.addEventListener('click', () => {
+                const target = btn.dataset.qtTab;
+                document.querySelectorAll('.ug-qt-sub-btn').forEach(b => {
+                    b.style.background = '#222';
+                    b.style.color = '#aaa';
+                    b.classList.remove('ug-qt-sub-active');
+                });
+                document.querySelectorAll('.ug-qt-sub-pane').forEach(p => p.style.display = 'none');
+                btn.style.background = '#333';
+                btn.style.color = '#fff';
+                btn.classList.add('ug-qt-sub-active');
+                const pane = document.querySelector(`.ug-qt-sub-pane[data-qt-pane="${target}"]`);
+                if (pane) pane.style.display = '';
+            });
+        });
+        qtPointsThresholdEl      = document.querySelector('#ug-bot-qt-points-threshold');
         killScanOnlineInput      = document.querySelector('#ug-bot-kill-scan-online');
         killScanIntervalEl       = document.querySelector('#ug-bot-kill-scan-interval');
         killSearchInput          = document.querySelector('#ug-bot-kill-search');
@@ -7980,7 +10429,6 @@
         killAnonymousInput       = document.querySelector('#ug-bot-kill-anonymous');
         killBgCheckIntervalEl    = document.querySelector('#ug-bot-kill-bgcheck-interval');
         killPenaltyThresholdEl   = document.querySelector('#ug-bot-kill-penalty-threshold');
-        statsEl                 = document.querySelector('#ug-bot-stats');
         logEl                   = document.querySelector('#ug-bot-log');
         compactBtn              = document.querySelector('#ug-bot-compact-btn');
         hideBtn                 = document.querySelector('#ug-bot-hide-btn');
@@ -8014,11 +10462,44 @@
         if (bustNoReloadInput) {
             bustNoReloadInput.checked = state.bustNoReload;
         }
+        if (bustPollMinEl) bustPollMinEl.value = state.bustPollMin;
+        if (bustPollMaxEl) bustPollMaxEl.value = state.bustPollMax;
+        if (bgCrimeEnabledInput)      bgCrimeEnabledInput.checked      = state.bgCrimeEnabled;
+        if (bulletFactoryEnabledInput) bulletFactoryEnabledInput.checked = state.bulletFactoryEnabled;
         if (killProtectedRecheckInput)  killProtectedRecheckInput.checked = state.killProtectedRecheckEnabled;
         if (killProtectedRecheckMinsEl) {
             killProtectedRecheckMinsEl.value = String(state.killProtectedRecheckMins);
         }
-
+        if (qtBgEnabledInput)      qtBgEnabledInput.checked      = state.qtBgEnabled;
+        if (qtBgThresholdEl)       qtBgThresholdEl.value         = String(state.qtBgThreshold);
+        if (qtBulletsEnabledInput) qtBulletsEnabledInput.checked = state.qtBulletsEnabled;
+        if (qtBulletsThresholdEl)  qtBulletsThresholdEl.value    = String(state.qtBulletsThreshold);
+        if (qtBulletsMinEl)        qtBulletsMinEl.value           = String(state.qtBulletsMin);
+        if (qtPollMinEl)           qtPollMinEl.value              = String(state.qtPollMin);
+        if (qtPollMaxEl)           qtPollMaxEl.value              = String(state.qtPollMax);
+        if (qtPointsEnabledInput)  qtPointsEnabledInput.checked   = state.qtPointsEnabled;
+        if (qtPointsThresholdEl)   qtPointsThresholdEl.value      = String(state.qtPointsThreshold);
+        if (qtCarsEnabledInput)    qtCarsEnabledInput.checked     = state.qtCarsEnabled;
+        if (qtCarsIntervalEl)      qtCarsIntervalEl.value         = String(state.qtCarsScanInterval);
+        if (qtPerkExtendEnabledInput) qtPerkExtendEnabledInput.checked = state.qtPerkExtendEnabled;
+        if (qtPerkExtendMinsEl)    qtPerkExtendMinsEl.value       = String(state.qtPerkExtendMins);
+        // Render per-car-type rows
+        const qtCarsList = document.querySelector('#ug-bot-qt-cars-list');
+        if (qtCarsList) {
+            const carTypes = state.qtCarsTypes || DEFAULTS.qtCarsTypes;
+            qtCarsList.innerHTML = carTypes.map(t => `
+                <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;">
+                    <input id="ug-bot-qt-car-enabled-${t.b}" type="checkbox" ${t.enabled ? 'checked' : ''} style="flex-shrink:0;" />
+                    <label for="ug-bot-qt-car-enabled-${t.b}" style="font-size:11px;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${t.name}</label>
+                    <input id="ug-bot-qt-car-price-${t.b}" type="number" value="${t.maxPrice}" min="1" step="1000000"
+                        style="width:110px;flex-shrink:0;padding:4px 6px;border:1px solid #555;border-radius:5px;background:#111;color:#fff;font-size:11px;" />
+                </div>
+            `).join('');
+            // Auto-save on any change
+            qtCarsList.querySelectorAll('input').forEach(el => {
+                el.addEventListener('change', () => saveSettings());
+            });
+        }
 
         // Grey out scan/search when BG loop is on.
         // Must sync the checkbox first so its .checked reflects persisted state,
@@ -8057,14 +10538,11 @@
             btn.addEventListener('click', () => switchTab(btn.dataset.tab));
         });
 
-        document.querySelectorAll('.ug-subtab-btn').forEach(btn => {
-            btn.addEventListener('click', () => switchStatsLogTab(btn.dataset.subtab));
-        });
+
 
         switchTab(activeTab);
         // Initialise sub-tab state if statslog is the active tab
         if (activeTab === 'statslog') {
-            switchStatsLogTab(activeStatsLogTab);
         }
 
         // Auto-save on checkbox/number changes
@@ -8104,10 +10582,7 @@
             }
         });
 
-        document.querySelector('#ug-bot-reset').addEventListener('click', () => {
-            resetSessionStats();
-            updatePanel();
-        });
+
 
         function handleToggleClick() {
             if (state.enabled) {
@@ -8153,7 +10628,6 @@
             injectSidebarButton();
         });
 
-        renderStats();
         renderLiveLog();
         renderKillList();
         updatePanel();
@@ -8162,6 +10636,7 @@
         attachKillListListener();
 
         const copyLogBtn = document.querySelector('#ug-bot-copy-log');
+
         if (copyLogBtn && !copyLogBtn.dataset.listenerAttached) {
             copyLogBtn.dataset.listenerAttached = '1';
             copyLogBtn.addEventListener('click', () => {
@@ -8187,8 +10662,91 @@
         if (clearLogBtn && !clearLogBtn.dataset.listenerAttached) {
             clearLogBtn.dataset.listenerAttached = '1';
             clearLogBtn.addEventListener('click', () => {
-                state.liveLog = [];
-                renderLiveLog();
+                if (!confirm('Clear log and reset all session state? This resets loop flags, runtime, and pending actions.')) return;
+                resetSessionStats();
+            });
+        }
+
+        // ── Acc tab ───────────────────────────────────────────────────────────
+        const accEnabledCb = document.querySelector('#ug-bot-acc-enabled');
+        if (accEnabledCb && !accEnabledCb.dataset.listenerAttached) {
+            accEnabledCb.dataset.listenerAttached = '1';
+            accEnabledCb.checked = state.accEnabled;
+            accEnabledCb.addEventListener('change', () => {
+                state.accEnabled = accEnabledCb.checked;
+                // Reset name index when toggled on so it starts from the top
+                if (accEnabledCb.checked) state.accNameIndex = 0;
+            });
+        }
+
+        const accRetrieveCb = document.querySelector('#ug-bot-acc-retrieve');
+        if (accRetrieveCb && !accRetrieveCb.dataset.listenerAttached) {
+            accRetrieveCb.dataset.listenerAttached = '1';
+            accRetrieveCb.checked = state.accRetrieve;
+            accRetrieveCb.addEventListener('change', () => {
+                state.accRetrieve = accRetrieveCb.checked;
+            });
+        }
+
+        const accRetrieveNowBtn = document.querySelector('#ug-bot-acc-retrieve-now');
+        if (accRetrieveNowBtn && !accRetrieveNowBtn.dataset.listenerAttached) {
+            accRetrieveNowBtn.dataset.listenerAttached = '1';
+            accRetrieveNowBtn.addEventListener('click', () => {
+                GM_setValue('accPendingRetrieve', true);
+                gotoPage('my-stats', { s: 'email' });
+            });
+        }
+
+        const accNamesEl = document.querySelector('#ug-bot-acc-names');
+        if (accNamesEl && !accNamesEl.dataset.listenerAttached) {
+            accNamesEl.dataset.listenerAttached = '1';
+            // Populate from storage
+            accNamesEl.value = state.accUsernames.join('\n');
+            accNamesEl.addEventListener('input', () => {
+                const lines = accNamesEl.value.split('\n')
+                    .map(l => sanitiseUsername(l))
+                    .filter(l => l.length >= 1);
+                state.accUsernames = lines;
+                const statusEl = document.querySelector('#ug-bot-acc-status');
+                if (statusEl) statusEl.textContent = lines.length + ' name(s) saved';
+            });
+        }
+
+        const personalityResetBtn = document.querySelector('#ug-bot-personality-reset');
+        if (personalityResetBtn && !personalityResetBtn.dataset.listenerAttached) {
+            personalityResetBtn.dataset.listenerAttached = '1';
+            personalityResetBtn.addEventListener('click', () => {
+                if (!confirm('Reset personality? New values will be generated and applied on next page load.')) return;
+                GM_setValue('ugbot_personality', null);
+                addLiveLog('Personality reset — reload the page to generate a new one');
+                personalityResetBtn.textContent = 'Reset — reload page!';
+                personalityResetBtn.style.color = '#f8c84a';
+            });
+        }
+
+        const accGenerateBtn = document.querySelector('#ug-bot-acc-generate');
+        if (accGenerateBtn && !accGenerateBtn.dataset.listenerAttached) {
+            accGenerateBtn.dataset.listenerAttached = '1';
+            accGenerateBtn.addEventListener('click', () => {
+                const names = generateRandomUsernames(100);
+                if (accNamesEl) accNamesEl.value = names.join('\n');
+                state.accUsernames = names;
+                state.accNameIndex = 0;
+                const statusEl = document.querySelector('#ug-bot-acc-status');
+                if (statusEl) statusEl.textContent = names.length + ' names generated';
+            });
+        }
+
+        const accClearNamesBtn = document.querySelector('#ug-bot-acc-clear-names');
+        if (accClearNamesBtn && !accClearNamesBtn.dataset.listenerAttached) {
+            accClearNamesBtn.dataset.listenerAttached = '1';
+            accClearNamesBtn.addEventListener('click', () => {
+                if (!confirm('Clear all usernames from the list?')) return;
+                if (accNamesEl) accNamesEl.value = '';
+                state.accUsernames = [];
+                state.accNameIndex = 0;
+                const statusEl = document.querySelector('#ug-bot-acc-status');
+                if (statusEl) statusEl.textContent = 'List cleared';
             });
         }
 
@@ -8225,13 +10783,13 @@
                 );
                 if (!players.length) {
                     killCopyBtn.textContent = 'Nothing to copy';
-                    setTimeout(() => { killCopyBtn.textContent = 'Copy names'; }, 2000);
+                    setTimeout(() => { killCopyBtn.textContent = 'Copy'; }, 2000);
                     return;
                 }
                 const names = players.map(p => p.name).join(String.fromCharCode(10));
                 navigator.clipboard.writeText(names).then(() => {
                     killCopyBtn.textContent = `Copied ${players.length}!`;
-                    setTimeout(() => { killCopyBtn.textContent = 'Copy names'; }, 2000);
+                    setTimeout(() => { killCopyBtn.textContent = 'Copy'; }, 2000);
                 }).catch(() => {
                     // Fallback for browsers that block clipboard API
                     const ta = document.createElement('textarea');
@@ -8243,7 +10801,82 @@
                     document.execCommand('copy');
                     document.body.removeChild(ta);
                     killCopyBtn.textContent = `Copied ${players.length}!`;
-                    setTimeout(() => { killCopyBtn.textContent = 'Copy names'; }, 2000);
+                    setTimeout(() => { killCopyBtn.textContent = 'Copy'; }, 2000);
+                });
+            });
+        }
+
+        // Kill scanner — import names button
+        const killImportBtn = document.querySelector('#ug-bot-kill-import');
+        if (killImportBtn) {
+            killImportBtn.addEventListener('click', () => {
+                const overlay = document.createElement('div');
+                overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:99999;display:flex;align-items:center;justify-content:center;';
+
+                const modal = document.createElement('div');
+                modal.style.cssText = 'background:#1a1a1a;border:1px solid #444;border-radius:8px;padding:16px;width:320px;max-width:90vw;';
+                modal.innerHTML = `
+                    <div style="font-weight:bold;font-size:13px;margin-bottom:8px;color:#fff;">Import player names</div>
+                    <div style="font-size:11px;color:#aaa;margin-bottom:8px;">Paste one name per line. Players will be added as Unknown and searched automatically. Players already in the list will be skipped.</div>
+                    <textarea id="ug-bot-kill-import-ta" style="width:100%;box-sizing:border-box;height:200px;background:#111;color:#fff;border:1px solid #555;border-radius:6px;padding:8px;font-size:12px;resize:vertical;" placeholder="PlayerName1&#10;PlayerName2&#10;PlayerName3"></textarea>
+                    <div style="display:flex;gap:8px;margin-top:10px;justify-content:flex-end;">
+                        <button id="ug-bot-kill-import-cancel" type="button" style="font-size:12px;padding:5px 12px;">Cancel</button>
+                        <button id="ug-bot-kill-import-confirm" type="button" style="font-size:12px;padding:5px 12px;background:#2a6;color:#fff;border:none;border-radius:4px;">Import</button>
+                    </div>
+                    <div id="ug-bot-kill-import-result" style="font-size:11px;color:#aaa;margin-top:8px;"></div>
+                `;
+                overlay.appendChild(modal);
+                document.body.appendChild(overlay);
+
+                document.querySelector('#ug-bot-kill-import-cancel').addEventListener('click', () => {
+                    document.body.removeChild(overlay);
+                });
+
+                overlay.addEventListener('click', (e) => {
+                    if (e.target === overlay) document.body.removeChild(overlay);
+                });
+
+                document.querySelector('#ug-bot-kill-import-confirm').addEventListener('click', () => {
+                    const ta = document.querySelector('#ug-bot-kill-import-ta');
+                    const lines = ta.value.split('\n').map(l => l.trim()).filter(Boolean);
+                    if (!lines.length) return;
+
+                    const players = getKillPlayers();
+                    const existingNames = new Set(players.map(p => p.name.toLowerCase()));
+                    let added = 0;
+                    let skipped = 0;
+
+                    for (const name of lines) {
+                        if (existingNames.has(name.toLowerCase())) {
+                            skipped++;
+                            continue;
+                        }
+                        players.push({
+                            name,
+                            status: KILL_STATUS.UNKNOWN,
+                            lastChecked: 0,
+                            addedAt: now(),
+                        });
+                        existingNames.add(name.toLowerCase());
+                        added++;
+                    }
+
+                    if (added > 0) {
+                        saveKillPlayers(players);
+                        renderKillList();
+                        // Activate search loop to pick up the new unknowns
+                        if (state.killSearchEnabled) state.killSearchLoopActive = true;
+                        addLiveLog(`Kill scanner: imported ${added} player(s) — ${skipped} already in list`);
+                    }
+
+                    const result = document.querySelector('#ug-bot-kill-import-result');
+                    if (result) result.textContent = `Added ${added} player${added !== 1 ? 's' : ''}${skipped ? `, skipped ${skipped} duplicate${skipped !== 1 ? 's' : ''}` : ''}.`;
+
+                    if (added > 0) {
+                        setTimeout(() => {
+                            if (document.body.contains(overlay)) document.body.removeChild(overlay);
+                        }, 1500);
+                    }
                 });
             });
         }
@@ -8285,6 +10918,44 @@
         const rankText    = getPlayerRank() || 'unknown';
         const cashText    = `$${getPlayerMoney().toLocaleString()}`;
         const pointsText  = getPlayerPoints().toLocaleString();
+
+        // Re-enable auto-disabled settings when player reaches Don (protection ends at Don)
+        const _autoDisabled = JSON.parse(GM_getValue('accAutoDisabled', '[]'));
+        if (_autoDisabled.length > 0) {
+            const _donIdx = RANKS.indexOf('Don');
+            const _curRankIdx = getPlayerRankIndex();
+
+            if (_donIdx >= 0 && _curRankIdx >= 0 && _curRankIdx >= _donIdx) {
+                const _labels = {
+                    autoDrugs: 'Drug run', killSearch: 'Search players',
+                    killProtectedRecheck: 'Protected re-search', killBgCheck: 'BG check loop'
+                };
+                const _reenabled = [];
+                for (const key of _autoDisabled) {
+                    if (key === 'autoDrugs' && !state.autoDrugsEnabled) {
+                        state.autoDrugsEnabled = true;
+                        if (autoDrugsInput) autoDrugsInput.checked = true;
+                        _reenabled.push(_labels[key]);
+                    } else if (key === 'killSearch' && !state.killSearchEnabled) {
+                        state.killSearchEnabled = true;
+                        if (killSearchInput) killSearchInput.checked = true;
+                        _reenabled.push(_labels[key]);
+                    } else if (key === 'killProtectedRecheck' && !state.killProtectedRecheckEnabled) {
+                        state.killProtectedRecheckEnabled = true;
+                        if (killProtectedRecheckInput) killProtectedRecheckInput.checked = true;
+                        _reenabled.push(_labels[key]);
+                    } else if (key === 'killBgCheck' && !state.killBgCheckEnabled) {
+                        state.killBgCheckEnabled = true;
+                        if (killBgCheckInput) killBgCheckInput.checked = true;
+                        _reenabled.push(_labels[key]);
+                    }
+                }
+                if (_reenabled.length > 0) {
+                    addLiveLog('Reached Don — re-enabled: ' + _reenabled.join(', '));
+                }
+                GM_setValue('accAutoDisabled', '[]');
+            }
+        }
 
         let statusMain = state.enabled ? 'Running' : 'Stopped';
         if (!state.enabled && state.pausedReason) statusMain += ` (${state.pausedReason})`;
@@ -8391,7 +11062,6 @@
         }
 
         refreshActionLockStates();
-        renderStats();
         renderLiveLog();
         renderDrugDepositCalc();
         renderKillList();
@@ -8476,6 +11146,7 @@
         // Only run in windows explicitly designated as the bot window via the
         // activate button. window.name persists across page navigations within
         // the same window but starts empty in any new window.
+        // If auto account creation is enabled, read the setting directly via
         if (window.name !== 'ug-bot') {
             // Not designated — show a minimal activate button, stay dormant
             const existing = document.querySelector('#ug-bot-activate');
@@ -8499,6 +11170,7 @@
             state.sessionStartedAt = now();
         }
 
+
         // Sync loop flags from persisted toggle values on every page load.
         // This ensures dedicated loops remain active across page reloads even
         // if saveSettings() hasn't been called in this session (e.g. after a
@@ -8514,21 +11186,29 @@
         } else {
             stopNoReloadBust();
         }
-        // Kill search loop activation logic:
-        // - If the toggle is off, always deactivate
-        // - If the loop was already active (persisted), keep it active — never
-        //   deactivate mid-run. handleKillPage() is the only place that sets
-        //   killSearchLoopActive to false when there are genuinely no targets.
-        // - If the loop was inactive, check if there are targets to start it:
-        //   unknowns, expiring alives (3hr window), or protected players past
-        //   their 1hr recheck window.
+        // Start QT sniper on every page load if any QT option is enabled
+        if (state.qtBgEnabled || state.qtBulletsEnabled || state.qtPointsEnabled) {
+            startQTSniper();
+        }
+        // Start perk extender on every page load if enabled
+        if (state.qtPerkExtendEnabled) {
+            startQTPerkExtender();
+        }
+        // Start QT car scanner on every page load if enabled
+        if (state.qtCarsEnabled) {
+            startQTCarScanner();
+        }
+        // Start background crime loop on every page load if enabled
+        if (state.bgCrimeEnabled) {
+            startBgCrime();
+        }
+        // Kill search loop — activate on startup if toggle is on and there are due targets.
+        // Uses the same logic as getNextKillTarget to avoid unnecessary kill page visits.
         if (!state.killSearchEnabled) {
             state.killSearchLoopActive = false;
         } else if (state.killSearchLoopActive) {
-            // Loop was already running — keep it active, don't second-guess it
-            state.killSearchLoopActive = true;
+            // Was already running — keep it active
         } else {
-            // Loop was inactive — check if there are targets to start it
             const nowMs = now();
             const players = getKillPlayers();
             const hasUnknowns = players.some(p => p.status === KILL_STATUS.UNKNOWN);
@@ -8538,9 +11218,10 @@
                 if (p.searchExpiresAt) return (p.searchExpiresAt - nowMs) < RESCAN_BUFFER_MS;
                 return (nowMs - p.lastChecked) >= KILL_SCANNER_RESCAN_MS;
             });
+            const protectedIntervalMs = state.killProtectedRecheckMs || KILL_SCANNER_PROTECTED_RESCAN_MS;
             const hasProtectedDue = players.some(p =>
                 p.status === KILL_STATUS.PROTECTED &&
-                (nowMs - p.lastChecked) >= KILL_SCANNER_PROTECTED_RESCAN_MS
+                (nowMs - p.lastChecked) >= protectedIntervalMs
             );
             state.killSearchLoopActive = hasUnknowns || hasExpiringAlives || hasProtectedDue;
         }
@@ -8578,6 +11259,8 @@
                 if (p.lastKillAttempt && (now() - p.lastKillAttempt) < 30000) return false;
                 if (p.requiredBullets && getPlayerBullets() < p.requiredBullets) return false;
                 if (isPlayerBgCheckEnabled(p.name) && getBgCheckDueMs(p) <= 0) return false;
+                // Skip if player has a pending bodyguard being searched
+                if (p.bodyguard) return false;
                 // If on kill page, only activate if player is actually in Players Found
                 if (canCheckFound) return foundNames && foundNames.has(p.name.toLowerCase());
                 // If not on kill page, only activate if expectedFoundAt has elapsed
@@ -8585,12 +11268,17 @@
                 if (!p.expectedFoundAt) return false;
                 return now() >= p.expectedFoundAt;
             });
+            const hasPendingBg = alivePlayers.some(p => {
+                if (!isPlayerShootEnabled(p.name)) return false;
+                if (!p.bodyguard) return false;
+                // BG is set — check if BG player is in the kill list as alive or unknown
+                const bgPlayer = getKillPlayers().find(b => b.name && b.name.toLowerCase() === p.bodyguard.toLowerCase());
+                return bgPlayer && (bgPlayer.status === KILL_STATUS.ALIVE || bgPlayer.status === KILL_STATUS.UNKNOWN);
+            });
             // Allow kill loop for BG checks even when penalty too high
             // Kill-only players are blocked by doKillShootFlow when penalty exceeded
-            state.killLoopActive = hasDueBgCheck || (!isKillPenaltyTooHigh() && hasKillOnly);
+            state.killLoopActive = hasDueBgCheck || hasPendingBg || (!isKillPenaltyTooHigh() && hasKillOnly);
         }
-
-        updateStats(s => { s.pageLoads += 1; });
 
         // Penalty page navigation is handled within handleKillPage / handleKillLoopPage
         // to avoid race conditions with the search loop tick
@@ -8602,17 +11290,87 @@
         }
 
         createPanel();
-        syncGTAReadyFromQuickLink();
-        syncMeltReadyFromQuickLink();
-        syncDriveReadyFromQuickLink();
-        protectMeltRows();
+        // Re-query element refs — createPanel() may have returned early if panel already existed
+        toggleBtn               = document.querySelector('#ug-bot-toggle');
+        compactBtn              = document.querySelector('#ug-bot-compact-btn');
+        hideBtn                 = document.querySelector('#ug-bot-hide-btn');
+        closeBtn                = document.querySelector('#ug-bot-close-btn');
+        autoDepositInput        = document.querySelector('#ug-bot-autodeposit');
+        depositThresholdEl      = document.querySelector('#ug-bot-deposit-threshold');
+        autoRepairInput         = document.querySelector('#ug-bot-autorepair');
+        repairEveryEl           = document.querySelector('#ug-bot-repair-every');
+        autoMissionsInput       = document.querySelector('#ug-bot-automissions');
+        autoGiveCarsInput       = document.querySelector('#ug-bot-autogivecars');
+        autoDrugsInput          = document.querySelector('#ug-bot-autodrugs');
+        drugDepositMultiplierEl = document.querySelector('#ug-bot-drug-deposit-multiplier');
+        leaveJailInput          = document.querySelector('#ug-bot-leavejail');
+        leaveJailMinPointsEl    = document.querySelector('#ug-bot-leavejail-minpoints');
+        resetCrimesInput        = document.querySelector('#ug-bot-reset-crimes');
+        resetCrimesFastModeInput= document.querySelector('#ug-bot-reset-crimes-fast');
+        resetGTAInput           = document.querySelector('#ug-bot-reset-gta');
+        resetMeltInput          = document.querySelector('#ug-bot-reset-melt');
+        resetTimerMinPointsEl   = document.querySelector('#ug-bot-reset-minpoints');
+        bustEnabledInput        = document.querySelector('#ug-bot-bust-enabled');
+        bustFastModeInput       = document.querySelector('#ug-bot-bust-fast');
+        bustNoReloadInput       = document.querySelector('#ug-bot-bust-noreload');
+        bgCrimeEnabledInput     = document.querySelector('#ug-bot-bg-crime');
+        bulletFactoryEnabledInput= document.querySelector('#ug-bot-bullet-factory');
+        killScanOnlineInput     = document.querySelector('#ug-bot-kill-scan-online');
+        killScanIntervalEl      = document.querySelector('#ug-bot-kill-scan-interval');
+        killSearchInput         = document.querySelector('#ug-bot-kill-search');
+        killBgCheckInput        = document.querySelector('#ug-bot-kill-bgcheck');
+        killShootInput          = document.querySelector('#ug-bot-kill-shoot');
+        killAnonymousInput      = document.querySelector('#ug-bot-kill-anonymous');
+        killBgCheckIntervalEl   = document.querySelector('#ug-bot-kill-bgcheck-interval');
+        killPenaltyThresholdEl  = document.querySelector('#ug-bot-kill-penalty-threshold');
+        killProtectedRecheckInput  = document.querySelector('#ug-bot-kill-protected-recheck');
+        killProtectedRecheckMinsEl = document.querySelector('#ug-bot-kill-protected-recheck-mins');
+        qtBgEnabledInput        = document.querySelector('#ug-bot-qt-bg-enabled');
+        qtBgThresholdEl         = document.querySelector('#ug-bot-qt-bg-threshold');
+        qtBulletsEnabledInput   = document.querySelector('#ug-bot-qt-bullets-enabled');
+        qtBulletsThresholdEl    = document.querySelector('#ug-bot-qt-bullets-threshold');
+        qtBulletsMinEl          = document.querySelector('#ug-bot-qt-bullets-min');
+        qtPollMinEl             = document.querySelector('#ug-bot-qt-poll-min');
+        qtPollMaxEl             = document.querySelector('#ug-bot-qt-poll-max');
+        qtPointsEnabledInput    = document.querySelector('#ug-bot-qt-points-enabled');
+        qtPointsThresholdEl     = document.querySelector('#ug-bot-qt-points-threshold');
+        qtCarsEnabledInput      = document.querySelector('#ug-bot-qt-cars-enabled');
+        qtCarsIntervalEl        = document.querySelector('#ug-bot-qt-cars-interval');
+        qtPerkExtendEnabledInput = document.querySelector('#ug-bot-qt-perk-extend-enabled');
+        qtPerkExtendMinsEl      = document.querySelector('#ug-bot-qt-perk-extend-mins');
+        logEl                   = document.querySelector('#ug-bot-log');
+        try { syncGTAReadyFromQuickLink(); } catch(e) {}
+        try { syncMeltReadyFromQuickLink(); } catch(e) {}
+        // Sync drive timer from quick link — but don't let an "available" reading on a page
+        // without a drive quick link reset a cooldown we just set after a drive submission
+        const prevDriveReadyAt = state.nextDriveReadyAt;
+        let driveWasSynced = false;
+        try { driveWasSynced = syncDriveReadyFromQuickLink(); } catch(e) {}
+        // Only preserve if quick link showed drive as available (which would set nextDriveReadyAt = now())
+        // but we have a future cooldown — indicates quick link isn't present/reliable on this page
+        if (driveWasSynced === false && state.nextDriveReadyAt < prevDriveReadyAt) {
+            state.nextDriveReadyAt = prevDriveReadyAt;
+        }
+        try { protectMeltRows(); } catch(e) {}
 
-        if (state.panelHidden) {
-            const panel = document.querySelector('#ug-bot-panel');
-            if (panel) panel.style.display = 'none';
-            injectSidebarButton();
+        // On non-game pages (login, username, rules) always show the panel regardless of
+        // panelHidden state — the user needs to be able to interact with it.
+        const _isGamePage = !!currentPage(); // game pages have a ?p= param
+        const _panel = document.querySelector('#ug-bot-panel');
+
+        if (!_isGamePage) {
+            // Non-game page — force panel visible and expanded, ignore panelHidden
+            if (_panel) {
+                _panel.style.display = '';
+                _panel.classList.remove('ug-collapsed');
+            }
+            try { updatePanel(); } catch(e) {}
+        } else if (state.panelHidden) {
+            if (_panel) _panel.style.display = 'none';
+            try { injectSidebarButton(); } catch(e) {}
         } else {
-            updatePanel();
+            if (_panel) _panel.style.display = '';
+            try { updatePanel(); } catch(e) {}
         }
 
         // 1000ms display timer — smoothly updates runtime and countdown timers
@@ -8669,9 +11427,17 @@
 
         CTC.attachObserver(handleCTCMessage);
 
+        // Expose a console-accessible reset function
+        window.ugbotResetPersonality = function() {
+            GM_setValue('ugbot_personality', null);
+            console.log('[UG Bot] Personality reset — reload the page to generate a new one.');
+        };
+
+        applyPersonalityDefaults();
         if (state.enabled) startHeartbeat();
 
         addLiveLog('Script loaded');
+        if (personalityJustGenerated) addLiveLog(`[Personality] Deposit: $${PERSONALITY.depositThreshold.toLocaleString()} | Drug mult: ${PERSONALITY.drugDepositMult}x | Scan: ${PERSONALITY.scanIntervalMins}min | Visit: ${PERSONALITY.idleVisitChancePct}%`);
     }
 
     init();
