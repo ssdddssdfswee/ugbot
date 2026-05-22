@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Full UG Bot
 // @namespace    ug-bot
-// @version      2.1.1
+// @version      2.2.1
 // @description  Auto-runs crimes, GTA, melting, repair, missions, drug running with Swiss Bank management, live log, session stats, action checkboxes, jail handling, runtime tracking, melt pagination, repair cycles, automatic CTC solving, and point-spending features.
 // @match        *://www.underworldgangsters.com/*
 // @match        *://underworldgangsters.com/*
@@ -542,7 +542,7 @@
     // BOT CONFIG
     // =========================================================================
 
-    const SCRIPT_VERSION = '2.1.1';
+    const SCRIPT_VERSION = '2.2.1';
 
     const CRIME_DEFS = [
         { id: 'gang', name: 'Gang Activities' },
@@ -621,10 +621,10 @@
         burstDelayMax: 420,
         maxBurstActions: 4,
 
-        navDelayMin: 700,
-        navDelayMax: 1500,
+        navDelayMin: 500,
+        navDelayMax: 1000,
 
-        heartbeatMs: 1200,
+        heartbeatMs: 600,
 
         logToConsole: true,
 
@@ -784,6 +784,7 @@
     // Call this at natural pause points — occasionally navigates to a human page
     async function maybeVisitHumanPage() {
         if (!state.enabled) return false;
+        if (state.bgCrimeEnabled) return false; // bg crimes already randomises behaviour
         const minGapMs = 3 * 60 * 1000; // at least 3 mins between human visits
         if (Date.now() - lastHumanVisitAt < minGapMs) return false;
         if (Math.random() * 100 >= PERSONALITY.idleVisitChancePct) return false;
@@ -844,6 +845,8 @@
 
         get autoDrugsEnabled()     { return !!getSetting('autoDrugsEnabled', DEFAULTS.autoDrugsEnabled); },
         set autoDrugsEnabled(v)    { setSetting('autoDrugsEnabled', !!v); },
+        get drugCompEnabled()      { return !!getSetting('drugCompEnabled', false); },
+        set drugCompEnabled(v)     { setSetting('drugCompEnabled', !!v); },
 
         get drugDepositMultiplier() { return Math.max(1, Number(getSetting('drugDepositMultiplier', DEFAULTS.drugDepositMultiplier)) || DEFAULTS.drugDepositMultiplier); },
         set drugDepositMultiplier(v){ setSetting('drugDepositMultiplier', Math.max(1, Number(v) || DEFAULTS.drugDepositMultiplier)); },
@@ -916,6 +919,10 @@
         // ── Auto Account Creation ─────────────────────────────────────────
         get accEnabled()   { return getSetting('accEnabled', false); },
         set accEnabled(v)  { setSetting('accEnabled', v); },
+        get accEmail()     { return getSetting('accEmail', ''); },
+        set accEmail(v)    { setSetting('accEmail', String(v || '')); },
+        get accPassword()  { return getSetting('accPassword', ''); },
+        set accPassword(v) { setSetting('accPassword', String(v || '')); },
         get accRetrieve()  { return getSetting('accRetrieve', true); },
         set accRetrieve(v) { setSetting('accRetrieve', v); },
         get accUsernames() { return getSetting('accUsernames', []); },
@@ -2401,6 +2408,44 @@
         if (hasCTCChallenge()) {
             await maybeSolveCTC();
             return;
+        }
+
+        // ── Drug comp mode — buy 1 unit at a time up to full capacity ─────────
+        // Each individual buy counts as a separate batch for competition scoring.
+        // Once fully loaded, hands off to the normal drive/sell flow.
+        if (state.drugCompEnabled && isDrugsEnabled()) {
+            const capacity = getDrugCapacity();
+            const carried  = getDrugCarriedUnits();
+            const space    = Math.max(0, capacity - carried);
+
+            if (capacity > 0) state.drugCapacityCache = capacity;
+
+            if (space > 0) {
+                const country   = getPlayerLocation();
+                const drugToBuy = getDrugForCurrentCountry(country) || DRUG_RUN_ROUTE.drugInA;
+
+                addLiveLog(`Drug comp: buying 1 unit of ${drugToBuy.name} (${carried}/${capacity} carried)`);
+
+                const fd = new FormData();
+                fd.append('drug', drugToBuy.value);
+                fd.append('amount', '1');
+                const resp = await fetch(window.location.href, { method: 'POST', body: fd, credentials: 'include' });
+                const text = await resp.text();
+
+                if (/match the letters|captcha/i.test(text)) {
+                    addLiveLog('Drug comp: CTC in response — reloading page to solve');
+                    await wait(rand(500, 900));
+                    location.reload();
+                    return;
+                }
+
+                await wait(rand(150, 300));
+                location.reload();
+                return;
+            }
+
+            // Fully loaded — fall through to normal drive/sell flow
+            addLiveLog(`Drug comp: fully loaded (${carried}/${capacity}) — driving to sell`);
         }
 
         // Check if a favourited car is present on the drugs page.
@@ -4237,7 +4282,7 @@
     }
 
     async function doQTPerkExtend() {
-        if (!qtPerkExtendActive || !state.enabled || !state.qtPerkExtendEnabled || crimePaused || isCrimesPage() || hasCrimePageMarkers()) {
+        if (!qtPerkExtendActive || !state.enabled || !state.qtPerkExtendEnabled || crimePaused || (!state.bgCrimeEnabled && (isCrimesPage() || hasCrimePageMarkers()))) {
             scheduleQTPerkExtend();
             return;
         }
@@ -4326,7 +4371,7 @@
     }
 
     async function doQTSniperPoll() {
-        if (!qtSniperActive || !state.enabled || crimePaused || isCrimesPage() || hasCrimePageMarkers()) { scheduleQTSniperPoll(); return; }
+        if (!qtSniperActive || !state.enabled || crimePaused || (!state.bgCrimeEnabled && (isCrimesPage() || hasCrimePageMarkers()))) { scheduleQTSniperPoll(); return; }
         if (!state.qtBgEnabled && !state.qtBulletsEnabled && !state.qtPointsEnabled) { scheduleQTSniperPoll(); return; }
         if (hasCTCChallenge()) { scheduleQTSniperPoll(); return; }
         if (actionInFlight) { scheduleQTSniperPoll(); return; }
@@ -4598,7 +4643,7 @@
     }
 
     async function doQTCarScan() {
-        if (!qtCarScanActive || !state.enabled || !state.qtCarsEnabled || crimePaused || isCrimesPage() || hasCrimePageMarkers()) { scheduleQTCarScan(); return; }
+        if (!qtCarScanActive || !state.enabled || !state.qtCarsEnabled || crimePaused || (!state.bgCrimeEnabled && (isCrimesPage() || hasCrimePageMarkers()))) { scheduleQTCarScan(); return; }
         if (hasCTCChallenge()) { scheduleQTCarScan(); return; }
         if (actionInFlight) { scheduleQTCarScan(); return; }
 
@@ -4744,13 +4789,13 @@
         // bgCrimeCooldowns stores absolute timestamps (ms) when each crime is ready
         const nowMs = Date.now();
         const available = crimeIds.some(id => (bgCrimeCooldowns[id] ?? 0) <= nowMs);
-        let delay = 1000;
+        let delay = 100; // Short retry when crimes are available
         if (!available) {
             const soonestAt = crimeIds
                 .filter(id => bgCrimeCooldowns[id] !== undefined && bgCrimeCooldowns[id] > nowMs)
                 .map(id => bgCrimeCooldowns[id])
                 .sort((a, b) => a - b)[0];
-            delay = soonestAt ? Math.max(200, soonestAt - nowMs) : 5000;
+            delay = soonestAt ? Math.max(50, soonestAt - nowMs) : 5000;
         }
         bgCrimeTimer = setTimeout(doBgCrimePoll, delay);
     }
@@ -6342,24 +6387,77 @@
         return [...names];
     }
 
+    function applyDeathSettingsReset() {
+        if (GM_getValue('accDeathSettingsReset', false)) return;
+        GM_setValue('accDeathSettingsReset', true);
+        const disabled = [];
+        if (state.autoDrugsEnabled) {
+            state.autoDrugsEnabled = false;
+            if (autoDrugsInput) autoDrugsInput.checked = false;
+            disabled.push('autoDrugs');
+        }
+        if (state.killSearchEnabled) {
+            state.killSearchEnabled = false;
+            if (killSearchInput) killSearchInput.checked = false;
+            disabled.push('killSearch');
+        }
+        if (state.killProtectedRecheckEnabled) {
+            state.killProtectedRecheckEnabled = false;
+            if (killProtectedRecheckInput) killProtectedRecheckInput.checked = false;
+            disabled.push('killProtectedRecheck');
+        }
+        if (state.killBgCheckEnabled) {
+            state.killBgCheckEnabled = false;
+            if (killBgCheckInput) killBgCheckInput.checked = false;
+            disabled.push('killBgCheck');
+        }
+        if (disabled.length > 0) {
+            GM_setValue('accAutoDisabled', JSON.stringify(disabled));
+            const labels = {
+                autoDrugs: 'Drug run', killSearch: 'Search players',
+                killProtectedRecheck: 'Protected re-search', killBgCheck: 'BG check loop'
+            };
+            addLiveLog('Auto login: disabled on new account — ' + disabled.map(k => labels[k]).join(', '));
+        }
+    }
+
     async function handleLoginPage() {
         if (!state.accEnabled) return;
-        addLiveLog('Auto login: login page detected — waiting for autofill');
-        await wait(1500); // Allow browser autofill to populate fields
+
+        const lastAttempt = Number(GM_getValue('loginLastAttempt', 0));
+        const nowMs = Date.now();
+        if (nowMs - lastAttempt < 10000) return;
+        GM_setValue('loginLastAttempt', nowMs);
+
+        // Death detected — disable protection-breaking settings immediately
+        applyDeathSettingsReset();
+
         const emailInput = document.querySelector('#login-email');
-        const passwordInput = document.querySelector('#login-password');
-        const loginBtn = document.querySelector('#login-button');
-        if (!emailInput || !passwordInput || !loginBtn) {
-            addLiveLog('Auto login: form elements not found — aborting');
-            return;
+        const passInput  = document.querySelector('#login-password');
+        const loginBtn   = document.querySelector('#login-button');
+        const loginForm  = loginBtn ? loginBtn.closest('form') : null;
+        if (!emailInput || !passInput || !loginBtn || !loginForm) return;
+
+        const email    = state.accEmail;
+        const password = state.accPassword;
+
+        if (email && password) {
+            // Credentials stored — fill fields programmatically and submit
+            addLiveLog('Auto login: filling credentials and submitting');
+            await wait(rand(500, 800));
+            const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+            nativeInputValueSetter.call(emailInput, email);
+            emailInput.dispatchEvent(new Event('input', { bubbles: true }));
+            nativeInputValueSetter.call(passInput, password);
+            passInput.dispatchEvent(new Event('input', { bubbles: true }));
+            await wait(300);
+            loginBtn.click();
+        } else {
+            // No credentials — rely on browser autofill (works on Firefox)
+            addLiveLog('Auto login: clicking Enter (autofill mode)');
+            await wait(rand(500, 800));
+            loginBtn.click();
         }
-        if (!emailInput.value || !passwordInput.value) {
-            addLiveLog('Auto login: fields not autofilled — ensure one login is saved in browser');
-            return;
-        }
-        addLiveLog('Auto login: credentials found — clicking Enter');
-        await wait(rand(500, 1000));
-        humanClick(loginBtn);
     }
 
     function removeCurrentAccName() {
@@ -6387,41 +6485,8 @@
         if (!state.accEnabled) return;
 
         // First time we land on username page = confirmed death.
-        // Disable settings that would break new account protection,
-        // but only if they haven't already been disabled this death cycle.
-        if (!GM_getValue('accDeathSettingsReset', false)) {
-            GM_setValue('accDeathSettingsReset', true);
-            const disabled = [];
-            if (state.autoDrugsEnabled) {
-                state.autoDrugsEnabled = false;
-                if (autoDrugsInput) autoDrugsInput.checked = false;
-                disabled.push('autoDrugs');
-            }
-            if (state.killSearchEnabled) {
-                state.killSearchEnabled = false;
-                if (killSearchInput) killSearchInput.checked = false;
-                disabled.push('killSearch');
-            }
-            if (state.killProtectedRecheckEnabled) {
-                state.killProtectedRecheckEnabled = false;
-                if (killProtectedRecheckInput) killProtectedRecheckInput.checked = false;
-                disabled.push('killProtectedRecheck');
-            }
-            if (state.killBgCheckEnabled) {
-                state.killBgCheckEnabled = false;
-                if (killBgCheckInput) killBgCheckInput.checked = false;
-                disabled.push('killBgCheck');
-            }
-            if (disabled.length > 0) {
-                // Store which settings were auto-disabled so we can re-enable them at Don
-                GM_setValue('accAutoDisabled', JSON.stringify(disabled));
-                const labels = {
-                    autoDrugs: 'Drug run', killSearch: 'Search players',
-                    killProtectedRecheck: 'Protected re-search', killBgCheck: 'BG check loop'
-                };
-                addLiveLog('Auto login: disabled on new account — ' + disabled.map(k => labels[k]).join(', '));
-            }
-        }
+        // Disable settings that would break new account protection.
+        applyDeathSettingsReset();
 
         // Check for taken error from a previous submit attempt
         if (hasUsernameTakenError()) {
@@ -6479,6 +6544,10 @@
 
         addLiveLog(`Auto login: submitting username "${username}"`);
         await wait(rand(300, 600));
+        // Remove from list immediately on submit — if it fails as taken the page
+        // will reload and the next name will be tried. This prevents used names
+        // from staying in the list if the taken error isn't caught.
+        removeCurrentAccName();
         humanClick(confirmBtn);
     }
 
@@ -6505,8 +6574,6 @@
             await wait(rand(500, 900));
             humanClick(agreeBtn);
             addLiveLog('Auto login: rules accepted — retrieving assets from previous account');
-            // Remove used name from list so it won't be reused
-            removeCurrentAccName();
             // Clear the death-settings-reset flag so next death triggers a fresh reset
             GM_setValue('accDeathSettingsReset', false);
             // Auto-start the bot on the new account
@@ -6635,8 +6702,9 @@
         clearPendingMeltResult();
 
         // Abort any in-flight QT sniper fetch — server blocks crime commits
-        // when a QT fetch is in progress, even if it started on a previous page
-        if (qtSniperAbortController) {
+        // when a QT fetch is in progress, even if it started on a previous page.
+        // Skip when bg crimes is enabled — no session conflict in that mode.
+        if (!state.bgCrimeEnabled && qtSniperAbortController) {
             qtSniperAbortController.abort();
             qtSniperAbortController = null;
         }
@@ -6679,6 +6747,25 @@
             const meltUsable  = isMeltUsable();
             const drugsUsable = isDrugsEnabled();
 
+            if (shouldRunRepairCycle()) {
+                addLiveLog(`Repair threshold reached (${state.meltsSinceRepair}/${state.repairEveryMelts})`);
+                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                gotoPage('cars', { page: 1 });
+                return;
+            }
+
+            if (isDrugsEnabled() && shouldDoSwissDeposit()) {
+                const depositAmount = calcSwissDepositAmount();
+                if (depositAmount > 0) {
+                    const reserve = calcDrugReserve(state.drugCapacityCache);
+                    addLiveLog(`Swiss Bank deposit: depositing $${depositAmount.toLocaleString()} (keeping $${reserve.toLocaleString()} reserve)`);
+                    state.pendingBankAction = { type: 'deposit', amount: depositAmount };
+                    await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                    gotoPage('bank');
+                    return;
+                }
+            }
+
             if (drugsUsable && isInternalDriveReady() && !state.killLoopActive) {
                 await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
                 gotoPage('drugs');
@@ -6696,8 +6783,7 @@
                 gotoCleanMeltPage(1);
                 return;
             }
-            // Nothing ready — good opportunity for a human page visit
-            maybeVisitHumanPage(); // fire and forget — heartbeat will re-check shortly
+            // Nothing ready — wait for next heartbeat
             const nextGtaMs   = gtaUsable   ? getInternalGTARemainingMs()   : null;
             const nextMeltMs  = meltUsable  ? getInternalMeltRemainingMs()  : null;
             const nextDriveMs = drugsUsable ? getInternalDriveRemainingMs() : null;
@@ -6794,6 +6880,13 @@
         const gtaUsable   = isGTAEnabled()  && !isGTALocked();
         const meltUsable  = isMeltUsable();
         const drugsUsable = isDrugsEnabled();
+
+        // Comp mode — always go to drugs to buy 1 unit at a time, drive not needed yet
+        if (drugsUsable && state.drugCompEnabled && !state.killLoopActive) {
+            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            gotoPage('drugs');
+            return;
+        }
 
         if (drugsUsable && isInternalDriveReady() && !state.killLoopActive) {
             await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
@@ -8281,11 +8374,12 @@
     // =========================================================================
 
     async function tick() {
-        if (!state.enabled || loopBusy || reloadPending) return;
+        if (loopBusy || reloadPending) return;
 
-        // ── Auto account creation — highest priority, runs before all loop logic ──
-        // Must be checked first so death pages are handled even if kill/search loops are active
-        if (state.accEnabled) {
+        // ── Auto account creation — runs even when bot is paused ──────────────
+        // Death navigates to the login page regardless of bot state, so this
+        // must fire before the state.enabled check.
+        if (state.accEnabled && !loopBusy) {
             if (isLoginPage()) {
                 loopBusy = true;
                 try { await handleLoginPage(); } finally { loopBusy = false; }
@@ -8301,13 +8395,14 @@
                 try { await handleRulesPage(); } finally { loopBusy = false; }
                 return;
             }
-            // Retrieve assets from previous account after creation
             if (isMyStatsEmailPage() && GM_getValue('accPendingRetrieve', false)) {
                 loopBusy = true;
                 try { await handleMyStatsRetrieve(); } finally { loopBusy = false; }
                 return;
             }
         }
+
+        if (!state.enabled) return;
 
         // ── Kill penalty page — handle immediately, skip all other tick logic ──
         // Prevents any other navigation (search loop, online scanner etc.) from
@@ -9694,6 +9789,14 @@
                             </label>
                             <div class="ug-helptext" style="margin-top:4px;">Route: USA &#8596; England — Heroin outbound, Cannabis inbound. Swiss Bank deposit replaces quick deposit when enabled.</div>
                             <div class="ug-helptext" style="margin-top:2px;color:#f8c84a;">Requires a favourited car.</div>
+                            <div class="ug-action-divider"></div>
+                            <label class="ug-action-label">
+                                <input id="ug-bot-drug-comp" type="checkbox" /> Drug comp mode
+                            </label>
+                            <div class="ug-helptext" style="margin-top:4px;">Buys 1 unit at a time up to your full capacity, then drives and sells. Each unit counts as a separate batch for competition scoring.</div>
+                            <div class="ug-action-divider"></div>
+                            <button id="ug-bot-sell-all-drugs" class="ug-action-btn" style="width:100%;">Sell All Drugs</button>
+                            <div id="ug-bot-sell-all-status" class="ug-helptext" style="margin-top:4px;"></div>
                         </div>
                     </div>
                     <div class="ug-row">
@@ -9927,7 +10030,16 @@
                             <label class="ug-action-label">
                                 <input id="ug-bot-acc-enabled" type="checkbox"> Enable auto account creation
                             </label>
-                            <div class="ug-helptext" style="margin-top:4px;color:#f8c84a;">Requires a single saved login in your browser for this site. If multiple logins are saved, delete all but one.</div>
+                            <div class="ug-helptext" style="margin-top:4px;color:#f8c84a;">Enter your login credentials below to enable fully automatic login after death.</div>
+                            <div style="margin-top:8px;">
+                                <div class="ug-subtitle" style="margin-bottom:4px;">Login email</div>
+                                <input id="ug-bot-acc-email" type="text" placeholder="your@email.com" style="width:100%;box-sizing:border-box;padding:7px 8px;border:1px solid #555;border-radius:6px;background:#1b1b1b;color:#fff;font-size:12px;" />
+                            </div>
+                            <div style="margin-top:6px;">
+                                <div class="ug-subtitle" style="margin-bottom:4px;">Login password</div>
+                                <input id="ug-bot-acc-password" type="password" placeholder="••••••••" style="width:100%;box-sizing:border-box;padding:7px 8px;border:1px solid #555;border-radius:6px;background:#1b1b1b;color:#fff;font-size:12px;" />
+                            </div>
+                            <div class="ug-helptext" style="margin-top:4px;">Stored locally in Tampermonkey — never sent anywhere except the game's own login form.</div>
                             <label class="ug-action-label" style="margin-top:8px;">
                                 <input id="ug-bot-acc-retrieve" type="checkbox"> Auto-retrieve assets from previous account
                             </label>
@@ -10441,6 +10553,69 @@
         autoMissionsInput.checked       = state.autoMissionsEnabled;
         autoGiveCarsInput.checked       = state.autoGiveCarMissionsEnabled;
         autoDrugsInput.checked          = state.autoDrugsEnabled;
+        const drugCompCb = document.querySelector('#ug-bot-drug-comp');
+        if (drugCompCb && !drugCompCb.dataset.listenerAttached) {
+            drugCompCb.dataset.listenerAttached = '1';
+            drugCompCb.checked = state.drugCompEnabled;
+            drugCompCb.addEventListener('change', () => {
+                state.drugCompEnabled = drugCompCb.checked;
+            });
+        }
+
+        // Sell All Drugs button
+        const sellAllBtn = document.querySelector('#ug-bot-sell-all-drugs');
+        const sellAllStatus = document.querySelector('#ug-bot-sell-all-status');
+        if (sellAllBtn && !sellAllBtn.dataset.listenerAttached) {
+            sellAllBtn.dataset.listenerAttached = '1';
+            sellAllBtn.addEventListener('click', async () => {
+                sellAllBtn.disabled = true;
+                sellAllStatus.textContent = 'Fetching drug pages...';
+                try {
+                    let totalSold = 0;
+                    while (true) {
+                        const r1 = await fetch('/?p=drugs&page=1', { credentials: 'include' });
+                        const t1 = await r1.text();
+                        const pageMatch = t1.match(/Page <u>1<\/u> of <u>(\d+)<\/u>/);
+                        const totalPages = pageMatch ? parseInt(pageMatch[1]) : 0;
+                        if (!totalPages) {
+                            sellAllStatus.textContent = `Done — sold ${totalSold} batches`;
+                            addLiveLog(`Sell All Drugs: complete — sold ${totalSold} batches`);
+                            break;
+                        }
+                        sellAllStatus.textContent = `${totalPages} pages remaining, fetching IDs...`;
+                        const d1 = new DOMParser().parseFromString(t1, 'text/html');
+                        let allIds = [...d1.querySelectorAll('input[name="id[]"]')].map(cb => cb.value);
+                        const rest = await Promise.all(
+                            Array.from({length: totalPages - 1}, (_, i) =>
+                                fetch(`/?p=drugs&page=${i + 2}`, { credentials: 'include' })
+                                    .then(r => r.text())
+                                    .then(t => [...new DOMParser().parseFromString(t, 'text/html').querySelectorAll('input[name="id[]"]')].map(cb => cb.value))
+                            )
+                        );
+                        rest.forEach(ids => allIds = allIds.concat(ids));
+                        for (let i = 0; i < allIds.length; i += 25) {
+                            const chunk = allIds.slice(i, i + 25);
+                            const body = chunk.map(id => `id[]=${id}`).join('&') + '&sell=Sell';
+                            await fetch('/?p=drugs', {
+                                method: 'POST',
+                                credentials: 'include',
+                                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                                body
+                            });
+                            totalSold += chunk.length;
+                            sellAllStatus.textContent = `Sold ${totalSold} batches so far...`;
+                            await new Promise(r => setTimeout(r, 200));
+                        }
+                    }
+                } catch(e) {
+                    sellAllStatus.textContent = `Error: ${e.message}`;
+                    addLiveLog(`Sell All Drugs: error — ${e.message}`);
+                } finally {
+                    sellAllBtn.disabled = false;
+                }
+            });
+        }
+
         drugDepositMultiplierEl.value   = String(state.drugDepositMultiplier);
         leaveJailInput.checked          = state.leaveJailEnabled;
         leaveJailMinPointsEl.value      = String(state.leaveJailMinPoints);
@@ -10677,6 +10852,20 @@
                 // Reset name index when toggled on so it starts from the top
                 if (accEnabledCb.checked) state.accNameIndex = 0;
             });
+        }
+
+        const accEmailEl = document.querySelector('#ug-bot-acc-email');
+        if (accEmailEl && !accEmailEl.dataset.listenerAttached) {
+            accEmailEl.dataset.listenerAttached = '1';
+            accEmailEl.value = state.accEmail;
+            accEmailEl.addEventListener('change', () => { state.accEmail = accEmailEl.value.trim(); });
+        }
+
+        const accPasswordEl = document.querySelector('#ug-bot-acc-password');
+        if (accPasswordEl && !accPasswordEl.dataset.listenerAttached) {
+            accPasswordEl.dataset.listenerAttached = '1';
+            accPasswordEl.value = state.accPassword;
+            accPasswordEl.addEventListener('change', () => { state.accPassword = accPasswordEl.value; });
         }
 
         const accRetrieveCb = document.querySelector('#ug-bot-acc-retrieve');
