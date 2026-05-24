@@ -11654,6 +11654,31 @@
 
         addLiveLog('Script loaded');
         if (personalityJustGenerated) addLiveLog(`[Personality] Deposit: $${PERSONALITY.depositThreshold.toLocaleString()} | Drug mult: ${PERSONALITY.drugDepositMult}x | Scan: ${PERSONALITY.scanIntervalMins}min | Visit: ${PERSONALITY.idleVisitChancePct}%`);
+
+        // Inject per-table Select All buttons on the perks page
+        if (document.querySelectorAll('.sortable-table').length > 0) {
+            document.querySelectorAll('.sortable-table').forEach(table => {
+                const rows = table.querySelectorAll('tr');
+                const headerRow = rows[1]; // second row is "Perk / For Sale / Expires / Select"
+                if (!headerRow) return;
+                const lastTh = headerRow.querySelector('td:last-child, th:last-child');
+                if (!lastTh) return;
+                const link = document.createElement('a');
+                link.href = 'javascript:void(0)';
+                link.className = 'myc';
+                link.style.marginLeft = '4px';
+                link.textContent = '(Select All)';
+                link.addEventListener('click', () => {
+                    const boxes = table.querySelectorAll('.perk-select-check');
+                    const allChecked = [...boxes].every(cb => cb.checked);
+                    boxes.forEach(cb => {
+                        cb.checked = !allChecked;
+                        cb.dispatchEvent(new Event('change', { bubbles: true }));
+                    });
+                });
+                lastTh.appendChild(link);
+            });
+        }
     }
 
     init();
