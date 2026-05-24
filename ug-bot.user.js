@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Full UG Bot
 // @namespace    ug-bot
-// @version      2.2.2
+// @version      2.2.3
 // @description  Auto-runs crimes, GTA, melting, repair, missions, drug running with Swiss Bank management, live log, session stats, action checkboxes, jail handling, runtime tracking, melt pagination, repair cycles, automatic CTC solving, and point-spending features.
 // @match        *://www.underworldgangsters.com/*
 // @match        *://underworldgangsters.com/*
@@ -542,7 +542,7 @@
     // BOT CONFIG
     // =========================================================================
 
-    const SCRIPT_VERSION = '2.2.2';
+    const SCRIPT_VERSION = '2.2.3';
 
     const CRIME_DEFS = [
         { id: 'gang', name: 'Gang Activities' },
@@ -6432,6 +6432,13 @@
             };
             addLiveLog('Auto login: disabled on new account — ' + disabled.map(k => labels[k]).join(', '));
         }
+        // Clear all kill player data so new account starts fresh with no stale timestamps
+        setSetting('killPlayers', []);
+        GM_setValue('killSearchLoopActive', false);
+        GM_setValue('killLoopActive', false);
+        GM_setValue('killSearchIndex', 0);
+        GM_setValue('killCurrentSearch', '');
+        GM_setValue('killLastOnlineScan', 0);
     }
 
     async function handleLoginPage() {
@@ -11144,6 +11151,11 @@
                     } else if (key === 'killSearch' && !state.killSearchEnabled) {
                         state.killSearchEnabled = true;
                         if (killSearchInput) killSearchInput.checked = true;
+                        // Reset all alive players to unknown so they get re-searched on the new account
+                        const _players = getSetting('killPlayers', []);
+                        const _reset = _players.map(p => p.status === 'alive' ? { ...p, status: 'unknown', searchedAt: 0, expiresAt: 0 } : p);
+                        setSetting('killPlayers', _reset);
+                        addLiveLog('Kill scanner: reset alive players to unknown for new account');
                         _reenabled.push(_labels[key]);
                     } else if (key === 'killProtectedRecheck' && !state.killProtectedRecheckEnabled) {
                         state.killProtectedRecheckEnabled = true;
