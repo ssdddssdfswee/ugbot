@@ -6432,8 +6432,7 @@
             };
             addLiveLog('Auto login: disabled on new account — ' + disabled.map(k => labels[k]).join(', '));
         }
-        // Clear all kill player data so new account starts fresh with no stale timestamps
-        setSetting('killPlayers', []);
+        // Clear loop state but keep player list intact — alive players get reset to unknown when Don rank is reached
         GM_setValue('killSearchLoopActive', false);
         GM_setValue('killLoopActive', false);
         GM_setValue('killSearchIndex', 0);
