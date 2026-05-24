@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Full UG Bot
 // @namespace    ug-bot
-// @version      2.2.1
+// @version      2.2.2
 // @description  Auto-runs crimes, GTA, melting, repair, missions, drug running with Swiss Bank management, live log, session stats, action checkboxes, jail handling, runtime tracking, melt pagination, repair cycles, automatic CTC solving, and point-spending features.
 // @match        *://www.underworldgangsters.com/*
 // @match        *://underworldgangsters.com/*
@@ -542,7 +542,7 @@
     // BOT CONFIG
     // =========================================================================
 
-    const SCRIPT_VERSION = '2.2.1';
+    const SCRIPT_VERSION = '2.2.2';
 
     const CRIME_DEFS = [
         { id: 'gang', name: 'Gang Activities' },
@@ -4347,6 +4347,19 @@
                     addLiveLog(`QT Perks: not enough points to extend ${toExtend.length} perk(s) — need ${needed}, have ${points}`);
                 }
             }
+            // Money perks — always redeem immediately
+            const moneyRows = [...doc.querySelectorAll('table.pm tr.sortable-row')].filter(row => {
+                const cells = row.querySelectorAll('td');
+                return cells[2] && !cells[2].querySelector('b');
+            });
+            if (moneyRows.length > 0) {
+                const form = new FormData();
+                moneyRows.forEach(row => form.append('selected_perks[]', row.dataset.id));
+                form.append('redeem_selected', 'Redeem Selected');
+                await fetch('/?p=perks', { method: 'POST', credentials: 'include', body: form });
+                const names = moneyRows.map(row => row.querySelector('.lm')?.textContent.trim()).join(', ');
+                addLiveLog(`QT Perks: ✓ Redeemed money perk(s) — ${names}`);
+            }
         } catch (e) {
             addLiveLog(`QT Perks: extend check error — ${e.message}`);
         }
@@ -6571,27 +6584,24 @@
         // so the button value (agree=I agree) is included in the POST body
         const agreeBtn = document.querySelector('input[name="agree"][type="submit"]');
         if (agreeBtn) {
-            await wait(rand(500, 900));
-            humanClick(agreeBtn);
-            addLiveLog('Auto login: rules accepted — retrieving assets from previous account');
-            // Clear the death-settings-reset flag so next death triggers a fresh reset
+            // Set all flags BEFORE clicking — the form POST navigates away immediately
+            // so anything after humanClick() may not execute
             GM_setValue('accDeathSettingsReset', false);
-            // Auto-start the bot on the new account
+            GM_setValue('killSearchLoopActive', false);
+            GM_setValue('killLoopActive', false);
+            GM_setValue('killSearchIndex', 0);
+            GM_setValue('killCurrentSearch', '');
+            if (state.accRetrieve) {
+                GM_setValue('accPendingRetrieve', true);
+            }
             if (!state.enabled) {
                 state.enabled = true;
                 state.pausedReason = '';
                 state.sessionStartedAt = now();
-                addLiveLog('Auto login: bot started on new account');
             }
-            // Navigate to email stats page to retrieve assets from previous account
-            if (state.accRetrieve) {
-                GM_setValue('accPendingRetrieve', true);
-                await wait(rand(1000, 1500));
-                gotoPage('my-stats', { s: 'email' });
-            } else {
-                await wait(rand(500, 900));
-                gotoPage('crimes');
-            }
+            await wait(rand(500, 900));
+            addLiveLog('Auto login: rules accepted — retrieving assets from previous account');
+            humanClick(agreeBtn);
             return;
         }
 
@@ -8363,6 +8373,7 @@
         }
 
         addLiveLog('Repair cycle failed — returning to crimes');
+        state.meltsSinceRepair    = 0; // reset so we don't immediately trigger again
         state.meltResetLoopActive = false;
         state.resetMeltEnabled    = false;
         await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
@@ -8398,6 +8409,11 @@
             if (isMyStatsEmailPage() && GM_getValue('accPendingRetrieve', false)) {
                 loopBusy = true;
                 try { await handleMyStatsRetrieve(); } finally { loopBusy = false; }
+                return;
+            }
+            // If retrieve is pending but we're not on the my-stats page yet, navigate there
+            if (GM_getValue('accPendingRetrieve', false) && !isMyStatsEmailPage()) {
+                gotoPage('my-stats', { s: 'email' });
                 return;
             }
         }
