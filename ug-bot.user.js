@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Full UG Bot
 // @namespace    ug-bot
-// @version      2.2.3
+// @version      2.2.4
 // @description  Auto-runs crimes, GTA, melting, repair, missions, drug running with Swiss Bank management, live log, session stats, action checkboxes, jail handling, runtime tracking, melt pagination, repair cycles, automatic CTC solving, and point-spending features.
 // @match        *://www.underworldgangsters.com/*
 // @match        *://underworldgangsters.com/*
@@ -542,7 +542,7 @@
     // BOT CONFIG
     // =========================================================================
 
-    const SCRIPT_VERSION = '2.2.3';
+    const SCRIPT_VERSION = '2.2.5';
 
     const CRIME_DEFS = [
         { id: 'gang', name: 'Gang Activities' },
@@ -4282,7 +4282,7 @@
     }
 
     async function doQTPerkExtend() {
-        if (!qtPerkExtendActive || !state.enabled || !state.qtPerkExtendEnabled || crimePaused || (!state.bgCrimeEnabled && (isCrimesPage() || hasCrimePageMarkers()))) {
+        if (!qtPerkExtendActive || !state.enabled || !state.qtPerkExtendEnabled || crimePaused) {
             scheduleQTPerkExtend();
             return;
         }
@@ -4384,7 +4384,7 @@
     }
 
     async function doQTSniperPoll() {
-        if (!qtSniperActive || !state.enabled || crimePaused || (!state.bgCrimeEnabled && (isCrimesPage() || hasCrimePageMarkers()))) { scheduleQTSniperPoll(); return; }
+        if (!qtSniperActive || !state.enabled || crimePaused) { scheduleQTSniperPoll(); return; }
         if (!state.qtBgEnabled && !state.qtBulletsEnabled && !state.qtPointsEnabled) { scheduleQTSniperPoll(); return; }
         if (hasCTCChallenge()) { scheduleQTSniperPoll(); return; }
         if (actionInFlight) { scheduleQTSniperPoll(); return; }
@@ -4656,7 +4656,7 @@
     }
 
     async function doQTCarScan() {
-        if (!qtCarScanActive || !state.enabled || !state.qtCarsEnabled || crimePaused || (!state.bgCrimeEnabled && (isCrimesPage() || hasCrimePageMarkers()))) { scheduleQTCarScan(); return; }
+        if (!qtCarScanActive || !state.enabled || !state.qtCarsEnabled || crimePaused) { scheduleQTCarScan(); return; }
         if (hasCTCChallenge()) { scheduleQTCarScan(); return; }
         if (actionInFlight) { scheduleQTCarScan(); return; }
 
@@ -4718,31 +4718,27 @@
                     }
                 }
 
-                // Buy each eligible car
-                for (const car of eligible) {
-                    try {
-                        // Step 1: POST to select the car and get confirmation page
-                        const buyForm = new FormData();
-                        buyForm.append(`id[${car.carId}]`, String(car.price));
-                        buyForm.append('buy', 'Buy');
-                        const buyResp = await fetch(`/?p=qt&a=cars&b=${carType.b}`, {
-                            method: 'POST',
-                            body: buyForm,
-                            credentials: 'include'
-                        });
-                        const buyText = await buyResp.text();
-                        const buyDoc  = parser.parseFromString(buyText, 'text/html');
+                // Buy all eligible cars in one bulk request
+                try {
+                    // Step 1: POST all car IDs at once to get confirmation page
+                    const buyForm = new FormData();
+                    eligible.forEach(car => buyForm.append(`id[${car.carId}]`, String(car.price)));
+                    buyForm.append('buy', 'Buy');
+                    const buyResp = await fetch(`/?p=qt&a=cars&b=${carType.b}`, {
+                        method: 'POST',
+                        body: buyForm,
+                        credentials: 'include'
+                    });
+                    const buyText = await buyResp.text();
+                    const buyDoc  = parser.parseFromString(buyText, 'text/html');
 
-                        // Check if confirmation is present
-                        const confirmBtn = buyDoc.querySelector('input[name="confirm"]');
-                        if (!confirmBtn) {
-                            addLiveLog(`QT Cars: no confirm button for ${car.carName} — may have sold already`);
-                            continue;
-                        }
-
-                        // Step 2: POST confirmation
+                    const confirmBtn = buyDoc.querySelector('input[name="confirm"]');
+                    if (!confirmBtn) {
+                        addLiveLog(`QT Cars: no confirm button for ${carType.name} — cars may have sold already`);
+                    } else {
+                        // Step 2: POST confirmation with all IDs from the confirmation page
                         const confirmForm = new FormData();
-                        confirmForm.append(`id[${car.carId}]`, String(car.price));
+                        [...buyDoc.querySelectorAll('input[name^="id["]')].forEach(f => confirmForm.append(f.name, f.value));
                         confirmForm.append('buy', 'Buy');
                         confirmForm.append('confirm', 'Confirm');
                         const confirmResp = await fetch(`/?p=qt&a=cars&b=${carType.b}`, {
@@ -4753,16 +4749,15 @@
                         const confirmText = await confirmResp.text();
 
                         if (/successfully|bought/i.test(confirmText)) {
-                            addLiveLog(`QT Cars: ✓ Bought ${car.carName} for $${car.price.toLocaleString()}`);
-                            totalSpent += car.price;
+                            const spent = eligible.reduce((s, c) => s + c.price, 0);
+                            addLiveLog(`QT Cars: ✓ Bought ${eligible.length}x ${carType.name} for $${spent.toLocaleString()} total`);
+                            totalSpent += spent;
                         } else {
-                            addLiveLog(`QT Cars: failed to buy ${car.carName} — may have sold`);
+                            addLiveLog(`QT Cars: bulk buy failed for ${carType.name} — may have sold`);
                         }
-
-                        await wait(rand(150, 300));
-                    } catch (e) {
-                        addLiveLog(`QT Cars: error buying ${car.carName} — ${e.message}`);
                     }
+                } catch (e) {
+                    addLiveLog(`QT Cars: error buying ${carType.name} — ${e.message}`);
                 }
             }
 
