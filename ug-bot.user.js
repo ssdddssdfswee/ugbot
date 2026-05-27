@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Full UG Bot
 // @namespace    ug-bot
-// @version      2.2.5
+// @version      2.2.7
 // @description  Auto-runs crimes, GTA, melting, repair, missions, drug running with Swiss Bank management, live log, session stats, action checkboxes, jail handling, runtime tracking, melt pagination, repair cycles, automatic CTC solving, and point-spending features.
 // @match        *://www.underworldgangsters.com/*
 // @match        *://underworldgangsters.com/*
@@ -542,7 +542,7 @@
     // BOT CONFIG
     // =========================================================================
 
-    const SCRIPT_VERSION = '2.2.5';
+    const SCRIPT_VERSION = '2.2.7';
 
     const CRIME_DEFS = [
         { id: 'gang', name: 'Gang Activities' },
@@ -895,6 +895,10 @@
         set bustPollMax(v)         { setSetting('bustPollMax', Number(v)); },
         get bgCrimeEnabled()       { return !!getSetting('bgCrimeEnabled', DEFAULTS.bgCrimeEnabled); },
         set bgCrimeEnabled(v)      { setSetting('bgCrimeEnabled', !!v); },
+        get disableCrimesAtGb()    { return !!getSetting('disableCrimesAtGb', false); },
+        set disableCrimesAtGb(v)   { setSetting('disableCrimesAtGb', !!v); },
+        get disableGtaAtGb()       { return !!getSetting('disableGtaAtGb', false); },
+        set disableGtaAtGb(v)      { setSetting('disableGtaAtGb', !!v); },
         get bulletFactoryEnabled() { return !!getSetting('bulletFactoryEnabled', DEFAULTS.bulletFactoryEnabled); },
         set bulletFactoryEnabled(v){ setSetting('bulletFactoryEnabled', !!v); },
         get pendingBulletRun()     { return getSetting('pendingBulletRun', null); },
@@ -1393,6 +1397,7 @@
         state.killCurrentSearch    = '';
         state.pendingKillAction    = null;
         stopBustObserver();
+        stopDiceJoiner();
         updatePanel();
         addLiveLog(`Paused: ${reason}`);
     }
@@ -4263,6 +4268,69 @@
     let qtPerkExtendTimer  = null;
     let qtPerkExtendActive = false;
 
+    // ── Free Entry Dice Joiner ────────────────────────────────────────────────
+    const DICE_JOIN_INTERVAL_MS = 30 * 60 * 1000; // 30 minutes
+
+    let diceJoinTimer  = null;
+    let diceJoinActive = false;
+
+    function startDiceJoiner() {
+        if (diceJoinActive) return;
+        diceJoinActive = true;
+        scheduleDiceJoin();
+    }
+
+    function stopDiceJoiner() {
+        diceJoinActive = false;
+        if (diceJoinTimer) { clearTimeout(diceJoinTimer); diceJoinTimer = null; }
+    }
+
+    function scheduleDiceJoin() {
+        if (!diceJoinActive) return;
+        // Fire at 1 minute past each half-hour boundary (00:01, 00:31, 01:01, 01:31 etc.)
+        const INTERVAL_MS  = 30 * 60 * 1000; // 30 minutes
+        const OFFSET_MS    =  1 * 60 * 1000; //  1 minute past the boundary
+        const now          = Date.now();
+        const boundary     = Math.floor(now / INTERVAL_MS) * INTERVAL_MS;
+        const nextFire     = boundary + OFFSET_MS;
+        const delay        = nextFire > now ? nextFire - now : nextFire + INTERVAL_MS - now;
+        diceJoinTimer = setTimeout(doDiceJoin, delay);
+    }
+
+    async function doDiceJoin() {
+        if (!diceJoinActive || !state.enabled) { scheduleDiceJoin(); return; }
+        setSetting('diceJoinLastRun', Date.now());
+        try {
+            const resp = await fetch('/?p=multiplayer-dice&page=1', { credentials: 'include', cache: 'no-store' });
+            const text = await resp.text();
+            const doc  = new DOMParser().parseFromString(text, 'text/html');
+
+            // Find all game blocks with Free entry and a checkbox (not yet joined)
+            const games = [...doc.querySelectorAll('.bgl.jr.i')];
+            const toJoin = [];
+            for (const game of games) {
+                const isFree = !!game.querySelector('.bgd .cg');
+                const cb     = game.querySelector('input[name="id[]"]');
+                if (isFree && cb) toJoin.push(cb.value);
+            }
+
+            if (!toJoin.length) { scheduleDiceJoin(); return; }
+
+            // POST to join all at once
+            const body = toJoin.map(id => `id[]=${id}`).join('&');
+            await fetch('/?p=multiplayer-dice', {
+                method: 'POST',
+                credentials: 'include',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body
+            });
+            addLiveLog(`Dice: joined ${toJoin.length} free entry game(s)`);
+        } catch (e) {
+            addLiveLog(`Dice: join error — ${e.message}`);
+        }
+        scheduleDiceJoin();
+    }
+
     function startQTPerkExtender() {
         if (qtPerkExtendActive) return;
         qtPerkExtendActive = true;
@@ -4795,7 +4863,9 @@
 
     function scheduleBgCrimePoll() {
         if (!bgCrimeActive) return;
-        const crimeIds = ['7', '6', '5', '4', '3', 'drug', '2', '1'];
+        const allBgCrimeIds = ['7', '6', '5', '4', '3', 'drug', '2', '1'];
+        const crimeIds = allBgCrimeIds.filter(id => state.enabledActions.includes(id));
+        if (!crimeIds.length) { scheduleBgCrimePoll(); return; }
         // bgCrimeCooldowns stores absolute timestamps (ms) when each crime is ready
         const nowMs = Date.now();
         const available = crimeIds.some(id => (bgCrimeCooldowns[id] ?? 0) <= nowMs);
@@ -4815,7 +4885,9 @@
         if (hasCTCChallenge()) { scheduleBgCrimePoll(); return; }
 
         try {
-            const crimeIds = ['7', '6', '5', '4', '3', 'drug', '2', '1'];
+            const allBgCrimeIds = ['7', '6', '5', '4', '3', 'drug', '2', '1'];
+            const crimeIds = allBgCrimeIds.filter(id => state.enabledActions.includes(id));
+            if (!crimeIds.length) { scheduleBgCrimePoll(); return; }
 
             // Only fetch crimes page if we don't have a cached token
             // After initial fetch, we chain tokens from each crime response
@@ -9769,7 +9841,24 @@
                         <div class="ug-helptext">Deposit when cash is at or above this amount. Disabled automatically when drug running is on.</div>
                     </div>
                     <div class="ug-row">
+                        <div style="display:flex;gap:6px;margin-bottom:6px;">
+                            <button id="ug-bot-crimes-select-all" type="button" style="font-size:11px;padding:4px 8px;">Select All</button>
+                        </div>
                         <div id="ug-bot-actions"></div>
+                    </div>
+                    <div class="ug-row">
+                        <div class="ug-section-box">
+                            <div class="ug-section-title">Disable ranking at Global Boss</div>
+                            <div class="ug-helptext" style="margin-bottom:6px;">Automatically disables selected actions when you reach Global Boss (protection begins). Useful for continuing to melt while protected.</div>
+                            <div style="display:flex;gap:16px;align-items:center;">
+                                <label class="ug-action-label">
+                                    <input id="ug-bot-disable-crimes-at-gb" type="checkbox" /> Crimes
+                                </label>
+                                <label class="ug-action-label">
+                                    <input id="ug-bot-disable-gta-at-gb" type="checkbox" /> GTA
+                                </label>
+                            </div>
+                        </div>
                     </div>
                 </div>
 
@@ -10866,6 +10955,57 @@
         }
 
         // ── Acc tab ───────────────────────────────────────────────────────────
+        // Select All / Select None crime buttons
+        const crimesSelectAllBtn = document.querySelector('#ug-bot-crimes-select-all');
+        if (crimesSelectAllBtn && !crimesSelectAllBtn.dataset.listenerAttached) {
+            crimesSelectAllBtn.dataset.listenerAttached = '1';
+            crimesSelectAllBtn.addEventListener('click', () => {
+                const boxes = [...document.querySelectorAll('#ug-bot-actions .ug-action-cb:not(:disabled)')];
+                const allChecked = boxes.every(cb => cb.checked);
+                boxes.forEach(cb => { cb.checked = !allChecked; });
+                saveSettings();
+            });
+        }
+
+        // Disable at Global Boss checkboxes
+        const disableCrimesAtGbCb = document.querySelector('#ug-bot-disable-crimes-at-gb');
+        if (disableCrimesAtGbCb && !disableCrimesAtGbCb.dataset.listenerAttached) {
+            disableCrimesAtGbCb.dataset.listenerAttached = '1';
+            disableCrimesAtGbCb.checked = state.disableCrimesAtGb;
+            disableCrimesAtGbCb.addEventListener('change', () => {
+                state.disableCrimesAtGb = disableCrimesAtGbCb.checked;
+                if (!disableCrimesAtGbCb.checked) {
+                    // Re-enable crimes and bg crimes when unticked
+                    const crimeIds = ['gang', '1', '2', 'drug', '3', '4', '5', '6', '7'];
+                    const cur = state.enabledActions;
+                    const restored = [...new Set([...cur, ...crimeIds])];
+                    state.enabledActions = restored;
+                    state.bgCrimeEnabled = true;
+                    if (bgCrimeEnabledInput) bgCrimeEnabledInput.checked = true;
+                    startBgCrime();
+                    buildActionCheckboxes();
+                    addLiveLog('Disable ranking: crimes re-enabled');
+                }
+            });
+        }
+        const disableGtaAtGbCb = document.querySelector('#ug-bot-disable-gta-at-gb');
+        if (disableGtaAtGbCb && !disableGtaAtGbCb.dataset.listenerAttached) {
+            disableGtaAtGbCb.dataset.listenerAttached = '1';
+            disableGtaAtGbCb.checked = state.disableGtaAtGb;
+            disableGtaAtGbCb.addEventListener('change', () => {
+                state.disableGtaAtGb = disableGtaAtGbCb.checked;
+                if (!disableGtaAtGbCb.checked) {
+                    // Re-enable GTA when unticked
+                    const cur = state.enabledActions;
+                    if (!cur.includes('gta')) {
+                        state.enabledActions = [...cur, 'gta'];
+                        buildActionCheckboxes();
+                        addLiveLog('Disable ranking: GTA re-enabled');
+                    }
+                }
+            });
+        }
+
         const accEnabledCb = document.querySelector('#ug-bot-acc-enabled');
         if (accEnabledCb && !accEnabledCb.dataset.listenerAttached) {
             accEnabledCb.dataset.listenerAttached = '1';
@@ -11174,6 +11314,32 @@
             }
         }
 
+        // Disable crimes/GTA at Global Boss if toggles are on
+        if (state.disableCrimesAtGb || state.disableGtaAtGb) {
+            const _gbIdx  = RANKS.indexOf('Global Boss');
+            const _curIdx = getPlayerRankIndex();
+            if (_gbIdx >= 0 && _curIdx >= 0 && _curIdx >= _gbIdx) {
+                const _actions = [...state.enabledActions];
+                let _changed = false;
+                const _crimeIds = ['gang', '1', '2', 'drug', '3', '4', '5', '6', '7'];
+                if (state.disableCrimesAtGb) {
+                    const _before = _actions.filter(id => _crimeIds.includes(id)).length;
+                    const _filtered = _actions.filter(id => !_crimeIds.includes(id));
+                    if (_filtered.length !== _actions.length) { state.enabledActions = _filtered; _changed = true; }
+                    // Also disable background crimes
+                    if (state.bgCrimeEnabled) { state.bgCrimeEnabled = false; stopBgCrime(); if (bgCrimeEnabledInput) bgCrimeEnabledInput.checked = false; _changed = true; }
+                }
+                if (state.disableGtaAtGb) {
+                    const _cur = state.enabledActions;
+                    if (_cur.includes('gta')) { state.enabledActions = _cur.filter(id => id !== 'gta'); _changed = true; }
+                }
+                if (_changed) {
+                    addLiveLog('Reached Global Boss — disabled: ' + [state.disableCrimesAtGb ? 'crimes' : null, state.disableGtaAtGb ? 'GTA' : null].filter(Boolean).join(', '));
+                    buildActionCheckboxes();
+                }
+            }
+        }
+
         let statusMain = state.enabled ? 'Running' : 'Stopped';
         if (!state.enabled && state.pausedReason) statusMain += ` (${state.pausedReason})`;
 
@@ -11415,6 +11581,8 @@
         if (state.qtCarsEnabled) {
             startQTCarScanner();
         }
+        // Start free entry dice joiner on every page load
+        startDiceJoiner();
         // Start background crime loop on every page load if enabled
         if (state.bgCrimeEnabled) {
             startBgCrime();
