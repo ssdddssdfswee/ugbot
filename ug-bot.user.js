@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Full UG Bot
 // @namespace    ug-bot
-// @version      2.2.4
+// @version      2.2.5
 // @description  Auto-runs crimes, GTA, melting, repair, missions, drug running with Swiss Bank management, live log, session stats, action checkboxes, jail handling, runtime tracking, melt pagination, repair cycles, automatic CTC solving, and point-spending features.
 // @match        *://www.underworldgangsters.com/*
 // @match        *://underworldgangsters.com/*
@@ -3850,6 +3850,8 @@
             }
             addLiveLog('Kill scanner: no targets right now — reverting to normal script (toggle stays on)');
             state.killSearchLoopActive = false;
+            // Set a cooldown so the protected recheck interval can't immediately reactivate the loop
+            setSetting('killSearchNoTargetUntil', Date.now() + 60000); // 60s cooldown
             await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
             gotoPage('crimes');
             return;
@@ -4282,7 +4284,7 @@
     }
 
     async function doQTPerkExtend() {
-        if (!qtPerkExtendActive || !state.enabled || !state.qtPerkExtendEnabled || crimePaused) {
+        if (!qtPerkExtendActive || !state.enabled || !state.qtPerkExtendEnabled || crimePaused || (!state.bgCrimeEnabled && (isCrimesPage() || hasCrimePageMarkers()))) {
             scheduleQTPerkExtend();
             return;
         }
@@ -4384,7 +4386,7 @@
     }
 
     async function doQTSniperPoll() {
-        if (!qtSniperActive || !state.enabled || crimePaused) { scheduleQTSniperPoll(); return; }
+        if (!qtSniperActive || !state.enabled || crimePaused || (!state.bgCrimeEnabled && (isCrimesPage() || hasCrimePageMarkers()))) { scheduleQTSniperPoll(); return; }
         if (!state.qtBgEnabled && !state.qtBulletsEnabled && !state.qtPointsEnabled) { scheduleQTSniperPoll(); return; }
         if (hasCTCChallenge()) { scheduleQTSniperPoll(); return; }
         if (actionInFlight) { scheduleQTSniperPoll(); return; }
@@ -4656,7 +4658,7 @@
     }
 
     async function doQTCarScan() {
-        if (!qtCarScanActive || !state.enabled || !state.qtCarsEnabled || crimePaused) { scheduleQTCarScan(); return; }
+        if (!qtCarScanActive || !state.enabled || !state.qtCarsEnabled || crimePaused || (!state.bgCrimeEnabled && (isCrimesPage() || hasCrimePageMarkers()))) { scheduleQTCarScan(); return; }
         if (hasCTCChallenge()) { scheduleQTCarScan(); return; }
         if (actionInFlight) { scheduleQTCarScan(); return; }
 
@@ -9309,8 +9311,12 @@
                 (nowMs - (p.lastChecked || 0)) >= recheckMs
             );
             if (hasProtectedDue) {
-                addLiveLog('Kill scanner: protected recheck due — activating search');
-                state.killSearchLoopActive = true;
+                // Don't reactivate if we just exited with no targets — respect the cooldown
+                const noTargetUntil = Number(getSetting('killSearchNoTargetUntil', 0));
+                if (Date.now() >= noTargetUntil) {
+                    addLiveLog('Kill scanner: protected recheck due — activating search');
+                    state.killSearchLoopActive = true;
+                }
             }
         }, 10000);
     }
@@ -11147,7 +11153,7 @@
                         if (killSearchInput) killSearchInput.checked = true;
                         // Reset all alive players to unknown so they get re-searched on the new account
                         const _players = getSetting('killPlayers', []);
-                        const _reset = _players.map(p => p.status === 'alive' ? { ...p, status: 'unknown', searchedAt: 0, expiresAt: 0 } : p);
+                        const _reset = _players.map(p => p.status === 'alive' ? { ...p, status: 'unknown', searchedAt: 0, expiresAt: 0, searchExpiresAt: 0, lastChecked: 0 } : p);
                         setSetting('killPlayers', _reset);
                         addLiveLog('Kill scanner: reset alive players to unknown for new account');
                         _reenabled.push(_labels[key]);
