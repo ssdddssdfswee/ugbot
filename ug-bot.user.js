@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Full UG Bot
 // @namespace    ug-bot
-// @version      2.2.7
+// @version      2.2.4
 // @description  Auto-runs crimes, GTA, melting, repair, missions, drug running with Swiss Bank management, live log, session stats, action checkboxes, jail handling, runtime tracking, melt pagination, repair cycles, automatic CTC solving, and point-spending features.
 // @match        *://www.underworldgangsters.com/*
 // @match        *://underworldgangsters.com/*
@@ -542,7 +542,7 @@
     // BOT CONFIG
     // =========================================================================
 
-    const SCRIPT_VERSION = '2.2.7';
+    const SCRIPT_VERSION = '2.2.4';
 
     const CRIME_DEFS = [
         { id: 'gang', name: 'Gang Activities' },
@@ -4863,9 +4863,8 @@
 
     function scheduleBgCrimePoll() {
         if (!bgCrimeActive) return;
-        const allBgCrimeIds = ['7', '6', '5', '4', '3', 'drug', '2', '1'];
-        const crimeIds = allBgCrimeIds.filter(id => state.enabledActions.includes(id));
-        if (!crimeIds.length) { scheduleBgCrimePoll(); return; }
+        const _inGang = (document.querySelector('#player-gang')?.textContent || '').trim().toLowerCase() !== 'none';
+        const crimeIds = _inGang ? ['gang', '7', '6', '5', '4', '3', 'drug', '2', '1'] : ['7', '6', '5', '4', '3', 'drug', '2', '1'];
         // bgCrimeCooldowns stores absolute timestamps (ms) when each crime is ready
         const nowMs = Date.now();
         const available = crimeIds.some(id => (bgCrimeCooldowns[id] ?? 0) <= nowMs);
@@ -4885,9 +4884,8 @@
         if (hasCTCChallenge()) { scheduleBgCrimePoll(); return; }
 
         try {
-            const allBgCrimeIds = ['7', '6', '5', '4', '3', 'drug', '2', '1'];
-            const crimeIds = allBgCrimeIds.filter(id => state.enabledActions.includes(id));
-            if (!crimeIds.length) { scheduleBgCrimePoll(); return; }
+            const _inGang = (document.querySelector('#player-gang')?.textContent || '').trim().toLowerCase() !== 'none';
+        const crimeIds = _inGang ? ['gang', '7', '6', '5', '4', '3', 'drug', '2', '1'] : ['7', '6', '5', '4', '3', 'drug', '2', '1'];
 
             // Only fetch crimes page if we don't have a cached token
             // After initial fetch, we chain tokens from each crime response
@@ -4920,8 +4918,11 @@
             }
 
             // Commit all available crimes using cached cooldowns
+            // Only commit crimes that are ticked in enabledActions — fall back to all if none ticked
+            const _enabledCrimes = crimeIds.filter(id => state.enabledActions.includes(id));
+            const _activeCrimes = _enabledCrimes.length > 0 ? _enabledCrimes : crimeIds;
             const nowMs = Date.now();
-            const available = crimeIds.filter(id => (bgCrimeCooldowns[id] ?? 0) <= nowMs);
+            const available = _activeCrimes.filter(id => (bgCrimeCooldowns[id] ?? 0) <= nowMs);
             for (const id of available) {
                 if (!bgCrimeToken) break;
                 if (!bgCrimeActive || !state.bgCrimeEnabled) break;
@@ -6507,6 +6508,12 @@
         GM_setValue('killSearchIndex', 0);
         GM_setValue('killCurrentSearch', '');
         GM_setValue('killLastOnlineScan', 0);
+        // Clear GB disable flag and restore all crimes so new account starts fresh
+        setSetting('gbDisableFired', false);
+        const _allCrimeIds = ['gang', '1', '2', 'drug', '3', '4', '5', '6', '7', 'gta', 'melt'];
+        const _cur = getSetting('enabledActions', _allCrimeIds);
+        const _restored = [...new Set([..._cur, ..._allCrimeIds])];
+        setSetting('enabledActions', _restored);
     }
 
     async function handleLoginPage() {
@@ -10983,7 +10990,9 @@
                     state.bgCrimeEnabled = true;
                     if (bgCrimeEnabledInput) bgCrimeEnabledInput.checked = true;
                     startBgCrime();
+                    setSetting('gbDisableFired', false); // allow disable to fire again if reticked
                     buildActionCheckboxes();
+                    saveSettings();
                     addLiveLog('Disable ranking: crimes re-enabled');
                 }
             });
@@ -10999,7 +11008,9 @@
                     const cur = state.enabledActions;
                     if (!cur.includes('gta')) {
                         state.enabledActions = [...cur, 'gta'];
+                        setSetting('gbDisableFired', false); // allow disable to fire again if reticked
                         buildActionCheckboxes();
+                        saveSettings();
                         addLiveLog('Disable ranking: GTA re-enabled');
                     }
                 }
@@ -11318,15 +11329,18 @@
         if (state.disableCrimesAtGb || state.disableGtaAtGb) {
             const _gbIdx  = RANKS.indexOf('Global Boss');
             const _curIdx = getPlayerRankIndex();
-            if (_gbIdx >= 0 && _curIdx >= 0 && _curIdx >= _gbIdx) {
+            const _atGb   = _gbIdx >= 0 && _curIdx >= 0 && _curIdx >= _gbIdx;
+            // Only fire the disable once per GB stint — tracked by gbDisableFired flag
+            // Reset the flag when rank drops below Global Boss (new account after death)
+            if (!_atGb) {
+                if (getSetting('gbDisableFired', false)) setSetting('gbDisableFired', false);
+            } else if (!getSetting('gbDisableFired', false)) {
                 const _actions = [...state.enabledActions];
                 let _changed = false;
                 const _crimeIds = ['gang', '1', '2', 'drug', '3', '4', '5', '6', '7'];
                 if (state.disableCrimesAtGb) {
-                    const _before = _actions.filter(id => _crimeIds.includes(id)).length;
                     const _filtered = _actions.filter(id => !_crimeIds.includes(id));
                     if (_filtered.length !== _actions.length) { state.enabledActions = _filtered; _changed = true; }
-                    // Also disable background crimes
                     if (state.bgCrimeEnabled) { state.bgCrimeEnabled = false; stopBgCrime(); if (bgCrimeEnabledInput) bgCrimeEnabledInput.checked = false; _changed = true; }
                 }
                 if (state.disableGtaAtGb) {
@@ -11334,8 +11348,10 @@
                     if (_cur.includes('gta')) { state.enabledActions = _cur.filter(id => id !== 'gta'); _changed = true; }
                 }
                 if (_changed) {
+                    setSetting('gbDisableFired', true);
                     addLiveLog('Reached Global Boss — disabled: ' + [state.disableCrimesAtGb ? 'crimes' : null, state.disableGtaAtGb ? 'GTA' : null].filter(Boolean).join(', '));
                     buildActionCheckboxes();
+                    saveSettings();
                 }
             }
         }
