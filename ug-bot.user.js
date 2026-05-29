@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Full UG Bot
 // @namespace    ug-bot
-// @version      2.2.8
+// @version      2.2.29
 // @description  Auto-runs crimes, GTA, melting, repair, missions, drug running with Swiss Bank management, live log, session stats, action checkboxes, jail handling, runtime tracking, melt pagination, repair cycles, automatic CTC solving, and point-spending features.
 // @match        *://www.underworldgangsters.com/*
 // @match        *://underworldgangsters.com/*
@@ -542,7 +542,7 @@
     // BOT CONFIG
     // =========================================================================
 
-    const SCRIPT_VERSION = '2.2.8';
+    const SCRIPT_VERSION = '2.2.29';
 
     const CRIME_DEFS = [
         { id: 'gang', name: 'Gang Activities' },
@@ -6510,6 +6510,8 @@
         GM_setValue('killLastOnlineScan', 0);
         // Clear GB disable flag and restore all crimes so new account starts fresh
         setSetting('gbDisableFired', false);
+        setSetting('bgCrimeEnabled', true);
+        if (bgCrimeEnabledInput) bgCrimeEnabledInput.checked = true;
         const _allCrimeIds = ['gang', '1', '2', 'drug', '3', '4', '5', '6', '7', 'gta', 'melt'];
         const _cur = getSetting('enabledActions', _allCrimeIds);
         const _restored = [...new Set([..._cur, ..._allCrimeIds])];
