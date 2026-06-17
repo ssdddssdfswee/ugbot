@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Full UG Bot
 // @namespace    ug-bot
-// @version      2.2.29
+// @version      2.3.4
 // @description  Auto-runs crimes, GTA, melting, repair, missions, drug running with Swiss Bank management, live log, session stats, action checkboxes, jail handling, runtime tracking, melt pagination, repair cycles, automatic CTC solving, and point-spending features.
 // @match        *://www.underworldgangsters.com/*
 // @match        *://underworldgangsters.com/*
@@ -14,6 +14,17 @@
 
 (function () {
     'use strict';
+
+    // ── Page load watchdog ────────────────────────────────────────────────────
+    // If the page never fires the load event (stuck mid-load due to lag),
+    // navigate to the same URL as a fresh GET after 60 seconds.
+    // Uses href assignment rather than reload() to avoid POST resubmission prompts.
+    const _ugLoadWatchdog = setTimeout(() => {
+        if (document.readyState !== 'complete') {
+            window.location.href = window.location.href;
+        }
+    }, 60000);
+    window.addEventListener('load', () => clearTimeout(_ugLoadWatchdog));
 
     // Suppress native alert() dialogs from the game's own scripts.
     // Tampermonkey sandboxes the userscript window from the page window, so
@@ -542,7 +553,7 @@
     // BOT CONFIG
     // =========================================================================
 
-    const SCRIPT_VERSION = '2.2.29';
+    const SCRIPT_VERSION = '2.3.0';
 
     const CRIME_DEFS = [
         { id: 'gang', name: 'Gang Activities' },
@@ -644,20 +655,13 @@
         leaveJailEnabled:   false,
         leaveJailMinPoints: 50,
 
-        // Timer reset settings — mutually exclusive (including bust)
         resetCrimesEnabled:  false,
         resetCrimesFastMode: false,
         resetGTAEnabled:     false,
         resetMeltEnabled:    false,
         resetTimerMinPoints: 200,
-
-        // Bust settings
-        bustEnabled:  false,
-        bustFastMode: false,
-        bustNoReload: false,
-        bustPollMin:  800,
-        bustPollMax:  1200,
         bgCrimeEnabled: false,
+        diceJoinEnabled: true,
         bulletFactoryEnabled: false,
         qtBgEnabled:         false,
         qtBgThreshold:       1320,
@@ -666,29 +670,56 @@
         qtBulletsMin:        0,
         qtPerkExtendEnabled: false,
         qtPerkExtendMins:    5,
+        qtPerkRedeemEnabled: false,
+        qtPerkRedeemMins:    30,
+        autoBuyBgEnabled:   false,
+        autoBuyBgMinPts:    1300,
+        autoBuyBgMins:      60,
         qtPollMin:           2000,
         qtPollMax:           4000,
         qtPointsEnabled:     false,
         qtPointsThreshold:   15000000,
+        // QT perk sniper — per-type toggles, max point price, min amount
+        qtBustEnabled:       false,
+        qtBustMaxPts:        3,    // max pts per min
+        qtBustMinMins:       30,
+        qtAlwaysSuccEnabled: false,
+        qtAlwaysSuccMaxPts:  3,    // max pts per min
+        qtAlwaysSuccMinMins: 30,
+        qtDoubleMeltsEnabled: false,
+        qtDoubleMeltsMaxPts:  3,   // max pts per car
+        qtDoubleMeltsMinCars: 50,
+        qtDoubleXpEnabled:   false,
+        qtDoubleXpMaxPts:    3,    // max pts per min
+        qtDoubleXpMinMins:   100,
+        qtDoubleCashEnabled: false,
+        qtDoubleCashMaxPts:  3,    // max pts per min
+        qtDoubleCashMinMins: 30,
+        qtRareEnabled:       false,
+        qtRareMaxPts:        3,    // max pts per car
+        qtRareMinCars:       50,
+        qtBulletValueEnabled: false,
+        qtBulletValueMaxPts:  3,   // max pts per car
+        qtBulletValueMinCars: 20,
 
         // QT car scanner
         qtCarsEnabled:       false,
         qtCarsScanInterval:  30, // seconds
         qtCarsTypes: [
-            { b: 28, name: 'Orange',                    enabled: false, maxPrice: 100000000  },
-            { b: 27, name: 'Black Lamborghini Aventador', enabled: false, maxPrice: 100000000 },
-            { b: 26, name: 'Black Range Rover Evoque',  enabled: false, maxPrice: 100000000  },
-            { b: 25, name: 'Black Audi RS5',            enabled: false, maxPrice: 100000000  },
-            { b: 24, name: 'Black BMW M3',              enabled: false, maxPrice: 100000000  },
-            { b: 23, name: 'Black Audi A3',             enabled: false, maxPrice: 100000000  },
-            { b: 22, name: 'RS Tuner',                  enabled: false, maxPrice: 100000000  },
-            { b: 21, name: 'Tuner',                     enabled: false, maxPrice: 100000000  },
-            { b: 20, name: 'McLaren P1',                enabled: false, maxPrice: 100000000  },
-            { b: 19, name: 'Jaguar F-Type',             enabled: false, maxPrice: 100000000  },
-            { b: 18, name: 'Mercedes E63',              enabled: false, maxPrice: 100000000  },
-            { b: 17, name: 'Porsche Panamera',          enabled: false, maxPrice: 100000000  },
-            { b: 16, name: 'Range Rover Sport',         enabled: false, maxPrice: 100000000  },
-            { b: 15, name: 'Mercedes GLC Coupe',        enabled: false, maxPrice: 100000000  },
+            { b: 28, name: 'Orange',                    enabled: false, maxPrice: 10000000000 },
+            { b: 27, name: 'Black Lamborghini Aventador', enabled: false, maxPrice: 1000000000 },
+            { b: 26, name: 'Black Range Rover Evoque',  enabled: false, maxPrice: 1000000000  },
+            { b: 25, name: 'Black Audi RS5',            enabled: false, maxPrice: 1000000000  },
+            { b: 24, name: 'Black BMW M3',              enabled: false, maxPrice: 1000000000  },
+            { b: 23, name: 'Black Audi A3',             enabled: false, maxPrice: 1000000000  },
+            { b: 22, name: 'RS Tuner',                  enabled: false, maxPrice: 100000000   },
+            { b: 21, name: 'Tuner',                     enabled: false, maxPrice: 10000000    },
+            { b: 20, name: 'McLaren P1',                enabled: false, maxPrice: 1000000     },
+            { b: 19, name: 'Jaguar F-Type',             enabled: false, maxPrice: 1000000     },
+            { b: 18, name: 'Mercedes E63',              enabled: false, maxPrice: 1000000     },
+            { b: 17, name: 'Porsche Panamera',          enabled: false, maxPrice: 1000000     },
+            { b: 16, name: 'Range Rover Sport',         enabled: false, maxPrice: 1000000     },
+            { b: 15, name: 'Mercedes GLC Coupe',        enabled: false, maxPrice: 1000000     },
         ],
 
         // Kill scanner settings
@@ -705,12 +736,27 @@
         killBgCheckIntervalHrs:  6,      // Hours between BG checks per player
         killPenaltyThreshold:    0,      // Max kill penalty multiplier (0 = disabled)
 
-        maxLiveLogEntries: 500,
+        maxLiveLogEntries: 1000,
 
         // Human page visit settings
         humanPageVisitChance: 0.08,  // 8% chance per natural pause point
         humanPageVisitMinMs: 3000,
         humanPageVisitMaxMs: 8000,
+
+        // No reload bust
+        bustNoReload: false,
+        bustPollMin:  800,
+        bustPollMax:  1200,
+
+        // Extend perk thresholds
+        extendBulletsThreshold:      7500,
+        extendRaresThreshold:        50,
+        extendDoubleMeltsThreshold:  50,
+        extendBulletValueThreshold:  50,
+        extendDoubleXpThreshold:     50,
+        extendAlwaysSuccThreshold:   50,
+        extendAlwaysBustThreshold:   50,
+        extendDoubleCashThreshold:   50,
     };
 
     const SAFETY = {
@@ -753,16 +799,31 @@
 
         // First run — generate a personality and store it permanently
         personalityJustGenerated = true;
+        return generatePersonality(false);
+    }
+
+    function generatePersonality(dupeMode) {
         const shuffle = arr => arr.slice().sort(() => Math.random() - 0.5);
-        const pageCount = 6 + Math.floor(Math.random() * 7); // 6–12 pages
+        const pageCount = dupeMode
+            ? 3 + Math.floor(Math.random() * 4)   // 3–6 pages in dupe mode
+            : 6 + Math.floor(Math.random() * 7);  // 6–12 pages normally
         const personality = {
-            depositThreshold:    Math.floor(10000000 + Math.random() * 20000000), // $10M–$30M
-            drugDepositMult:     +(2 + Math.random() * 3).toFixed(1),             // 2.0–5.0
-            scanIntervalMins:    +(0.5 + Math.random() * 2).toFixed(1),           // 0.5–2.5 mins
-            timingOffsetMs:      Math.floor(-150 + Math.random() * 300),          // -150ms to +150ms
+            dupeMode,
+            depositThreshold:    Math.floor(10000000 + Math.random() * 20000000),
+            drugDepositMult:     +(2 + Math.random() * 3).toFixed(1),
+            scanIntervalMins:    +(0.5 + Math.random() * 2).toFixed(1),
+            timingOffsetMs:      Math.floor(-150 + Math.random() * 300),
             humanPages:          shuffle(HUMAN_PAGES).slice(0, pageCount),
-            idleVisitChancePct:  5 + Math.floor(Math.random() * 8),              // 5–12%
-            idleMinMs:           20000 + Math.floor(Math.random() * 40000),       // 20–60s idle
+            idleVisitChancePct:  dupeMode ? 3  + Math.floor(Math.random() * 12) : 5 + Math.floor(Math.random() * 8),
+            idleMinMs:           dupeMode ? 15000 + Math.floor(Math.random() * 75000) : 20000 + Math.floor(Math.random() * 40000),
+            navDelayMin:         dupeMode ? 800  + Math.floor(Math.random() * 700)  : DEFAULTS.navDelayMin,
+            navDelayMax:         dupeMode ? 1800 + Math.floor(Math.random() * 1200) : DEFAULTS.navDelayMax,
+            heartbeatMs:         dupeMode ? 700  + Math.floor(Math.random() * 600)  : DEFAULTS.heartbeatMs,
+            gtaDelayChancePct:   dupeMode ? 20   + Math.floor(Math.random() * 40)   : 0,
+            gtaDelayExtraMs:     dupeMode ? 5000 + Math.floor(Math.random() * 25000): 0,
+            jailNavigateAway:    dupeMode ? Math.random() < 0.5                      : false,
+            jailLeaveDelayMs:    dupeMode ? 2000 + Math.floor(Math.random() * 8000) : 0,
+            crimePageLingerMs:   dupeMode ? Math.floor(Math.random() * 3000)        : 0,
         };
         GM_setValue('ugbot_personality', personality);
         return personality;
@@ -795,7 +856,7 @@
 
         lastHumanVisitAt = Date.now();
         addLiveLog(`[Human] Visiting ?p=${page}`);
-        await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+        await wait(navRand());
         gotoPage(page);
         return true;
     }
@@ -881,20 +942,10 @@
 
         get meltResetLoopActive()  { return !!getSetting('meltResetLoopActive', false); },
         set meltResetLoopActive(v) { setSetting('meltResetLoopActive', !!v); },
-
-        get bustEnabled()          { return !!getSetting('bustEnabled', DEFAULTS.bustEnabled); },
-        set bustEnabled(v)         { setSetting('bustEnabled', !!v); },
-
-        get bustFastMode()         { return !!getSetting('bustFastMode', DEFAULTS.bustFastMode); },
-        set bustFastMode(v)        { setSetting('bustFastMode', !!v); },
-        get bustNoReload()         { return !!getSetting('bustNoReload', DEFAULTS.bustNoReload); },
-        set bustNoReload(v)        { setSetting('bustNoReload', !!v); },
-        get bustPollMin()          { return getSetting('bustPollMin', DEFAULTS.bustPollMin); },
-        set bustPollMin(v)         { setSetting('bustPollMin', Number(v)); },
-        get bustPollMax()          { return getSetting('bustPollMax', DEFAULTS.bustPollMax); },
-        set bustPollMax(v)         { setSetting('bustPollMax', Number(v)); },
         get bgCrimeEnabled()       { return !!getSetting('bgCrimeEnabled', DEFAULTS.bgCrimeEnabled); },
         set bgCrimeEnabled(v)      { setSetting('bgCrimeEnabled', !!v); },
+        get diceJoinEnabled()      { return !!getSetting('diceJoinEnabled', DEFAULTS.diceJoinEnabled); },
+        set diceJoinEnabled(v)     { setSetting('diceJoinEnabled', !!v); },
         get disableCrimesAtGb()    { return !!getSetting('disableCrimesAtGb', false); },
         set disableCrimesAtGb(v)   { setSetting('disableCrimesAtGb', !!v); },
         get disableGtaAtGb()       { return !!getSetting('disableGtaAtGb', false); },
@@ -903,10 +954,14 @@
         set bulletFactoryEnabled(v){ setSetting('bulletFactoryEnabled', !!v); },
         get pendingBulletRun()     { return getSetting('pendingBulletRun', null); },
         set pendingBulletRun(v)    { setSetting('pendingBulletRun', v); },
+        get pendingGunBuy()        { return getSetting('pendingGunBuy', null); },
+        set pendingGunBuy(v)       { setSetting('pendingGunBuy', v); },
         get lastBulletFactoryCheck(){ return Number(getSetting('lastBulletFactoryCheck', 0)); },
         set lastBulletFactoryCheck(v){ setSetting('lastBulletFactoryCheck', Number(v)); },
         get qtBgEnabled()          { return !!getSetting('qtBgEnabled', DEFAULTS.qtBgEnabled); },
         set qtBgEnabled(v)         { setSetting('qtBgEnabled', !!v); },
+        get qtPerksEnabled()       { return !!getSetting('qtPerksEnabled', true); },
+        set qtPerksEnabled(v)      { setSetting('qtPerksEnabled', !!v); },
         get qtBgThreshold()        { return Number(getSetting('qtBgThreshold', DEFAULTS.qtBgThreshold)) || DEFAULTS.qtBgThreshold; },
         set qtBgThreshold(v)       { setSetting('qtBgThreshold', Number(v)); },
         get qtBulletsEnabled()     { return !!getSetting('qtBulletsEnabled', DEFAULTS.qtBulletsEnabled); },
@@ -919,6 +974,11 @@
         set qtPerkExtendEnabled(v) { setSetting('qtPerkExtendEnabled', !!v); },
         get qtPerkExtendMins()     { return Number(getSetting('qtPerkExtendMins', DEFAULTS.qtPerkExtendMins)) || DEFAULTS.qtPerkExtendMins; },
         set qtPerkExtendMins(v)    { setSetting('qtPerkExtendMins', Number(v)); },
+
+        get qtPerkRedeemEnabled()  { return !!getSetting('qtPerkRedeemEnabled', DEFAULTS.qtPerkRedeemEnabled); },
+        set qtPerkRedeemEnabled(v) { setSetting('qtPerkRedeemEnabled', !!v); },
+        get qtPerkRedeemMins()     { return Number(getSetting('qtPerkRedeemMins', DEFAULTS.qtPerkRedeemMins)) || DEFAULTS.qtPerkRedeemMins; },
+        set qtPerkRedeemMins(v)    { setSetting('qtPerkRedeemMins', Number(v)); },
 
         // ── Auto Account Creation ─────────────────────────────────────────
         get accEnabled()   { return getSetting('accEnabled', false); },
@@ -942,15 +1002,61 @@
         get qtPointsThreshold()    { return Number(getSetting('qtPointsThreshold', DEFAULTS.qtPointsThreshold)) || DEFAULTS.qtPointsThreshold; },
         set qtPointsThreshold(v)   { setSetting('qtPointsThreshold', Number(v)); },
 
+        get qtBustEnabled()        { return !!getSetting('qtBustEnabled', DEFAULTS.qtBustEnabled); },
+        set qtBustEnabled(v)       { setSetting('qtBustEnabled', !!v); },
+        get qtBustMaxPts()         { return Number(getSetting('qtBustMaxPts', DEFAULTS.qtBustMaxPts)); },
+        set qtBustMaxPts(v)        { setSetting('qtBustMaxPts', Number(v)); },
+        get qtBustMinMins()        { return Number(getSetting('qtBustMinMins', DEFAULTS.qtBustMinMins)); },
+        set qtBustMinMins(v)       { setSetting('qtBustMinMins', Number(v)); },
+
+        get qtAlwaysSuccEnabled()  { return !!getSetting('qtAlwaysSuccEnabled', DEFAULTS.qtAlwaysSuccEnabled); },
+        set qtAlwaysSuccEnabled(v) { setSetting('qtAlwaysSuccEnabled', !!v); },
+        get qtAlwaysSuccMaxPts()   { return Number(getSetting('qtAlwaysSuccMaxPts', DEFAULTS.qtAlwaysSuccMaxPts)); },
+        set qtAlwaysSuccMaxPts(v)  { setSetting('qtAlwaysSuccMaxPts', Number(v)); },
+        get qtAlwaysSuccMinMins()  { return Number(getSetting('qtAlwaysSuccMinMins', DEFAULTS.qtAlwaysSuccMinMins)); },
+        set qtAlwaysSuccMinMins(v) { setSetting('qtAlwaysSuccMinMins', Number(v)); },
+
+        get qtDoubleMeltsEnabled() { return !!getSetting('qtDoubleMeltsEnabled', DEFAULTS.qtDoubleMeltsEnabled); },
+        set qtDoubleMeltsEnabled(v){ setSetting('qtDoubleMeltsEnabled', !!v); },
+        get qtDoubleMeltsMaxPts()  { return Number(getSetting('qtDoubleMeltsMaxPts', DEFAULTS.qtDoubleMeltsMaxPts)); },
+        set qtDoubleMeltsMaxPts(v) { setSetting('qtDoubleMeltsMaxPts', Number(v)); },
+        get qtDoubleMeltsMinCars() { return Number(getSetting('qtDoubleMeltsMinCars', DEFAULTS.qtDoubleMeltsMinCars)); },
+        set qtDoubleMeltsMinCars(v){ setSetting('qtDoubleMeltsMinCars', Number(v)); },
+
+        get qtDoubleXpEnabled()    { return !!getSetting('qtDoubleXpEnabled', DEFAULTS.qtDoubleXpEnabled); },
+        set qtDoubleXpEnabled(v)   { setSetting('qtDoubleXpEnabled', !!v); },
+        get qtDoubleXpMaxPts()     { return Number(getSetting('qtDoubleXpMaxPts', DEFAULTS.qtDoubleXpMaxPts)); },
+        set qtDoubleXpMaxPts(v)    { setSetting('qtDoubleXpMaxPts', Number(v)); },
+        get qtDoubleXpMinMins()    { return Number(getSetting('qtDoubleXpMinMins', DEFAULTS.qtDoubleXpMinMins)); },
+        set qtDoubleXpMinMins(v)   { setSetting('qtDoubleXpMinMins', Number(v)); },
+
+        get qtDoubleCashEnabled()  { return !!getSetting('qtDoubleCashEnabled', DEFAULTS.qtDoubleCashEnabled); },
+        set qtDoubleCashEnabled(v) { setSetting('qtDoubleCashEnabled', !!v); },
+        get qtDoubleCashMaxPts()   { return Number(getSetting('qtDoubleCashMaxPts', DEFAULTS.qtDoubleCashMaxPts)); },
+        set qtDoubleCashMaxPts(v)  { setSetting('qtDoubleCashMaxPts', Number(v)); },
+        get qtDoubleCashMinMins()  { return Number(getSetting('qtDoubleCashMinMins', DEFAULTS.qtDoubleCashMinMins)); },
+        set qtDoubleCashMinMins(v) { setSetting('qtDoubleCashMinMins', Number(v)); },
+
+        get qtRareEnabled()        { return !!getSetting('qtRareEnabled', DEFAULTS.qtRareEnabled); },
+        set qtRareEnabled(v)       { setSetting('qtRareEnabled', !!v); },
+        get qtRareMaxPts()         { return Number(getSetting('qtRareMaxPts', DEFAULTS.qtRareMaxPts)); },
+        set qtRareMaxPts(v)        { setSetting('qtRareMaxPts', Number(v)); },
+        get qtRareMinCars()        { return Number(getSetting('qtRareMinCars', DEFAULTS.qtRareMinCars)); },
+        set qtRareMinCars(v)       { setSetting('qtRareMinCars', Number(v)); },
+
+        get qtBulletValueEnabled() { return !!getSetting('qtBulletValueEnabled', DEFAULTS.qtBulletValueEnabled); },
+        set qtBulletValueEnabled(v){ setSetting('qtBulletValueEnabled', !!v); },
+        get qtBulletValueMaxPts()  { return Number(getSetting('qtBulletValueMaxPts', DEFAULTS.qtBulletValueMaxPts)); },
+        set qtBulletValueMaxPts(v) { setSetting('qtBulletValueMaxPts', Number(v)); },
+        get qtBulletValueMinCars() { return Number(getSetting('qtBulletValueMinCars', DEFAULTS.qtBulletValueMinCars)); },
+        set qtBulletValueMinCars(v){ setSetting('qtBulletValueMinCars', Number(v)); },
+
         get qtCarsEnabled()        { return !!getSetting('qtCarsEnabled', DEFAULTS.qtCarsEnabled); },
         set qtCarsEnabled(v)       { setSetting('qtCarsEnabled', !!v); },
         get qtCarsScanInterval()   { return Number(getSetting('qtCarsScanInterval', DEFAULTS.qtCarsScanInterval)) || DEFAULTS.qtCarsScanInterval; },
         set qtCarsScanInterval(v)  { setSetting('qtCarsScanInterval', Number(v)); },
         get qtCarsTypes()          { return getSetting('qtCarsTypes', DEFAULTS.qtCarsTypes); },
         set qtCarsTypes(v)         { setSetting('qtCarsTypes', v); },
-
-        get bustLoopActive()       { return !!getSetting('bustLoopActive', false); },
-        set bustLoopActive(v)      { setSetting('bustLoopActive', !!v); },
 
         // Kill scanner
         get killScanOnlineEnabled()   { return !!getSetting('killScanOnlineEnabled', DEFAULTS.killScanOnlineEnabled); },
@@ -980,14 +1086,20 @@
         // Timestamp of the last Players Online scan
         get killLastOnlineScan()      { return Number(getSetting('killLastOnlineScan', 0)); },
         set killLastOnlineScan(v)     { setSetting('killLastOnlineScan', Number(v)); },
+        get lastKnownGun()            { return getSetting('lastKnownGun', ''); },
+        set lastKnownGun(v)           { setSetting('lastKnownGun', v); },
 
         // Username currently being searched (persists across page reload)
         get killCurrentSearch()       { return getSetting('killCurrentSearch', ''); },
         set killCurrentSearch(v)      { setSetting('killCurrentSearch', String(v || '')); },
         get killBgWaitUntil()         { return Number(getSetting('killBgWaitUntil', 0)); },
         set killBgWaitUntil(v)        { setSetting('killBgWaitUntil', Number(v || 0)); },
+        get killBgShootPending()      { return getSetting('killBgShootPending', null); },
+        set killBgShootPending(v)     { setSetting('killBgShootPending', v); },
         get killLoopCooldownUntil()   { return Number(getSetting('killLoopCooldownUntil', 0)); },
-        set killLoopCooldownUntil(v)  { setSetting('killLoopCooldownUntil', Number(v || 0)); },
+        set killLoopCooldownUntil(v)  { setSetting('killLoopCooldownUntil', Number(v || 0)); if (v) addLiveLog(`Kill loop: cooldown set to ${Math.ceil((v - now()) / 1000)}s`); },
+        get killLoopYieldUntil()      { return Number(getSetting('killLoopYieldUntil', 0)); },
+        set killLoopYieldUntil(v)     { setSetting('killLoopYieldUntil', Number(v || 0)); },
         get penaltyDropsAt()          { return Number(getSetting('penaltyDropsAt', 0)); },
         set penaltyDropsAt(v)         { setSetting('penaltyDropsAt', Number(v) || 0); },
         get pendingPenaltyPage()      { return !!getSetting('pendingPenaltyPage', false); },
@@ -1003,14 +1115,25 @@
         set bfWithdrawFails(v)         { setSetting('bfWithdrawFails', Number(v)); },
         set killBgCheckEnabled(v)      { setSetting('killBgCheckEnabled', !!v); },
 
+        get killBgSpamEnabled()        { return !!getSetting('killBgSpamEnabled', false); },
+        set killBgSpamEnabled(v)       { setSetting('killBgSpamEnabled', !!v); },
+        get killBgSpamIntervalSecs()   { return Number(getSetting('killBgSpamIntervalSecs', 2)); },
+        set killBgSpamIntervalSecs(v)  { setSetting('killBgSpamIntervalSecs', Number(v)); },
+        get killBgSpamTarget()         { return getSetting('killBgSpamTarget', ''); },
+        set killBgSpamTarget(v)        { setSetting('killBgSpamTarget', String(v || '')); },
+        get killBgSpamPaused()         { return !!getSetting('killBgSpamPaused', false); },
+        set killBgSpamPaused(v)        { setSetting('killBgSpamPaused', !!v); },
+        get bgSpamTravelTarget()       { return getSetting('bgSpamTravelTarget', ''); },
+        set bgSpamTravelTarget(v)      { setSetting('bgSpamTravelTarget', String(v || '')); },
+
         get killShootEnabled()         { return !!getSetting('killShootEnabled', false); },
         set killShootEnabled(v)        { setSetting('killShootEnabled', !!v); },
 
         get killAnonymousShooting()    { return !!getSetting('killAnonymousShooting', false); },
         set killAnonymousShooting(v)   { setSetting('killAnonymousShooting', !!v); },
 
-        get killBgCheckIntervalHrs()   { return Math.max(1, Number(getSetting('killBgCheckIntervalHrs', 6)) || 6); },
-        set killBgCheckIntervalHrs(v)  { setSetting('killBgCheckIntervalHrs', Math.max(1, Number(v) || 6)); },
+        get killBgCheckIntervalHrs()   { return Math.max(0.083, Number(getSetting('killBgCheckIntervalHrs', 6)) || 6); },
+        set killBgCheckIntervalHrs(v)  { setSetting('killBgCheckIntervalHrs', Math.max(0.083, Number(v) || 6)); },
 
         get killPenaltyThreshold()     { return Number(getSetting('killPenaltyThreshold', 0)); },
         set killPenaltyThreshold(v)    { setSetting('killPenaltyThreshold', Number(v) || 0); },
@@ -1026,6 +1149,10 @@
         // Per-player shoot toggle — stored as array of names
         get killShootPlayers()         { return getSetting('killShootPlayers', []); },
         set killShootPlayers(v)        { setSetting('killShootPlayers', v); },
+
+        // Per-player BG farm toggle — stored as array of names
+        get killBgFarmPlayers()        { return getSetting('killBgFarmPlayers', []); },
+        set killBgFarmPlayers(v)       { setSetting('killBgFarmPlayers', v); },
 
         // Pending kill/BG check action — survives page reload
         get pendingKillAction()        { return getSetting('pendingKillAction', null); },
@@ -1045,6 +1172,9 @@
 
         get nextDriveReadyAt()     { return Number(getSetting('nextDriveReadyAt', 0)); },
         set nextDriveReadyAt(v)    { setSetting('nextDriveReadyAt', Number(v)); },
+
+        get jailReleasesAt()       { return Number(getSetting('jailReleasesAt', 0)); },
+        set jailReleasesAt(v)      { setSetting('jailReleasesAt', Number(v)); },
 
         get pendingMissionCheck()  { return getSetting('pendingMissionCheck', null); },
         set pendingMissionCheck(v) { setSetting('pendingMissionCheck', v); },
@@ -1094,7 +1224,114 @@
 
 
         get liveLog()  { return getSetting('liveLog', []); },
-        set liveLog(v) { setSetting('liveLog', v); }
+        set liveLog(v) { setSetting('liveLog', v); },
+
+        get bustNoReload()         { return !!getSetting('bustNoReload', DEFAULTS.bustNoReload); },
+        set bustNoReload(v)        { setSetting('bustNoReload', !!v); },
+        get bustPollMin()          { return getSetting('bustPollMin', DEFAULTS.bustPollMin); },
+        set bustPollMin(v)         { setSetting('bustPollMin', Number(v)); },
+        get bustPollMax()          { return getSetting('bustPollMax', DEFAULTS.bustPollMax); },
+        set bustPollMax(v)         { setSetting('bustPollMax', Number(v)); },
+
+        // Extend perk thresholds
+        get extendBulletsThreshold()      { return Number(getSetting('extendBulletsThreshold',     DEFAULTS.extendBulletsThreshold)); },
+        set extendBulletsThreshold(v)     { setSetting('extendBulletsThreshold',     Number(v)); },
+        get extendRaresThreshold()        { return Number(getSetting('extendRaresThreshold',       DEFAULTS.extendRaresThreshold)); },
+        set extendRaresThreshold(v)       { setSetting('extendRaresThreshold',       Number(v)); },
+        get extendDoubleMeltsThreshold()  { return Number(getSetting('extendDoubleMeltsThreshold', DEFAULTS.extendDoubleMeltsThreshold)); },
+        set extendDoubleMeltsThreshold(v) { setSetting('extendDoubleMeltsThreshold', Number(v)); },
+        get extendBulletValueThreshold()  { return Number(getSetting('extendBulletValueThreshold', DEFAULTS.extendBulletValueThreshold)); },
+        set extendBulletValueThreshold(v) { setSetting('extendBulletValueThreshold', Number(v)); },
+        get extendDoubleXpThreshold()     { return Number(getSetting('extendDoubleXpThreshold',    DEFAULTS.extendDoubleXpThreshold)); },
+        set extendDoubleXpThreshold(v)    { setSetting('extendDoubleXpThreshold',    Number(v)); },
+        get extendAlwaysSuccThreshold()   { return Number(getSetting('extendAlwaysSuccThreshold',  DEFAULTS.extendAlwaysSuccThreshold)); },
+        set extendAlwaysSuccThreshold(v)  { setSetting('extendAlwaysSuccThreshold',  Number(v)); },
+        get extendAlwaysBustThreshold()   { return Number(getSetting('extendAlwaysBustThreshold',  DEFAULTS.extendAlwaysBustThreshold)); },
+        set extendAlwaysBustThreshold(v)  { setSetting('extendAlwaysBustThreshold',  Number(v)); },
+        get extendDoubleCashThreshold()   { return Number(getSetting('extendDoubleCashThreshold',  DEFAULTS.extendDoubleCashThreshold)); },
+        set extendDoubleCashThreshold(v)  { setSetting('extendDoubleCashThreshold',  Number(v)); },
+
+        get bonusPerkOrder()   { return getSetting('bonusPerkOrder', '[]'); },
+        set bonusPerkOrder(v)  { setSetting('bonusPerkOrder', v); },
+
+        // Rank dropdowns
+        get disableCrimesRank()    { return getSetting('disableCrimesRank', 'Global Boss'); },
+        set disableCrimesRank(v)   { setSetting('disableCrimesRank', v); },
+        get disableGtaRank()       { return getSetting('disableGtaRank', 'Global Boss'); },
+        set disableGtaRank(v)      { setSetting('disableGtaRank', v); },
+
+        // Leave cash on hand
+        get leaveCashEnabled()     { return !!getSetting('leaveCashEnabled', false); },
+        set leaveCashEnabled(v)    { setSetting('leaveCashEnabled', !!v); },
+        get leaveCashOnHand()      { return Number(getSetting('leaveCashOnHand', 0)); },
+        set leaveCashOnHand(v)     { setSetting('leaveCashOnHand', Number(v)); },
+
+        // Bonus points
+        get bonusPointsEnabled()   { return !!getSetting('bonusPointsEnabled', false); },
+        set bonusPointsEnabled(v)  { setSetting('bonusPointsEnabled', !!v); },
+
+        get autoBuyBgEnabled()     { return !!getSetting('autoBuyBgEnabled', DEFAULTS.autoBuyBgEnabled); },
+        set autoBuyBgEnabled(v)    { setSetting('autoBuyBgEnabled', !!v); },
+        get autoBuyBgMinPts()      { return Number(getSetting('autoBuyBgMinPts', DEFAULTS.autoBuyBgMinPts)); },
+        set autoBuyBgMinPts(v)     { setSetting('autoBuyBgMinPts', Number(v)); },
+        get autoBuyBgMins()        { return Number(getSetting('autoBuyBgMins', DEFAULTS.autoBuyBgMins)); },
+        set autoBuyBgMins(v)       { setSetting('autoBuyBgMins', Number(v)); },
+
+        // Extend per-perk checkboxes
+        get extendBgs()            { return !!getSetting('extendBgs', false); },
+        set extendBgs(v)           { setSetting('extendBgs', !!v); },
+        get extendCars()           { return !!getSetting('extendCars', false); },
+        set extendCars(v)          { setSetting('extendCars', !!v); },
+        get extendBullets()        { return !!getSetting('extendBullets', false); },
+        set extendBullets(v)       { setSetting('extendBullets', !!v); },
+        get extendRares()          { return !!getSetting('extendRares', false); },
+        set extendRares(v)         { setSetting('extendRares', !!v); },
+        get extendDoubleMelts()    { return !!getSetting('extendDoubleMelts', false); },
+        set extendDoubleMelts(v)   { setSetting('extendDoubleMelts', !!v); },
+        get extendBulletValue()    { return !!getSetting('extendBulletValue', false); },
+        set extendBulletValue(v)   { setSetting('extendBulletValue', !!v); },
+        get extendDoubleXp()       { return !!getSetting('extendDoubleXp', false); },
+        set extendDoubleXp(v)      { setSetting('extendDoubleXp', !!v); },
+        get extendAlwaysSucc()     { return !!getSetting('extendAlwaysSucc', false); },
+        set extendAlwaysSucc(v)    { setSetting('extendAlwaysSucc', !!v); },
+        get extendAlwaysBust()     { return !!getSetting('extendAlwaysBust', false); },
+        set extendAlwaysBust(v)    { setSetting('extendAlwaysBust', !!v); },
+        get extendDoubleCash()     { return !!getSetting('extendDoubleCash', false); },
+        set extendDoubleCash(v)    { setSetting('extendDoubleCash', !!v); },
+
+        // Redeem per-perk checkboxes
+        get redeemBulletValue()    { return !!getSetting('redeemBulletValue', false); },
+        set redeemBulletValue(v)   { setSetting('redeemBulletValue', !!v); },
+        get redeemCash()           { return !!getSetting('redeemCash', false); },
+        set redeemCash(v)          { setSetting('redeemCash', !!v); },
+        get redeemCars()           { return !!getSetting('redeemCars', false); },
+        set redeemCars(v)          { setSetting('redeemCars', !!v); },
+        get redeemPairFloor()      { return Number(getSetting('redeemPairFloor', 100)); },
+        set redeemPairFloor(v)     { setSetting('redeemPairFloor', Number(v)); },
+        get redeemBg()             { return !!getSetting('redeemBg', false); },
+        set redeemBg(v)            { setSetting('redeemBg', !!v); },
+        get autoBuyGun()           { return !!getSetting('autoBuyGun', false); },
+        set autoBuyGun(v)          { setSetting('autoBuyGun', !!v); },
+        get autoBuyGunType()       { return getSetting('autoBuyGunType', 'awp'); }, // 'awp' or 'ak47'
+        set autoBuyGunType(v)      { setSetting('autoBuyGunType', v); },
+        get autoBuyGunPtThreshold(){ return Number(getSetting('autoBuyGunPtThreshold', 100)); },
+        set autoBuyGunPtThreshold(v){ setSetting('autoBuyGunPtThreshold', Number(v) || 100); },
+        get redeemBullets()        { return !!getSetting('redeemBullets', false); },
+        set redeemBullets(v)       { setSetting('redeemBullets', !!v); },
+        get redeemBulletsCap()     { return parseFloat(getSetting('redeemBulletsCap', 2.0)) || 2.0; },
+        set redeemBulletsCap(v)    { setSetting('redeemBulletsCap', parseFloat(v) || 2.0); },
+        get redeemDoubleXp()       { return !!getSetting('redeemDoubleXp', false); },
+        set redeemDoubleXp(v)      { setSetting('redeemDoubleXp', !!v); },
+        get redeemAlwaysSucc()     { return !!getSetting('redeemAlwaysSucc', false); },
+        set redeemAlwaysSucc(v)    { setSetting('redeemAlwaysSucc', !!v); },
+        get redeemDoubleCash()     { return !!getSetting('redeemDoubleCash', false); },
+        set redeemDoubleCash(v)    { setSetting('redeemDoubleCash', !!v); },
+        get redeemRare()           { return !!getSetting('redeemRare', false); },
+        set redeemRare(v)          { setSetting('redeemRare', !!v); },
+        get redeemDoubleMelt()     { return !!getSetting('redeemDoubleMelt', false); },
+        set redeemDoubleMelt(v)    { setSetting('redeemDoubleMelt', !!v); },
+        get redeemAlwaysBust()     { return !!getSetting('redeemAlwaysBust', false); },
+        set redeemAlwaysBust(v)    { setSetting('redeemAlwaysBust', !!v); }
     };
 
     // -------------------------------------------------------------------------
@@ -1105,14 +1342,13 @@
     // Cleared each time handleCrimesPage() is entered.
     let crimeResetUsedThisVisit = false;
 
-    // Prevents the bust success/failure message being logged repeatedly on
     // every heartbeat tick — only logs once per page load.
-    let bustResultHandledThisLoad = false;
 
     // Prevents the kill search result being logged repeatedly per page load.
     let killSearchResultHandledThisLoad = false;
 
     let loopBusy         = false;
+    let autoBuyGunBusy   = false;
     let reloadPending    = false;
     let heartbeatHandle  = null;
     let nextReloadHandle = null;
@@ -1134,18 +1370,15 @@
     let repairEveryEl               = null;
     let autoMissionsInput           = null;
     let autoGiveCarsInput           = null;
+    let drugCompModeInput           = null;
     let autoDrugsInput              = null;
     let drugDepositMultiplierEl     = null;
     let leaveJailInput              = null;
     let leaveJailMinPointsEl        = null;
-    let resetCrimesInput            = null;
+    let resetCrimesInput
     let resetCrimesFastModeInput    = null;
-    let bustEnabledInput            = null;
-    let bustFastModeInput           = null;
-    let bustNoReloadInput           = null;
-    let bustPollMinEl               = null;
-    let bustPollMaxEl               = null;
     let bgCrimeEnabledInput         = null;
+    let diceJoinEnabledInput        = null;
     let bulletFactoryEnabledInput   = null;
     let killProtectedRecheckInput   = null;
     let killProtectedRecheckMinsEl  = null;
@@ -1157,8 +1390,61 @@
     let qtCarsIntervalEl            = null;
     let qtPerkExtendEnabledInput    = null;
     let qtPerkExtendMinsEl          = null;
+    let qtPerkRedeemEnabledInput    = null;
+    let qtPerkRedeemMinsEl          = null;
+    let disableCrimesRankEl         = null;
+    let disableGtaRankEl            = null;
+    let leaveCashEnabledInput       = null;
+    let leaveCashOnHandEl           = null;
+    let bonusPointsEnabledInput     = null;
+    let autoBuyBgEnabledInput       = null;
+    let autoBuyBgMinPtsEl           = null;
+    let autoBuyBgMinsEl             = null;
+    let extendBgsInput              = null;
+    let extendCarsInput             = null;
+    let extendBulletsInput          = null;
+    let extendRaresInput            = null;
+    let extendDoubleMeltsInput      = null;
+    let extendBulletValueInput      = null;
+    let extendDoubleXpInput         = null;
+    let extendAlwaysSuccInput       = null;
+    let extendAlwaysBustInput       = null;
+    let extendDoubleCashInput       = null;
+    let redeemBulletValueInput      = null;
+    let redeemCashInput             = null;
+    let redeemCarsInput             = null;
+    let redeemPairFloorEl           = null;
+    let redeemBgInput               = null;
+    let redeemBulletsInput          = null;
+    let redeemDoubleXpInput         = null;
+    let redeemAlwaysSuccInput       = null;
+    let redeemDoubleCashInput       = null;
+    let redeemRareInput             = null;
+    let redeemDoubleMeltInput       = null;
+    let redeemAlwaysBustInput       = null;
     let qtBulletsMinEl              = null;
     let qtPollMinEl                 = null;
+    let qtBustEnabledInput          = null;
+    let qtBustMaxPtsEl              = null;
+    let qtBustMinAmtEl              = null;
+    let qtAlwaysSuccEnabledInput    = null;
+    let qtAlwaysSuccMaxPtsEl        = null;
+    let qtAlwaysSuccMinAmtEl        = null;
+    let qtDoubleMeltsEnabledInput   = null;
+    let qtDoubleMeltsMaxPtsEl       = null;
+    let qtDoubleMeltsMinAmtEl       = null;
+    let qtDoubleXpEnabledInput      = null;
+    let qtDoubleXpMaxPtsEl          = null;
+    let qtDoubleXpMinAmtEl          = null;
+    let qtDoubleCashEnabledInput    = null;
+    let qtDoubleCashMaxPtsEl        = null;
+    let qtDoubleCashMinAmtEl        = null;
+    let qtRareEnabledInput          = null;
+    let qtRareMaxPtsEl              = null;
+    let qtRareMinAmtEl              = null;
+    let qtBulletValueEnabledInput   = null;
+    let qtBulletValueMaxPtsEl       = null;
+    let qtBulletValueMinAmtEl       = null;
     let qtPollMaxEl                 = null;
     let qtPointsEnabledInput        = null;
     let qtPointsThresholdEl         = null;
@@ -1166,6 +1452,9 @@
     let killScanIntervalEl          = null;
     let killSearchInput             = null;
     let killBgCheckInput            = null;
+    let killBgSpamInput             = null;
+    let killBgSpamIntervalEl        = null;
+    let killBgSpamTargetEl          = null;
     let killShootInput              = null;
     let killAnonymousInput          = null;
     let killBgCheckIntervalEl       = null;
@@ -1177,6 +1466,21 @@
     let compactBtn                  = null;
     let hideBtn                     = null;
     let closeBtn                    = null;
+
+    // No reload bust
+    let bustNoReloadInput           = null;
+    let bustPollMinEl               = null;
+    let bustPollMaxEl               = null;
+
+    // Extend perk threshold inputs
+    let extendBulletsThreshEl       = null;
+    let extendRaresThreshEl         = null;
+    let extendDoubleMeltsThreshEl   = null;
+    let extendBulletValueThreshEl   = null;
+    let extendDoubleXpThreshEl      = null;
+    let extendAlwaysSuccThreshEl    = null;
+    let extendAlwaysBustThreshEl    = null;
+    let extendDoubleCashThreshEl    = null;
 
     function log(...args) {
         if (DEFAULTS.logToConsole) console.log('[UG-BOT]', ...args);
@@ -1239,12 +1543,12 @@
         crimeResetUsedThisVisit   = false;
         state.gtaResetLoopActive  = false;
         state.meltResetLoopActive = false;
-        state.bustLoopActive      = false;
         state.killSearchLoopActive = false;
         state.killLoopActive       = false;
         state.killSearchIndex      = 0;
         state.killCurrentSearch    = '';
         state.pendingKillAction    = null;
+        state.killBgShootPending   = null;
         clearPendingMeltResult();
         renderLiveLog();
         addLiveLog('Session log cleared');
@@ -1306,6 +1610,11 @@
 
     function rand(min, max) {
         return Math.floor(Math.random() * (max - min + 1)) + min;
+    }
+
+    // Navigation delay — uses personality values so dupe accounts feel slower/different
+    function navRand() {
+        return rand(PERSONALITY.navDelayMin, PERSONALITY.navDelayMax);
     }
 
     function wait(ms) {
@@ -1388,6 +1697,16 @@
         cancelCurrentRun();
         stopHeartbeat();
         stopJailObserver();
+        stopBgCrime();
+        stopDiceJoiner();
+        stopQTSniper();
+        stopQTPerkExtender();
+        stopQTPerkRedeemer();
+        stopQTCarScanner();
+        stopNoReloadBust();
+        stopAutoBuyBg();
+        stopBonusPointsSpender();
+        stopBustObserver();
         clearScheduledReload();
         state.gtaResetLoopActive   = false;
         state.meltResetLoopActive  = false;
@@ -1396,8 +1715,6 @@
         state.killLoopActive       = false;
         state.killCurrentSearch    = '';
         state.pendingKillAction    = null;
-        stopBustObserver();
-        stopDiceJoiner();
         updatePanel();
         addLiveLog(`Paused: ${reason}`);
     }
@@ -1546,11 +1863,17 @@
         if (!isCrimesPage())           return false;
 
         const money     = getPlayerMoney();
-        const threshold = state.autoDepositThreshold;
         const btn       = getQuickDepositButton();
+        if (!btn) return false;
 
-        if (!btn)              return false;
-        if (money < threshold) return false;
+        // Leave cash on hand overrides threshold
+        if (state.leaveCashEnabled && state.leaveCashOnHand > 0) {
+            if (money <= state.leaveCashOnHand) return false;
+            // Only deposit if surplus exists
+        } else {
+            const threshold = state.autoDepositThreshold;
+            if (money < threshold) return false;
+        }
 
         state.lastActionAt = Date.now();
 
@@ -1621,7 +1944,7 @@
 
     function getPlayerGunValue() {
         const gunName = (document.querySelector('#player-gun')?.textContent || '').trim().toLowerCase();
-        return GUN_VALUES[gunName] || 9; // default to AK47 if not found
+        return GUN_VALUES[gunName] ?? 0;
     }
 
     function getPlayerRankIndex() {
@@ -1670,7 +1993,8 @@
 
         if (gtaInfo.ms != null && gtaInfo.ms > 0) {
             const newReadyAt = now() + gtaInfo.ms;
-            if (newReadyAt > state.nextGTAReadyAt || isInternalGTAReady()) {
+            // Only update if it extends the timer — never reset a ready state backwards
+            if (newReadyAt > state.nextGTAReadyAt && !isInternalGTAReady()) {
                 state.nextGTAReadyAt = newReadyAt;
             }
             return true;
@@ -1700,7 +2024,8 @@
 
         if (meltInfo.ms != null && meltInfo.ms > 0) {
             const newReadyAt = now() + meltInfo.ms;
-            if (newReadyAt > state.nextMeltReadyAt || isInternalMeltReady()) {
+            // Only update if it extends the timer — never reset a ready state backwards
+            if (newReadyAt > state.nextMeltReadyAt && !isInternalMeltReady()) {
                 state.nextMeltReadyAt = newReadyAt;
             }
             return true;
@@ -2110,7 +2435,13 @@
         const capacity = state.drugCapacityCache;
         if (capacity <= 0) return false;
 
-        const cash       = getPlayerMoney();
+        const cash = getPlayerMoney();
+
+        // Leave cash on hand overrides swiss deposit multiplier
+        if (state.leaveCashEnabled && state.leaveCashOnHand > 0) {
+            return cash > state.leaveCashOnHand;
+        }
+
         const reserve    = calcDrugReserve(capacity);
         const multiplier = state.drugDepositMultiplier;
         const trigger    = reserve * multiplier;
@@ -2121,6 +2452,12 @@
     function calcSwissDepositAmount() {
         const capacity = state.drugCapacityCache;
         const cash     = getPlayerMoney();
+
+        // Leave cash on hand overrides calculation
+        if (state.leaveCashEnabled && state.leaveCashOnHand > 0) {
+            return Math.max(0, cash - state.leaveCashOnHand);
+        }
+
         const reserve  = calcDrugReserve(capacity);
         return Math.max(0, cash - reserve);
     }
@@ -2136,7 +2473,7 @@
 
         if (!pending) {
             addLiveLog('Bank page: no pending action — returning to crimes');
-            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            await wait(navRand());
             gotoPage('crimes');
             return;
         }
@@ -2149,7 +2486,7 @@
                 s.lastActionText    = `Swiss withdrew $${pending.amount.toLocaleString()}`;
             });
             state.pendingBankAction = null;
-            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            await wait(navRand());
             if (pending.source === 'bulletFactory' && pending.substage === 'topup') {
                 // Mid-run top-up — go back to the weaponry page for the current target
                 const run = state.pendingBulletRun;
@@ -2190,7 +2527,7 @@
                     gotoPage('crimes');
                 }
             } else {
-                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                await wait(navRand());
                 gotoPage('crimes');
             }
             return;
@@ -2210,7 +2547,7 @@
             } else {
                 addLiveLog(`Swiss Bank: withdraw of $${pending.amount.toLocaleString()} failed (attempt ${bfFails}/3) — retrying`);
             }
-            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            await wait(navRand());
             gotoPage('crimes');
             return;
         }
@@ -2222,7 +2559,7 @@
                 s.lastActionText  = `Swiss deposited $${pending.amount.toLocaleString()}`;
             });
             state.pendingBankAction = null;
-            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            await wait(navRand());
             gotoPage('crimes');
             return;
         }
@@ -2234,7 +2571,7 @@
         if (!submitted) {
             addLiveLog('Swiss Bank: submission failed — clearing pending action, returning to crimes');
             state.pendingBankAction = null;
-            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            await wait(navRand());
             gotoPage('crimes');
         }
     }
@@ -2394,7 +2731,7 @@
 
         // Set a pessimistic placeholder so the bot doesn't think drive is ready
         // immediately on the next page load. The tick sync will correct this.
-        state.nextDriveReadyAt = now() + 120000;
+        state.nextDriveReadyAt = now() + 60000;
 
         addLiveLog(`Drug run: driving to ${destinationName}`);
         return true;
@@ -2403,9 +2740,17 @@
     async function handleDrugsPage() {
         stopJailObserver();
 
+        // BG Spam takes priority — suppress drug run travel
+        if (state.killBgSpamEnabled && state.killBgSpamTarget && state.killBgCheckEnabled) {
+            addLiveLog('Drug run: suppressed — BG Spam active');
+            await wait(navRand());
+            gotoPage('crimes');
+            return;
+        }
+
         if (!isDrugsEnabled()) {
             addLiveLog('Drug running disabled — returning to crimes');
-            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            await wait(navRand());
             gotoPage('crimes');
             return;
         }
@@ -2462,7 +2807,7 @@
             addLiveLog('Drug run: no favourited car found — disabling drug running. Favourite a car via My Cars to enable driving.');
             state.autoDrugsEnabled = false;
             if (autoDrugsInput) autoDrugsInput.checked = false;
-            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            await wait(navRand());
             gotoPage('crimes');
             return;
         }
@@ -2471,12 +2816,12 @@
             const carLink = getDrugCarLink();
             if (!carLink) {
                 addLiveLog('Drug run: car too damaged but no car link found — returning to crimes');
-                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                await wait(navRand());
                 gotoPage('crimes');
                 return;
             }
             addLiveLog('Drug run: car too damaged — navigating to car page to repair');
-            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            await wait(navRand());
             window.location.href = new URL(carLink.getAttribute('href'), window.location.href).toString();
             return;
         }
@@ -2514,7 +2859,7 @@
         if (!isInternalDriveReady()) {
             const remaining = Math.ceil(getInternalDriveRemainingMs() / 1000);
             addLiveLog(`Drug run: drive not ready (${remaining}s) — returning to crimes`);
-            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            await wait(navRand());
             gotoPage('crimes');
             return;
         }
@@ -2526,7 +2871,7 @@
 
             } else if (capacity <= 0) {
                 addLiveLog('Drug run: capacity unknown — returning to crimes to wait for next visit');
-                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                await wait(navRand());
                 gotoPage('crimes');
                 return;
 
@@ -2537,12 +2882,12 @@
                 if (swiss >= shortfall) {
                     addLiveLog(`Drug run: insufficient cash ($${cash.toLocaleString()}) — withdrawing $${shortfall.toLocaleString()} from Swiss Bank`);
                     state.pendingBankAction = { type: 'withdraw', amount: shortfall };
-                    await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                    await wait(navRand());
                     gotoPage('bank');
                     return;
                 } else {
                     addLiveLog(`Drug run: insufficient funds — cash $${cash.toLocaleString()}, Swiss $${swiss.toLocaleString()}, need $${reserve.toLocaleString()} — skipping this run`);
-                    await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                    await wait(navRand());
                     gotoPage('crimes');
                     return;
                 }
@@ -2552,7 +2897,7 @@
                 const didBuy = await buyDrugs(drugToBuy, available);
                 if (!didBuy) {
                     addLiveLog('Drug run: buy failed — returning to crimes');
-                    await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                    await wait(navRand());
                     gotoPage('crimes');
                 }
                 return;
@@ -2568,12 +2913,12 @@
                 if (swiss >= shortfall) {
                     addLiveLog(`Drug run: withdrawing full Heroin reserve ($${reserve.toLocaleString()}) while in England to cover next USA buy`);
                     state.pendingBankAction = { type: 'withdraw', amount: shortfall };
-                    await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                    await wait(navRand());
                     gotoPage('bank');
                     return;
                 } else {
                     addLiveLog(`Drug run: insufficient funds — cash $${cash.toLocaleString()}, Swiss $${swiss.toLocaleString()}, need $${reserve.toLocaleString()} for Heroin reserve — skipping this run`);
-                    await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                    await wait(navRand());
                     gotoPage('crimes');
                     return;
                 }
@@ -2583,7 +2928,7 @@
             const didBuy = await buyDrugs(drugToBuy, available);
             if (!didBuy) {
                 addLiveLog('Drug run: buy failed — returning to crimes');
-                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                await wait(navRand());
                 gotoPage('crimes');
             }
             return;
@@ -2593,7 +2938,7 @@
             const didDrive = await driveToDestination(destValue, destName);
             if (!didDrive) {
                 addLiveLog('Drug run: drive failed — returning to crimes');
-                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                await wait(navRand());
                 gotoPage('crimes');
             }
             return;
@@ -2603,7 +2948,7 @@
         const didDriveToStart = await driveToDestination(DRUG_RUN_ROUTE.countryALocation, DRUG_RUN_ROUTE.countryA);
         if (!didDriveToStart) {
             addLiveLog('Drug run: could not drive to route start — returning to crimes');
-            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            await wait(navRand());
             gotoPage('crimes');
         }
     }
@@ -2613,14 +2958,14 @@
 
         if (!isDrugsEnabled()) {
             addLiveLog('Car page: drug running off — returning to crimes');
-            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            await wait(navRand());
             gotoPage('crimes');
             return;
         }
 
         if (hasCarRepairConfirmation()) {
             addLiveLog('Drug run: car repaired successfully — returning to drugs');
-            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            await wait(navRand());
             gotoPage('drugs');
             return;
         }
@@ -2629,7 +2974,7 @@
             const repairBtn = getCarPageRepairButton();
             if (!repairBtn) {
                 addLiveLog('Drug run: car damaged but no repair button — returning to crimes');
-                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                await wait(navRand());
                 gotoPage('crimes');
                 return;
             }
@@ -2646,7 +2991,7 @@
         }
 
         addLiveLog('Car page: car not damaged — returning to drugs');
-        await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+        await wait(navRand());
         gotoPage('drugs');
     }
 
@@ -2734,7 +3079,7 @@
         const threshold = state.killPenaltyThreshold;
         if (!threshold || threshold <= 0) return false;
         const penalty = getKillPenaltyMultiplier();
-        return penalty > threshold;
+        return penalty >= threshold;
     }
 
     // -------------------------------------------------------------------------
@@ -2775,6 +3120,48 @@
             list = list.filter(n => n.toLowerCase() !== lower);
         }
         state.killShootPlayers = list;
+    }
+
+    // Returns true if a player has BG farm enabled (per-player toggle)
+    function isPlayerBgFarmEnabled(name) {
+        const list = state.killBgFarmPlayers || [];
+        return list.some(n => n.toLowerCase() === name.toLowerCase());
+    }
+
+    function isPlayerBgSpamTarget(name) {
+        return state.killBgSpamTarget && state.killBgSpamTarget.toLowerCase() === (name || '').toLowerCase();
+    }
+
+    // Returns true if a player should receive periodic BG checks —
+    // either via BG Check toggle or BG Farm toggle
+    function isBgCheckable(name) {
+        return isPlayerBgCheckEnabled(name) || isPlayerBgFarmEnabled(name);
+    }
+
+    // Sets per-player BG farm toggle
+    function setPlayerBgFarmEnabled(name, enabled) {
+        let list = state.killBgFarmPlayers || [];
+        const lower = name.toLowerCase();
+        if (enabled) {
+            if (!list.some(n => n.toLowerCase() === lower)) list.push(name);
+            // Auto-select as spam target if none currently selected
+            if (!state.killBgSpamTarget) {
+                state.killBgSpamTarget = name;
+                if (killBgSpamTargetEl) killBgSpamTargetEl.value = name;
+            }
+        } else {
+            list = list.filter(n => n.toLowerCase() !== lower);
+            // If this was the spam target, fall back to next BG Farm player
+            if (state.killBgSpamTarget.toLowerCase() === lower) {
+                const next = list[0] || '';
+                state.killBgSpamTarget = next;
+                if (killBgSpamTargetEl) killBgSpamTargetEl.value = next;
+                if (!next) stopBgSpam();
+            }
+        }
+        state.killBgFarmPlayers = list;
+        updateBgSpamDropdown();
+        syncBgSpamState();
     }
 
     // Returns ms until next BG check is due for this player (negative = due now)
@@ -2999,7 +3386,7 @@
     // Finds the best travel car link on the cars list page (?p=cars).
     // Priority: Orange → RS Tuner → Black
     // Returns the absolute URL to the car detail page, or null if none found.
-    function findBestTravelCarUrl() {
+    function findBestTravelCarUrl(excludeUrls = []) {
         const allLinks = [...document.querySelectorAll('a[href*="?p=car&id="]')];
 
         // Build priority groups
@@ -3009,19 +3396,16 @@
 
         for (const link of allLinks) {
             const text = textOf(link).toLowerCase();
-            if (text.includes('orange'))   { orange.push(link);  continue; }
-            if (text.includes('rs tuner')) { rstuner.push(link); continue; }
-            if (text.includes('black'))    { black.push(link);   continue; }
+            let url;
+            try { url = new URL(link.getAttribute('href'), window.location.href).toString(); } catch(_) { continue; }
+            if (excludeUrls.includes(url)) continue;
+            if (text.includes('orange'))   { orange.push({ link, url });  continue; }
+            if (text.includes('rs tuner')) { rstuner.push({ link, url }); continue; }
+            if (text.includes('black'))    { black.push({ link, url });   continue; }
         }
 
-        const best = orange[0] || rstuner[0] || black[0] || null;
-        if (!best) return null;
-
-        try {
-            return new URL(best.getAttribute('href'), window.location.href).toString();
-        } catch (_) {
-            return null;
-        }
+        const best = (orange[0] || rstuner[0] || black[0]) || null;
+        return best ? best.url : null;
     }
 
     // Initiates kill loop travel — called when on the cars LIST page (?p=cars).
@@ -3099,30 +3483,26 @@
         if (!players.length) return null;
 
         const nowMs = now();
-        const PENDING_SKIP_MS = 2.5 * 60 * 60 * 1000; // 2.5hrs — skip if search expiry > now+2.5hrs
+        const PENDING_SKIP_MS = 2.5 * 60 * 60 * 1000;
 
-        // Priority 1: Unknown players — search immediately
-        // Skip if they appear to be in a pending state (recently set to 3hr expiry)
+        const RECENTLY_SEARCHED_MS = (state.killProtectedRecheckEnabled && state.killSearchEnabled)
+            ? state.killProtectedRecheckMins * 60 * 1000
+            : 5 * 60 * 1000;
+
+        // Priority 1: Protected players due for recheck — always before unknowns
+        const nextProtected = players.find(p =>
+            p.status === KILL_STATUS.PROTECTED &&
+            (nowMs - (p.lastChecked || 0)) >= RECENTLY_SEARCHED_MS
+        );
+        if (nextProtected) return nextProtected;
+
+        // Priority 2: Unknown players — search immediately
         const unknown = players.find(p => {
             if (p.status !== KILL_STATUS.UNKNOWN) return false;
             if (p.searchExpiresAt && (p.searchExpiresAt - nowMs) > PENDING_SKIP_MS) return false;
             return true;
         });
         if (unknown) return unknown;
-
-        // Priority 2: Protected players — search all of them whenever the loop
-        // runs. To cycle through all protected players rather than repeatedly
-        // searching the same one, skip any searched in the last 5 minutes.
-        // This allows the bot to work through the full list in one run.
-        // If killProtectedRecheckEnabled, use the user-defined interval instead.
-        const RECENTLY_SEARCHED_MS = (state.killProtectedRecheckEnabled && state.killSearchEnabled)
-            ? state.killProtectedRecheckMins * 60 * 1000
-            : 5 * 60 * 1000;
-        const nextProtected = players.find(p =>
-            p.status === KILL_STATUS.PROTECTED &&
-            (nowMs - (p.lastChecked || 0)) >= RECENTLY_SEARCHED_MS
-        );
-        if (nextProtected) return nextProtected;
 
         // Priority 3: Alive players with 3hrs or less remaining — re-search
         // to keep their location permanently active with no gap.
@@ -3303,6 +3683,11 @@
                 .map(a => { try { return new URL(a.getAttribute('href'), window.location.href).searchParams.get('u').toLowerCase(); } catch(_){ return ''; } })
                 .filter(Boolean)
         );
+        const pendingNamesOnPage = new Set(
+            [...document.querySelectorAll('.bgl.i.wb .bgm.chs.pd b')]
+                .map(b => b.textContent.trim().toLowerCase())
+                .filter(Boolean)
+        );
         let clearedStaleBg = false;
         for (const p of players) {
             if (!p.bodyguard) continue;
@@ -3310,7 +3695,7 @@
             const bgPlayer = players.find(b => b.name && b.name.toLowerCase() === bgNameLower);
             const isDead = bgPlayer && bgPlayer.status === KILL_STATUS.DEAD;
             const isGoneFromList = !bgPlayer;
-            const isOnPage = foundNamesOnPage.has(bgNameLower);
+            const isOnPage = foundNamesOnPage.has(bgNameLower) || pendingNamesOnPage.has(bgNameLower);
             if (isDead || (isGoneFromList && !isOnPage)) {
                 addLiveLog(`Kill scanner: clearing stale BG reference on ${p.name} — ${p.bodyguard} is ${isDead ? 'dead' : 'gone'}`);
                 p.bodyguard = null;
@@ -3339,7 +3724,7 @@
                     const idx = players.findIndex(p => p.name.toLowerCase() === name.toLowerCase());
                     if (idx !== -1) {
                         const p = players[idx];
-                        const relevant = isPlayerBgCheckEnabled(p.name) || isPlayerShootEnabled(p.name) || p.isBg;
+                        const relevant = isBgCheckable(p.name) || isPlayerShootEnabled(p.name) || p.isBg;
                         if (relevant) {
                             players[idx].expectedFoundAt = now() + foundInMs;
                         }
@@ -3350,9 +3735,10 @@
                                 t.name && p.bgFor && t.name.toLowerCase() === p.bgFor.toLowerCase()
                             );
                             if (targetPlayer && isPlayerShootEnabled(targetPlayer.name)) {
-                                const waitUntil = now() + foundInMs + (5 * 60 * 1000); // buffer of 5 mins
+                                const waitUntil = now() + foundInMs + (5 * 60 * 1000);
                                 if (state.killBgWaitUntil < waitUntil) {
                                     state.killBgWaitUntil = waitUntil;
+                                    state.killLoopActive  = false;
                                 }
                             }
                         }
@@ -3403,6 +3789,11 @@
                         const waitUntil = now() + foundInMs + (5 * 60 * 1000);
                         if (state.killBgWaitUntil < waitUntil) {
                             state.killBgWaitUntil = waitUntil;
+                        }
+                        // Only suppress kill loop if it's not running a BG Farm interval check
+                        const isBgCheckStage = state.pendingKillAction?.stage === 'bgcheck';
+                        if (!isBgCheckStage) {
+                            state.killLoopActive = false;
                             addLiveLog(`Kill loop: ${p.name}'s BG ${p.bodyguard} found in ${Math.ceil(foundInMs/60000)}m — suppressing kill loop`);
                         }
                     }
@@ -3488,27 +3879,34 @@
         if (fromKillLoop && state.killBgCheckEnabled && !isKillPenaltyTooHigh()) for (const p of players) {
             if (!p.isBg || !p.bgFor) continue;
             if (p.status !== KILL_STATUS.ALIVE) continue;
-            if (!isPlayerShootEnabled(p.bgFor)) continue;
+            if (!isPlayerShootEnabled(p.bgFor) && !isPlayerBgFarmEnabled(p.bgFor)) continue;
+            // Verify this BG is still the stored bodyguard for their target.
+            // If the target has a different BG stored, this player's flags are stale — detach them.
+            const bgForPlayer = players.find(pl => pl.name.toLowerCase() === p.bgFor.toLowerCase());
+            if (bgForPlayer && bgForPlayer.bodyguard && bgForPlayer.bodyguard.toLowerCase() !== p.name.toLowerCase()) {
+                addLiveLog(`Kill loop: ${p.name} is no longer BG for ${p.bgFor} (now ${bgForPlayer.bodyguard}) — clearing stale flags`);
+                delete p.isBg;
+                delete p.bgFor;
+                delete p.bgShootQueued;
+                saveKillPlayers(players);
+                continue;
+            }
             // Check combined bullet cost — need enough for BG shot AND original target
             // Target cost must account for penalty increasing after killing BG (+0.1x)
             const bgBullets      = p.requiredBullets || 0;
-            const targetPlayer   = players.find(t => t.name.toLowerCase() === p.bgFor.toLowerCase());
-            let targetBullets    = targetPlayer?.requiredBullets || 0;
-            if (targetBullets && targetPlayer) {
-                // Re-scale cached target bullets from stored penalty to post-kill penalty
-                const currentMult  = getKillPenaltyMultiplier();
-                const postKillMult = currentMult + 0.1;
-                targetBullets = Math.ceil(targetBullets * (postKillMult / Math.max(currentMult, 1.0)));
-            }
-            const totalRequired  = bgBullets + targetBullets;
             const currentBullets = getPlayerBullets();
-            if (totalRequired > 0 && currentBullets < totalRequired) {
-                addLiveLog(`Kill loop: not enough bullets for BG + target (need ${totalRequired.toLocaleString()}, have ${currentBullets.toLocaleString()}) — waiting`);
+            // Only block if we don't have enough for the BG shot itself
+            // Target kill cost is handled separately after BG is dead and target is checked
+            if (bgBullets && currentBullets < bgBullets) {
+                addLiveLog(`Kill loop: not enough bullets for BG shot of ${p.name} (need ${bgBullets.toLocaleString()}, have ${currentBullets.toLocaleString()}) — waiting`);
                 continue;
             }
-            if (bgBullets && currentBullets < bgBullets) continue;
             const pa = state.pendingKillAction;
             if (pa && (pa.stage === 'bg_shoot' || pa.targetName === p.name)) continue;
+            // Don't re-queue if kill loop is already travelling to or handling this BG
+            if (pa && ['travel','travel_car','bg_farm_check','bg_farm_shoot','bg_farm_result'].includes(pa.stage) &&
+                (pa.targetName?.toLowerCase() === p.name.toLowerCase() ||
+                 pa.bgFor?.toLowerCase() === p.bgFor?.toLowerCase())) continue;
             // Verify bodyguard is actually in Players Found right now before queuing shoot
             const inFoundNow = [...document.querySelectorAll('.bgl.i.wb .bgm.chs:not(.pd) a[href*="?p=profile&u="]')]
                 .some(a => { try { return new URL(a.getAttribute('href'), window.location.href).searchParams.get('u').toLowerCase() === p.name.toLowerCase(); } catch(_){ return false; } });
@@ -3528,9 +3926,16 @@
             // Mark as queued so syncKillExpiryFromPage doesn't re-queue on every visit
             const bgQIdx = players.findIndex(pl => pl.name.toLowerCase() === p.name.toLowerCase());
             if (bgQIdx !== -1) { players[bgQIdx].bgShootQueued = true; saveKillPlayers(players); }
+            // Clear bgFarmWaitUntil on the original target — search is done, acting now
+            const bgForIdx = players.findIndex(pl => pl.name.toLowerCase() === p.bgFor.toLowerCase());
+            if (bgForIdx !== -1 && players[bgForIdx].bgFarmWaitUntil) {
+                delete players[bgForIdx].bgFarmWaitUntil;
+                saveKillPlayers(players);
+            }
             state.pendingKillAction = { stage: 'bg_shoot', targetName: p.name, bgFor: p.bgFor, shootAfterBg: true };
-            state.killLoopActive  = true;
-            state.killBgWaitUntil = 0; // BG found — clear any pending wait
+            state.killLoopActive   = true;
+            state.killBgWaitUntil  = 0;
+            if (isPlayerBgFarmEnabled(p.bgFor)) state.killBgSpamPaused = true;
             break;
         }
 
@@ -3585,10 +3990,14 @@
                 const inFound = [...document.querySelectorAll('.bgl.i.wb .bgm.chs:not(.pd) a[href*="?p=profile&u="]')]
                     .some(a => { try { return new URL(a.getAttribute('href'), window.location.href).searchParams.get('u').toLowerCase() === p.name.toLowerCase(); } catch(_){ return false; } });
                 if (!inFound) return false;
+                // BG farm wait not expired — skip this player
+                if (isPlayerBgFarmEnabled(p.name) && p.bgFarmWaitUntil && p.bgFarmWaitUntil > Date.now()) return false;
+                // Skip if player has a bodyguard currently being searched — wait for BG search to resolve
+                if (p.bodyguard) return false;
                 // BG check due
-                if (isPlayerBgCheckEnabled(p.name) && getBgCheckDueMs(p) <= 0) return true;
+                if (isBgCheckable(p.name) && getBgCheckDueMs(p) <= 0) return true;
                 // Kill only — only reactivate if penalty not too high
-                if (isPlayerShootEnabled(p.name) && !isPlayerBgCheckEnabled(p.name) && !isKillPenaltyTooHigh()) return true;
+                if (isPlayerShootEnabled(p.name) && !isBgCheckable(p.name) && !isKillPenaltyTooHigh()) return true;
                 return false;
             });
             if (nowActive && !(state.killBgWaitUntil > Date.now())) {
@@ -3602,7 +4011,7 @@
         // This handles the case where bullets accumulate over time for a player already found
         // Skip entirely if a bg_shoot is already queued, or if called from search loop (not kill loop)
         const alreadyBgShooting = state.pendingKillAction?.stage === 'bg_shoot';
-        if (fromKillLoop && state.killBgCheckEnabled && !state.killLoopActive && !isKillPenaltyTooHigh() && !alreadyBgShooting) {
+        if (state.killBgCheckEnabled && !state.killLoopActive && !isKillPenaltyTooHigh() && !alreadyBgShooting) {
             const foundLinks = new Set([...document.querySelectorAll('.bgl.i.wb .bgm.chs:not(.pd) a[href*="?p=profile&u="]')]
                 .map(a => { try { return new URL(a.getAttribute('href'), window.location.href).searchParams.get('u').toLowerCase(); } catch(_){ return ''; } })
                 .filter(Boolean));
@@ -3611,21 +4020,20 @@
                 if (p.status !== KILL_STATUS.ALIVE) return false;
                 if (!isPlayerShootEnabled(p.name)) return false;
                 if (p.bodyguard) {
-                    // Player has a pending BG — check if BG is now in Players Found with enough combined bullets
+                    // Player has a pending BG — only check BG bullet cost
+                    // Target cost is checked separately when it's actually time to shoot the target
                     if (!foundLinks.has(p.bodyguard.toLowerCase())) return false;
-                    const bgPlayer = players.find(b => b.name && b.name.toLowerCase() === p.bodyguard.toLowerCase());
-                    const bgBullets     = bgPlayer?.requiredBullets || 0;
-                    const targetBullets = p.requiredBullets || 0;
-                    const totalRequired = bgBullets + targetBullets;
-                    if (totalRequired > 0 && currentBullets < totalRequired) {
-                        addLiveLog(`Kill loop: hoke found but need ${totalRequired.toLocaleString()} bullets total (have ${currentBullets.toLocaleString()}) — waiting`);
+                    const bgPlayer  = players.find(b => b.name && b.name.toLowerCase() === p.bodyguard.toLowerCase());
+                    const bgBullets = bgPlayer?.requiredBullets || 0;
+                    if (bgBullets > 0 && currentBullets < bgBullets) {
+                        addLiveLog(`Kill loop: BG found but need ${bgBullets.toLocaleString()} bullets for BG shot (have ${currentBullets.toLocaleString()}) — waiting`);
                         return false;
                     }
                     return true;
                 }
                 // Direct kill — no pending BG
                 if (!p.requiredBullets) return false;
-                const bulletBuffer = isPlayerBgCheckEnabled(p.name) ? 1 : 0;
+                const bulletBuffer = isBgCheckable(p.name) ? 1 : 0;
                 if (currentBullets < p.requiredBullets + bulletBuffer) return false;
                 if (!foundLinks.has(p.name.toLowerCase())) return false;
                 return true;
@@ -3653,7 +4061,7 @@
         stopJailObserver();
 
         if (!state.killScanOnlineEnabled) {
-            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            await wait(navRand());
             gotoPage('crimes');
             return;
         }
@@ -3665,7 +4073,7 @@
         addLiveLog(`Kill scanner: found ${names.length} online players, added ${added} new`);
         renderKillList();
 
-        await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+        await wait(navRand());
 
         // Only go directly to kill page if new unknown players were found.
         // If no new unknowns, return to normal script — the 1hr failsafe and
@@ -3690,14 +4098,34 @@
         if (!state.killSearchEnabled) {
             addLiveLog('Kill search disabled — returning to crimes');
             state.killSearchLoopActive = false;
-            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            await wait(navRand());
             gotoPage('crimes');
+            return;
+        }
+
+        // If kill loop has a pending action, let it take over — don't interfere with search loop
+        if (state.pendingKillAction && state.killLoopActive) {
+            state.killSearchLoopActive = false;
+            await handleKillLoopPage();
             return;
         }
 
         // Sync accurate expiry times from the "Players found" section on every
         // kill page load — this is more reliable than the 23hr fallback window.
-        syncKillExpiryFromPage();
+        // If BG check is enabled and a BG Farm player's known BG is in Players Found,
+        // pass fromKillLoop=true so the bg_shoot queuing logic can fire.
+        const _syncFromLoop = state.killBgCheckEnabled && (() => {
+            const _players = getKillPlayers();
+            const _foundNames = new Set(
+                [...document.querySelectorAll('.bgl.i.wb .bgm.chs:not(.pd) a[href*="?p=profile&u="]')]
+                    .map(a => { try { return new URL(a.getAttribute('href'), window.location.href).searchParams.get('u').toLowerCase(); } catch(_){ return ''; } })
+                    .filter(Boolean)
+            );
+            return _players.some(p =>
+                p.isBg && p.bgFor && p.status === KILL_STATUS.ALIVE && _foundNames.has(p.name.toLowerCase())
+            );
+        })();
+        syncKillExpiryFromPage(_syncFromLoop);
 
         // Detect manually searched players — read all names from "Your men are
         // out searching for" section and add any not already in the kill list
@@ -3728,7 +4156,7 @@
         if (state.killPenaltyThreshold > 0 && !state.pendingPenaltyPage) {
             const livePenalty = getKillPenaltyMultiplier(); // authoritative on kill page
             const cached = Number(getSetting('cachedKillPenalty', 1.0));
-            const penaltyTooHigh = livePenalty > state.killPenaltyThreshold;
+            const penaltyTooHigh = livePenalty >= state.killPenaltyThreshold;
             const penaltyChanged = Math.abs(livePenalty - cached) >= 0.05;
             const needsCalc = !state.penaltyDropsAt || penaltyChanged;
             // If live penalty is 1.0 (no penalty), ensure penaltyDropsAt is cleared
@@ -3738,7 +4166,7 @@
                 const reason = penaltyChanged ? `penalty changed (${cached}x → ${livePenalty}x)` : `penalty ${livePenalty}x exceeds threshold`;
                 addLiveLog(`Kill loop: ${reason} — navigating to penalty page`);
                 state.pendingPenaltyPage = true;
-                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                await wait(navRand());
                 gotoPage('kill-penalty');
                 return;
             }
@@ -3788,9 +4216,37 @@
             if (current) {
                 if (hasKillDeadMessage()) {
                     killSearchResultHandledThisLoad = true;
+                    addLiveLog(`Kill scanner: ${current} is dead — removed from list`);
+                    // Check if this was a BG for a BG Farm player — trigger BG check on that player
+                    const allPlayers = state.killPlayers || [];
+                    const deadPlayer = allPlayers.find(p => p.name.toLowerCase() === current.toLowerCase());
+                    const bgForName = deadPlayer?.bgFor || null;
                     updateKillPlayerStatus(current, KILL_STATUS.DEAD);
                     state.killCurrentSearch = '';
                     renderKillList();
+                    // If dead player was a BG for a BG Farm player, do BG check now
+                    if (bgForName && isPlayerBgFarmEnabled(bgForName)) {
+                        addLiveLog(`Kill scanner: ${current} was BG for ${bgForName} — triggering BG Farm check`);
+                        // Clear bgFarmWaitUntil — the BG search is no longer relevant
+                        const plFarm = state.killPlayers || [];
+                        const farmIdx = plFarm.findIndex(p => p.name.toLowerCase() === bgForName.toLowerCase());
+                        if (farmIdx !== -1) {
+                            delete plFarm[farmIdx].bgFarmWaitUntil;
+                            delete plFarm[farmIdx].bodyguard;
+                            saveKillPlayers(plFarm);
+                        }
+                        state.pendingKillAction = {
+                            stage:        'bg_farm_check',
+                            targetName:   bgForName,
+                            shootAfterBg: isPlayerShootEnabled(bgForName),
+                        };
+                        state.killLoopActive   = true;
+                        state.killBgSpamPaused = true;
+                        stopBgSpam();
+                        await wait(navRand());
+                        gotoPage('kill');
+                        return;
+                    }
                 } else if (hasKillUncillableMessage()) {
                     killSearchResultHandledThisLoad = true;
                     updateKillPlayerStatus(current, KILL_STATUS.UNKILLABLE);
@@ -3829,12 +4285,12 @@
                     p.status === KILL_STATUS.ALIVE || p.status === KILL_STATUS.UNKNOWN
                 );
                 const hasBgDue = alivePlayers.some(p =>
-                    isPlayerBgCheckEnabled(p.name) && getBgCheckDueMs(p) <= 0
+                    isBgCheckable(p.name) && getBgCheckDueMs(p) <= 0
                 );
                 const hasKillable = alivePlayers.some(p => {
                     if (!isPlayerShootEnabled(p.name)) return false;
                     if (p.requiredBullets && getPlayerBullets() < p.requiredBullets) return false;
-                    if (isPlayerBgCheckEnabled(p.name) && getBgCheckDueMs(p) <= 0) return false;
+                    if (isBgCheckable(p.name) && getBgCheckDueMs(p) <= 0) return false;
                     return true;
                 });
                 if (hasBgDue || hasKillable) {
@@ -3844,7 +4300,8 @@
                     if (!state.killLoopActive) {
                         addLiveLog('Kill scanner: no targets right now — reverting to normal script (toggle stays on)');
                         state.killSearchLoopActive = false;
-                        await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                        setSetting('killSearchNoTargetUntil', Date.now() + 60000); // 60s cooldown
+                        await wait(navRand());
                         gotoPage('crimes');
                         return;
                     }
@@ -3857,7 +4314,7 @@
             state.killSearchLoopActive = false;
             // Set a cooldown so the protected recheck interval can't immediately reactivate the loop
             setSetting('killSearchNoTargetUntil', Date.now() + 60000); // 60s cooldown
-            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            await wait(navRand());
             gotoPage('crimes');
             return;
         }
@@ -3911,6 +4368,7 @@
         const el = document.querySelector('#ug-bot-kill-list');
         if (!el) return;
 
+        updateBgSpamDropdown();
         const players = getKillPlayers();
 
         if (!players.length) {
@@ -3939,10 +4397,10 @@
             html += `<div class="ug-kill-group-title">${escapeHtml(group.label)} (${group.players.length})</div>`;
 
             // Table approach — immune to flex/CSS interference from the game
-            html += `<table style="width:100%;border-collapse:collapse;table-layout:fixed;">`;
+            html += `<table class="ug-kill-table" style="width:100%;border-collapse:collapse;table-layout:fixed;">`;
             if (canBgCheck) {
-                html += `<colgroup><col style="width:auto;"/><col style="width:80px;"/><col style="width:46px;"/><col style="width:22px;"/><col style="width:22px;"/></colgroup>`;
-                html += `<tr><td style="font-size:9px;color:#555;padding:0;"></td><td style="font-size:9px;color:#ccc;padding:0 4px 2px 0;">Country</td><td style="font-size:9px;color:#ccc;text-align:right;padding:0 4px 2px 0;">Time</td><td style="font-size:9px;color:#ccc;text-align:center;padding:0 0 2px 0;">BG</td><td style="font-size:9px;color:#ccc;text-align:center;padding:0 0 2px 0;">Kill</td></tr>`;
+                html += `<colgroup><col style="width:90px;"/><col style="width:62px;"/><col style="width:36px;"/><col style="width:22px;"/><col style="width:46px;"/><col style="width:40px;"/></colgroup>`;
+                html += `<tr><td></td><td style="font-size:9px;color:#aaa;padding:0 4px 2px 0 !important;">Country</td><td style="font-size:9px;color:#aaa;text-align:right;padding:0 4px 2px 0 !important;">Time</td><td style="font-size:9px;color:#aaa;text-align:center;padding:0 0 2px 0 !important;">Kill</td><td style="font-size:9px;color:#aaa;text-align:center;padding:0 0 2px 0 !important;">BG Check</td><td style="font-size:9px;color:#aaa;text-align:center;padding:0 0 2px 0 !important;">BG Farm</td></tr>`;
             } else if (status === KILL_STATUS.UNKILLABLE) {
                 html += `<colgroup><col style="width:auto;"/><col style="width:80px;"/><col style="width:46px;"/><col style="width:16px;"/></colgroup>`;
             } else {
@@ -3971,13 +4429,14 @@
 
                 // BG due indicator
                 let bgDue = '';
-                if (p.status === KILL_STATUS.ALIVE && p.lastBgCheck && isPlayerBgCheckEnabled(p.name)) {
+                if (p.status === KILL_STATUS.ALIVE && p.lastBgCheck && isBgCheckable(p.name)) {
                     const dueMs = getBgCheckDueMs(p);
                     if (dueMs <= 0) bgDue = ' ●';
                 }
 
                 const bgChecked    = canBgCheck && isPlayerBgCheckEnabled(p.name);
                 const shootChecked = canBgCheck && isPlayerShootEnabled(p.name);
+                const bgFarmChecked = canBgCheck && isPlayerBgFarmEnabled(p.name);
 
                 const country = p.country || '';
 
@@ -3996,11 +4455,12 @@
 
                 if (canBgCheck) {
                     html += `<tr>
-                        <td style="font-size:11px;color:${group.colour};padding:1px 0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:0;" title="${escapeHtml(p.name)}">${escapeHtml(p.name)}</td>
-                        <td style="font-size:9px;color:#888;padding:1px 4px 1px 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(country)}</td>
-                        <td style="font-size:9px;color:#ccc;text-align:right;padding:1px 4px 1px 0;white-space:nowrap;">${escapeHtml(meta)}${bgDue}</td>
-                        <td style="text-align:center;padding:1px 2px;"><div class="ug-kcb ug-kill-bg-cb ${bgChecked ? 'checked' : ''}" data-name="${escapeHtml(p.name)}" title="${escapeHtml(bgTooltip)}"></div></td>
-                        <td style="text-align:center;padding:1px 2px;"><div class="ug-kcb ug-kill-shoot-cb ${shootChecked ? 'checked' : ''}" data-name="${escapeHtml(p.name)}"></div></td>
+                        <td style="font-size:11px;color:${group.colour};padding:1px 4px 1px 0 !important;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;width:auto !important;" title="${escapeHtml(p.name)}">${escapeHtml(p.name)}</td>
+                        <td style="font-size:9px;color:#888;padding:1px 4px 1px 0 !important;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;width:62px !important;min-width:62px !important;max-width:62px !important;">${escapeHtml(country)}</td>
+                        <td style="font-size:9px;color:#ccc;text-align:right;padding:1px 4px 1px 0 !important;white-space:nowrap;width:36px !important;min-width:36px !important;max-width:36px !important;">${escapeHtml(meta)}${bgDue}</td>
+                        <td style="text-align:center;padding:1px 2px !important;width:22px !important;min-width:22px !important;max-width:22px !important;"><div class="ug-kcb ug-kill-shoot-cb ${shootChecked ? 'checked' : ''}" data-name="${escapeHtml(p.name)}"></div></td>
+                        <td style="text-align:center;padding:1px 2px !important;width:46px !important;min-width:46px !important;max-width:46px !important;"><div class="ug-kcb ug-kill-bg-cb ${bgChecked ? 'checked' : ''}" data-name="${escapeHtml(p.name)}" title="${escapeHtml(bgTooltip)}"></div></td>
+                        <td style="text-align:center;padding:1px 2px !important;width:40px !important;min-width:40px !important;max-width:40px !important;"><div class="ug-kcb ug-kill-bgfarm-cb ${bgFarmChecked ? 'checked' : ''}" data-name="${escapeHtml(p.name)}"></div></td>
                     </tr>`;
                 } else if (status === KILL_STATUS.UNKILLABLE) {
                     html += `<tr>
@@ -4019,7 +4479,7 @@
 
                 // Bodyguard sub-row
                 if (p.bodyguard) {
-                    const cols = canBgCheck ? 5 : 3;
+                    const cols = canBgCheck ? 6 : 3;
                     // Look up the BG player to get expectedFoundAt
                     const bgPlayer = players.find(b => b.name && b.name.toLowerCase() === p.bodyguard.toLowerCase());
                     let bgTimer = '';
@@ -4087,6 +4547,16 @@
                 if (isChecked && state.killBgCheckEnabled && !isKillPenaltyTooHigh()) state.killLoopActive = true;
             } else if (cb.classList.contains('ug-kill-shoot-cb')) {
                 setPlayerShootEnabled(name, isChecked);
+            } else if (cb.classList.contains('ug-kill-bgfarm-cb')) {
+                setPlayerBgFarmEnabled(name, isChecked);
+                // Auto-tick Kill when BG Farm is enabled
+                if (isChecked && !isPlayerShootEnabled(name)) {
+                    setPlayerShootEnabled(name, true);
+                    // Visually tick the Kill checkbox for this player
+                    const killCb = cb.closest('tr')?.querySelector('.ug-kill-shoot-cb');
+                    if (killCb) killCb.classList.add('checked');
+                }
+                if (isChecked && !isKillPenaltyTooHigh()) state.killLoopActive = true;
             }
         });
     }
@@ -4103,143 +4573,11 @@
     // BUST
     // =========================================================================
 
-    function hasBustPageMarkers() {
-        return currentPage() === 'jail' || !!document.querySelector('#jailn');
-    }
 
-    function isBustJailEmpty() {
-        return /the jail is empty!/i.test(textOf(document.querySelector('#jailn')));
-    }
 
-    function hasBustSuccess() {
-        return [...document.querySelectorAll('.bgm.cg')].some(el =>
-            /you helped .+ out of jail/i.test(textOf(el))
-        );
-    }
 
-    function hasBustFailure() {
-        return [...document.querySelectorAll('.bgm.cred')].some(el =>
-            /you failed helping .+ out of jail/i.test(textOf(el))
-        );
-    }
 
-    // Returns all bustable prisoner rows sorted by lowest time remaining first.
-    // Excludes our own row (which has the Leave Jail button instead of Bust).
-    function getBustCandidates() {
-        const rows = [...document.querySelectorAll('#jailn tr')];
-        const candidates = [];
 
-        for (const row of rows) {
-            const bustBtn = row.querySelector('input[type="submit"][value="Bust"]');
-            if (!bustBtn) continue; // skip our own row and header rows
-
-            const cells    = row.querySelectorAll('td');
-            if (cells.length < 2) continue;
-
-            const timerText = textOf(cells[1]);
-
-            // Parse seconds from "X seconds" text
-            let seconds = Infinity;
-            const secMatch = timerText.match(/(\d+)\s*seconds?/i);
-            if (secMatch) seconds = parseInt(secMatch[1], 10);
-
-            // Also handle "X minutes Y seconds" or "X minutes"
-            const minMatch = timerText.match(/(\d+)\s*minutes?/i);
-            if (minMatch) seconds = parseInt(minMatch[1], 10) * 60 + (secMatch ? parseInt(secMatch[1], 10) : 0);
-
-            candidates.push({ row, bustBtn, seconds, timerText });
-        }
-
-        // Sort by lowest time remaining first (easiest to bust)
-        candidates.sort((a, b) => a.seconds - b.seconds);
-        return candidates;
-    }
-
-    async function doBust(fastMode = false) {
-        const candidates = getBustCandidates();
-        if (!candidates.length) return false;
-
-        const target = candidates[0];
-
-        state.lastActionAt = now();
-
-        if (fastMode) {
-            // Fast mode — minimal delay, use already-found button reference
-            // to avoid re-fetch overhead in competitive busting
-            await wait(rand(10, 30));
-            if (!target.bustBtn.isConnected) return false;
-            humanClick(target.bustBtn);
-            addLiveLog(`Bust attempted: ${textOf(target.row.querySelector('a'))} (${target.timerText})`);
-        } else {
-            await wait(rand(DEFAULTS.actionDelayMin, DEFAULTS.actionDelayMax));
-            // Re-fetch the button in case the DOM updated
-            const freshCandidates = getBustCandidates();
-            if (!freshCandidates.length) return false;
-            const freshTarget = freshCandidates[0];
-            humanClick(freshTarget.bustBtn);
-            addLiveLog(`Bust attempted: ${textOf(freshTarget.row.querySelector('a'))} (${freshTarget.timerText})`);
-        }
-
-        return true;
-    }
-
-    // MutationObserver for instant bust — fires the moment #jailn changes,
-    // bypassing the 1200ms heartbeat delay for maximum competitive speed.
-    let bustObserver     = null;
-    let bustObserverBusy = false;
-
-    function startBustObserver() {
-        if (bustObserver) return;
-
-        const jailNode = document.querySelector('#jailn');
-        if (!jailNode) return;
-
-        bustObserver = new MutationObserver(async () => {
-            // Don't fire if: not in bust mode, already handling a bust,
-            // CTC is active, or we're jailed ourselves
-            if (!state.bustLoopActive)    return;
-            if (!state.bustFastMode)      return; // only active in fast mode
-            if (bustObserverBusy)         return;
-            if (hasCTCChallenge())        return;
-            if (getOwnJailRow())          return;
-
-            const candidates = getBustCandidates();
-            if (!candidates.length) return;
-
-            bustObserverBusy = true;
-            try {
-                state.lastActionAt = now();
-                await wait(rand(10, 30));
-
-                // Re-check conditions after minimal delay
-                if (!state.bustLoopActive) return;
-                if (hasCTCChallenge())     return;
-                if (getOwnJailRow())       return;
-
-                const freshCandidates = getBustCandidates();
-                if (!freshCandidates.length) return;
-
-                const target = freshCandidates[0];
-                if (!target.bustBtn.isConnected) return;
-
-                humanClick(target.bustBtn);
-                addLiveLog(`Bust (instant): ${textOf(target.row.querySelector('a'))} (${target.timerText})`);
-            } finally {
-                bustObserverBusy = false;
-            }
-        });
-
-        bustObserver.observe(jailNode, { childList: true, subtree: true, characterData: true });
-        addLiveLog('Bust observer started (instant mode)');
-    }
-
-    function stopBustObserver() {
-        if (bustObserver) {
-            bustObserver.disconnect();
-            bustObserver = null;
-        }
-        bustObserverBusy = false;
-    }
 
     // ── QT Perk Sniper — background polling for bodyguards and bullets ──────────
     // Safe deposit — retries until success to prevent money being left on hand
@@ -4267,6 +4605,8 @@
     // ── Perk Extender — runs independently of QT sniper at a slower interval ──
     let qtPerkExtendTimer  = null;
     let qtPerkExtendActive = false;
+    let qtPerkRedeemTimer  = null;
+    let qtPerkRedeemActive = false;
 
     // ── Free Entry Dice Joiner ────────────────────────────────────────────────
     const DICE_JOIN_INTERVAL_MS = 30 * 60 * 1000; // 30 minutes
@@ -4298,7 +4638,7 @@
     }
 
     async function doDiceJoin() {
-        if (!diceJoinActive || !state.enabled) { scheduleDiceJoin(); return; }
+        if (!diceJoinActive || !state.enabled || !state.diceJoinEnabled) { scheduleDiceJoin(); return; }
         setSetting('diceJoinLastRun', Date.now());
         try {
             const resp = await fetch('/?p=multiplayer-dice&page=1', { credentials: 'include', cache: 'no-store' });
@@ -4375,60 +4715,57 @@
             const toExtend = [];
             const minBullets = state.qtBulletsMin;
 
-            // Bullet perks — extend if expiry = 1 and count >= qtBulletsMin
-            const bulletRows = [...doc.querySelectorAll('table.pb tr.sortable-row')];
-            for (const row of bulletRows) {
-                const id = row.dataset.id;
-                const nameEl = row.querySelector('.lm');
-                const cells = row.querySelectorAll('td');
-                const expiryEl = cells[2];
-                if (!id || !nameEl || !expiryEl) continue;
-                const bulletMatch = nameEl.textContent.match(/[\d,]+/);
-                const bulletCount = bulletMatch ? parseInt(bulletMatch[0].replace(/,/g, ''), 10) : 0;
-                const expiry = parseInt(expiryEl.textContent.trim(), 10);
-                if (expiry === 1 && bulletCount >= minBullets) {
-                    toExtend.push({ id, name: `${bulletCount.toLocaleString()} bullets` });
+            // Check each perk type based on extend settings
+            // Table selectors verified against live page HTML:
+            //   pb=Bullets, pc=Cars, pcv=Bullet value, pd=Double cash, pib=Always bust,
+            //   pmd=Double melts, pm=Cash/Money, pn=Always successful, ps=Rare cars, px=Double XP, ppbot=BG
+            const extendChecks = [
+                { enabled: state.extendBgs,          sel: 'table.ppbot', label: 'BG',            threshold: null },
+                { enabled: state.extendCars,          sel: 'table.pc',    label: 'Cars',          threshold: null },
+                { enabled: state.extendBullets,       sel: 'table.pb',    label: 'Bullets',       threshold: state.extendBulletsThreshold },
+                { enabled: state.extendBulletValue,   sel: 'table.pcv',   label: 'Bullet value',  threshold: state.extendBulletValueThreshold },
+                { enabled: state.extendRares,         sel: 'table.ps',    label: 'Rare cars',     threshold: state.extendRaresThreshold },
+                { enabled: state.extendDoubleMelts,   sel: 'table.pmd',   label: 'Double melts',  threshold: state.extendDoubleMeltsThreshold },
+                { enabled: state.extendDoubleXp,      sel: 'table.px',    label: 'Double XP',     threshold: state.extendDoubleXpThreshold },
+                { enabled: state.extendAlwaysBust,    sel: 'table.pib',   label: 'Always bust',   threshold: state.extendAlwaysBustThreshold },
+                { enabled: state.extendAlwaysSucc,    sel: 'table.pn',    label: 'Always successful', threshold: state.extendAlwaysSuccThreshold },
+                { enabled: state.extendDoubleCash,    sel: 'table.pd',    label: 'Double cash',   threshold: state.extendDoubleCashThreshold },
+            ];
+            const seenExtend = new Set();
+            for (const { enabled, sel, label, threshold } of extendChecks) {
+                if (!enabled) continue;
+                const rows = [...doc.querySelectorAll(`${sel} tr.sortable-row`)];
+                for (const row of rows) {
+                    const id = row.dataset.id;
+                    if (!id || seenExtend.has(id)) continue;
+                    const cells = row.querySelectorAll('td');
+                    const expiry = parseInt(cells[2]?.textContent.trim(), 10);
+                    if (expiry !== 1) continue;
+                    // Check threshold if applicable
+                    if (threshold !== null) {
+                        const nameEl = row.querySelector('.lm');
+                        const numMatch = nameEl?.textContent.match(/[\d,]+/);
+                        const val = numMatch ? parseInt(numMatch[0].replace(/,/g, ''), 10) : 0;
+                        if (val < threshold) continue;
+                    }
+                    seenExtend.add(id);
+                    toExtend.push({ id, name: label });
                 }
-            }
-
-            // BG perks (personal + robot) — always extend if expiry = 1
-            const bgPerkRows = [...doc.querySelectorAll('table.ppbot tr.sortable-row, table.pbot tr.sortable-row')];
-            for (const row of bgPerkRows) {
-                const id = row.dataset.id;
-                const nameEl = row.querySelector('.lm');
-                const cells = row.querySelectorAll('td');
-                const expiryEl = cells[2];
-                if (!id || !nameEl || !expiryEl) continue;
-                const expiry = parseInt(expiryEl.textContent.trim(), 10);
-                if (expiry === 1) toExtend.push({ id, name: nameEl.textContent.trim() });
             }
 
             if (toExtend.length > 0) {
                 const points = getPlayerPoints();
                 const needed = toExtend.length * 10;
                 if (points >= needed) {
-                    for (const p of toExtend) {
-                        const form = new FormData();
-                        form.append('exin', '1');
-                        await fetch(`/?p=perks&id=${p.id}`, { method: 'POST', body: form, credentials: 'include' });
-                        addLiveLog(`QT Perks: ✓ Extended ${p.name} (perk #${p.id}) to 2 deaths`);
-                    }
+                    const form = new FormData();
+                    toExtend.forEach(p => form.append('selected_perks[]', p.id));
+                    form.append('extend_selected', 'Increase Expiration');
+                    form.append('bulk_amount', '1');
+                    await fetch('/?p=perks&v=con', { method: 'POST', body: form, credentials: 'include' });
+                    toExtend.forEach(p => addLiveLog(`QT Perks: ✓ Extended ${p.name} (perk #${p.id}) to 2 deaths`));
                 } else {
                     addLiveLog(`QT Perks: not enough points to extend ${toExtend.length} perk(s) — need ${needed}, have ${points}`);
                 }
-            }
-            // Money perks — always redeem immediately
-            const moneyRows = [...doc.querySelectorAll('table.pm tr.sortable-row')].filter(row => {
-                const cells = row.querySelectorAll('td');
-                return cells[2] && !cells[2].querySelector('b');
-            });
-            if (moneyRows.length > 0) {
-                const form = new FormData();
-                moneyRows.forEach(row => form.append('selected_perks[]', row.dataset.id));
-                form.append('redeem_selected', 'Redeem Selected');
-                await fetch('/?p=perks', { method: 'POST', credentials: 'include', body: form });
-                const names = moneyRows.map(row => row.querySelector('.lm')?.textContent.trim()).join(', ');
-                addLiveLog(`QT Perks: ✓ Redeemed money perk(s) — ${names}`);
             }
         } catch (e) {
             addLiveLog(`QT Perks: extend check error — ${e.message}`);
@@ -4437,7 +4774,610 @@
         scheduleQTPerkExtend();
     }
 
-    function startQTSniper() {
+    function startQTPerkRedeemer() {
+        if (qtPerkRedeemActive) return;
+        qtPerkRedeemActive = true;
+        doQTPerkRedeem();
+    }
+
+    function stopQTPerkRedeemer() {
+        qtPerkRedeemActive = false;
+        if (qtPerkRedeemTimer) { clearTimeout(qtPerkRedeemTimer); qtPerkRedeemTimer = null; }
+    }
+
+    function scheduleQTPerkRedeem() {
+        if (!qtPerkRedeemActive) return;
+        const intervalMs = state.qtPerkRedeemMins * 60 * 1000;
+        const lastRun    = Number(getSetting('qtPerkRedeemLastRun', 0));
+        const elapsed    = Date.now() - lastRun;
+        const delay      = Math.max(0, intervalMs - elapsed);
+        qtPerkRedeemTimer = setTimeout(doQTPerkRedeem, delay);
+    }
+
+async function doQTPerkRedeem() {
+        if (!qtPerkRedeemActive || !state.enabled || !state.qtPerkRedeemEnabled) {
+            scheduleQTPerkRedeem();
+            return;
+        }
+        const intervalMs = state.qtPerkRedeemMins * 60 * 1000;
+        const lastRun    = Number(getSetting('qtPerkRedeemLastRun', 0));
+        if (Date.now() - lastRun < intervalMs) {
+            scheduleQTPerkRedeem();
+            return;
+        }
+        setSetting('qtPerkRedeemLastRun', Date.now());
+
+        try {
+            const resp = await fetch('/?p=perks&v=con', { credentials: 'include', cache: 'no-store' });
+            const text = await resp.text();
+            const doc  = new DOMParser().parseFromString(text, 'text/html');
+
+            const getRows = sel => [...doc.querySelectorAll(`${sel} tr.sortable-row`)];
+            const parseAmt = row => {
+                const txt = row.querySelector('.lm')?.textContent || '';
+                const m = txt.match(/[\d,]+/);
+                return m ? parseInt(m[0].replace(/,/g, ''), 10) : 0;
+            };
+            const redeemIds = async (ids, label) => {
+                if (!ids.length) return;
+                const form = new FormData();
+                ids.forEach(id => form.append('selected_perks[]', id));
+                form.append('redeem_selected', 'Redeem Selected');
+                await fetch('/?p=perks&v=con', { method: 'POST', credentials: 'include', body: form });
+                addLiveLog(`Redeem: ✓ ${ids.length} ${label} perk(s)`);
+            };
+
+            const crimesOn = state.autoMissionsEnabled || state.bgCrimeEnabled;
+            const gtaOn    = state.resetGTAEnabled;
+            const bustOn   = state.bustNoReload;
+
+            // 1. Money — always redeem all
+            if (state.redeemCash) {
+                await redeemIds(getRows('table.pm').map(r => r.dataset.id).filter(Boolean), 'Cash');
+            }
+
+            // 2. Cars — always redeem all
+            if (state.redeemCars) {
+                await redeemIds(getRows('table.pc').map(r => r.dataset.id).filter(Boolean), 'Cars');
+            }
+
+            // 3. BGs — always redeem all
+            if (state.redeemBg) {
+                await redeemIds(getRows('table.ppbot').map(r => r.dataset.id).filter(Boolean), 'BGs');
+            }
+
+            // 4. Double cash — redeem all if crimes enabled
+            if (state.redeemDoubleCash && crimesOn) {
+                await redeemIds(getRows('table.pd').map(r => r.dataset.id).filter(Boolean), 'Double cash');
+            }
+
+            // 4. Double XP — redeem all if crimes enabled
+            if (state.redeemDoubleXp && crimesOn) {
+                await redeemIds(getRows('table.px').map(r => r.dataset.id).filter(Boolean), 'Double XP');
+            }
+
+            // 5. Always successful — redeem all if crimes or GTA enabled
+            // Always successful — confirmed table class: table.pn
+            if (state.redeemAlwaysSucc && (crimesOn || gtaOn)) {
+                await redeemIds(getRows('table.pn').map(r => r.dataset.id).filter(Boolean), 'Always successful');
+            }
+
+            // 6. Always bust — redeem all if bust enabled
+            if (state.redeemAlwaysBust && bustOn) {
+                await redeemIds(getRows('table.pib').map(r => r.dataset.id).filter(Boolean), 'Always bust');
+            }
+
+            // 7. Rare cars + Double melts — coordinated when both on, independent when one on
+            if (gtaOn && (state.redeemRare || state.redeemDoubleMelt)) {
+                const rareRows  = getRows('table.ps').sort((a, b) => parseAmt(a) - parseAmt(b));
+                const meltRows  = getRows('table.pmd').sort((a, b) => parseAmt(a) - parseAmt(b));
+                const rareTotal = rareRows.reduce((s, r) => s + parseAmt(r), 0);
+                const meltTotal = meltRows.reduce((s, r) => s + parseAmt(r), 0);
+                const floor     = state.redeemPairFloor;
+
+                if (state.redeemRare && state.redeemDoubleMelt) {
+                    // Both on — balanced pairing
+                    if (!rareRows.length || !meltRows.length) {
+                        addLiveLog('Redeem: skipping rare/melts — need both in inventory');
+                    } else if (rareTotal < floor || meltTotal < floor * 0.9) {
+                        addLiveLog(`Redeem: skipping rare/melts — below floor (${rareTotal} rares, ${meltTotal} melts, floor ${floor})`);
+                    } else {
+                        const target = Math.min(rareTotal, meltTotal);
+                        const cap    = Math.floor(target * 1.1);
+                        let rareSum = 0, meltSum = 0;
+                        const rareIds = [], meltIds = [];
+                        for (const row of rareRows) {
+                            const amt = parseAmt(row);
+                            if (rareSum + amt > cap) break;
+                            rareIds.push(row.dataset.id);
+                            rareSum += amt;
+                        }
+                        for (const row of meltRows) {
+                            const amt = parseAmt(row);
+                            if (meltSum + amt > cap) break;
+                            meltIds.push(row.dataset.id);
+                            meltSum += amt;
+                        }
+                        if (rareIds.length) await redeemIds(rareIds, `Rare cars (${rareSum} cars)`);
+                        if (meltIds.length) await redeemIds(meltIds, `Double melts (${meltSum} cars)`);
+                    }
+                } else if (state.redeemRare && rareRows.length) {
+                    // Rare only
+                    await redeemIds(rareRows.map(r => r.dataset.id).filter(Boolean), `Rare cars (${rareTotal} cars)`);
+                } else if (state.redeemDoubleMelt && meltRows.length) {
+                    // Melts only
+                    await redeemIds(meltRows.map(r => r.dataset.id).filter(Boolean), `Double melts (${meltTotal} cars)`);
+                }
+            }
+
+            // 8. Bullet value — redeem all if GTA enabled
+            if (state.redeemBulletValue && gtaOn) {
+                await redeemIds(getRows('table.pcv').map(r => r.dataset.id).filter(Boolean), 'Bullet value');
+            }
+
+        } catch (e) {
+            addLiveLog(`Redeem: error — ${e.message}`);
+        }
+        scheduleQTPerkRedeem();
+    }
+
+
+    // =========================================================================
+    // BG Spam loop — background fetch POST to kill page every N seconds
+    // Only fires for the selected BG Farm player (killBgSpamTarget)
+    // Suppresses drug run and bullet factory travel while active
+    // =========================================================================
+    let bgSpamTimer = null;
+    let bgSpamActive = false;
+
+    function updateBgSpamDropdown() {
+        if (!killBgSpamTargetEl) return;
+        const players = state.killPlayers || [];
+        const farmPlayers = players.filter(p =>
+            isPlayerBgFarmEnabled(p.name) &&
+            p.status !== 'dead'
+        );
+        const current = state.killBgSpamTarget;
+
+        killBgSpamTargetEl.innerHTML = '';
+        if (!farmPlayers.length) {
+            const opt = document.createElement('option');
+            opt.value = '';
+            opt.textContent = '— No BG Farm players —';
+            killBgSpamTargetEl.appendChild(opt);
+            if (current) state.killBgSpamTarget = '';
+            return;
+        }
+
+        farmPlayers.forEach(p => {
+            const opt = document.createElement('option');
+            opt.value = p.name;
+            opt.textContent = p.name;
+            if (p.name.toLowerCase() === current.toLowerCase()) opt.selected = true;
+            killBgSpamTargetEl.appendChild(opt);
+        });
+
+        // Auto-select first if current is empty or no longer valid
+        const valid = farmPlayers.some(p => p.name.toLowerCase() === current.toLowerCase());
+        if (!current || !valid) {
+            state.killBgSpamTarget = farmPlayers[0].name;
+            killBgSpamTargetEl.value = farmPlayers[0].name;
+        }
+    }
+
+    // After a BG check loop that required travel, return to BG Spam target's country if needed
+    async function resumeBgSpamAfterCheck() {
+        state.killBgSpamPaused = false;
+        state.killLoopActive   = false;
+        state.pendingKillAction = null;
+
+        const spamTarget = state.killBgSpamTarget;
+        if (spamTarget && state.killBgSpamEnabled && state.killBgCheckEnabled) {
+            const spamPlayer = (state.killPlayers || []).find(p => p.name.toLowerCase() === spamTarget.toLowerCase());
+            const spamCountry = spamPlayer?.country;
+            const myCountry   = (document.querySelector('#player-location')?.textContent || '').trim();
+            if (spamCountry && myCountry && spamCountry.toLowerCase() !== myCountry.toLowerCase()) {
+                addLiveLog(`Kill loop: BG check done — travelling back to ${spamCountry} for BG Spam on ${spamTarget}`);
+                state.pendingKillAction = {
+                    stage:    'travel',
+                    travelTo: spamCountry,
+                    targetName: spamTarget,
+                    afterTravel: { stage: 'bgcheck' }
+                };
+                state.killLoopActive = true;
+                await wait(navRand());
+                gotoPage('cars');
+                return;
+            }
+        }
+        await wait(navRand());
+        gotoPage('crimes');
+    }
+
+    function syncBgSpamState() {
+        const shouldRun = state.killBgSpamEnabled &&
+                          state.killBgCheckEnabled &&
+                          state.killBgSpamTarget &&
+                          !state.killBgSpamPaused;
+        if (shouldRun && !bgSpamActive) {
+            // Check if we're in the spam target's country before starting
+            const spamTarget = state.killBgSpamTarget;
+            const spamPlayer = (state.killPlayers || []).find(p => p.name.toLowerCase() === spamTarget.toLowerCase());
+            const spamCountry = spamPlayer?.country;
+            const myCountry = (document.querySelector('#player-location')?.textContent || '').trim();
+            if (spamCountry && myCountry && spamCountry.toLowerCase() !== myCountry.toLowerCase() &&
+                !state.killLoopActive && !state.pendingKillAction) {
+                // Wrong country — trigger travel back before starting spam
+                addLiveLog(`BG Spam: not in ${spamCountry} — travelling back before starting spam on ${spamTarget}`);
+                state.pendingKillAction = {
+                    stage:    'travel',
+                    travelTo: spamCountry,
+                    targetName: spamTarget,
+                    afterTravel: { stage: 'bgcheck' }
+                };
+                state.killLoopActive   = true;
+                state.killBgSpamPaused = true;
+                return;
+            }
+            startBgSpam();
+        }
+        if (!shouldRun && bgSpamActive) stopBgSpam();
+    }
+
+    async function autoBuyGun() {
+        if (!state.autoBuyGun) return;
+        if (getPlayerGunValue() > 0) return;
+        if (autoBuyGunBusy) return;
+        autoBuyGunBusy = true;
+        try {
+        const gunVal = getPlayerGunValue();
+        const type = state.autoBuyGunType;
+
+        if (type === 'awp') {
+            addLiveLog('Auto gun: no gun — checking points for AWP...');
+            try {
+                const ptsResp = await fetch('/?p=points', { credentials: 'include', cache: 'no-store' });
+                const ptsDoc  = new DOMParser().parseFromString(await ptsResp.text(), 'text/html');
+                const ptsMatch = [...ptsDoc.querySelectorAll('.bgd.chs')].map(el => el.textContent.match(/[\d,]+/)).find(m => m);
+                const pts = ptsMatch ? parseInt(ptsMatch[0].replace(/,/g, ''), 10) : 0;
+                const threshold = state.autoBuyGunPtThreshold;
+                if (pts - 100 >= threshold) {
+                    addLiveLog(`Auto gun: ${pts} points, spending 100 leaves ${pts - 100} ≥ threshold (${threshold}) — buying AWP`);
+                    const form = new FormData();
+                    form.append('itema', 'Weaponry#1');
+                    await fetch('/?p=points', { method: 'POST', credentials: 'include', body: form });
+                    addLiveLog('Auto gun: ✓ AWP purchased via points');
+                    return;
+                } else {
+                    addLiveLog(`Auto gun: only ${pts} points or threshold (${threshold}) would be breached — falling back to AK47`);
+                }
+            } catch(e) { addLiveLog(`Auto gun: error checking points — ${e.message}`); }
+        }
+
+        // AK47 — buy in current country, purchase factory first if unowned
+        const location  = getPlayerLocation().toLowerCase();
+        const countryId = COUNTRY_LOCATION_MAP[location];
+        if (!countryId) {
+            addLiveLog(`Auto gun: unknown current country "${getPlayerLocation()}" — buy a gun manually.`);
+            return;
+        }
+
+        addLiveLog(`Auto gun: checking Gun Factory in ${getPlayerLocation()}...`);
+        try {
+            const weapResp = await fetch(`/?p=weaponry&id=${countryId}`, { credentials: 'include', cache: 'no-store' });
+            const weapDoc  = new DOMParser().parseFromString(await weapResp.text(), 'text/html');
+
+            // Check if factory is unowned (has a buy property form)
+            const needFactory = !!weapDoc.querySelector('input[name="buy"][value="gun"]');
+            const totalNeeded = (needFactory ? 25000000 : 0) + 9000000;
+            const cashOnHand  = getPlayerMoney();
+            const swiss       = getPlayerSwiss();
+
+            if (cashOnHand + swiss < totalNeeded) {
+                addLiveLog(`Auto gun: not enough money (need $${totalNeeded.toLocaleString()}, have $${(cashOnHand + swiss).toLocaleString()}) — buy a gun manually.`);
+                return;
+            }
+
+            // Withdraw if needed
+            if (cashOnHand < totalNeeded) {
+                const withdrawAmt = totalNeeded - cashOnHand;
+                addLiveLog(`Auto gun: withdrawing $${withdrawAmt.toLocaleString()} from Swiss bank...`);
+                const bankForm = new FormData();
+                bankForm.append('type', 'swiss');
+                bankForm.append('amount', String(withdrawAmt));
+                bankForm.append('withdraw', 'Withdraw');
+                await fetch('/?p=bank', { method: 'POST', credentials: 'include', body: bankForm });
+                await wait(1500);
+            }
+
+            if (needFactory) {
+                addLiveLog(`Auto gun: no Gun Factory in ${getPlayerLocation()} — buying factory ($25m)...`);
+                const bf = new FormData();
+                bf.append('buy', 'gun');
+                await fetch(`/?p=weaponry&id=${countryId}`, { method: 'POST', credentials: 'include', body: bf });
+                await wait(1000);
+                addLiveLog('Auto gun: ✓ Gun Factory purchased');
+            }
+
+            addLiveLog(`Auto gun: buying AK47 ($9m)...`);
+            const gf = new FormData();
+            gf.append('gun', '9');
+            const gunResp = await fetch(`/?p=weaponry&id=${countryId}`, { method: 'POST', credentials: 'include', body: gf });
+            const gunRespText = await gunResp.text();
+            const gunRespDoc = new DOMParser().parseFromString(gunRespText, 'text/html');
+            const newGun = gunRespDoc.querySelector('#player-gun')?.textContent?.trim() || '';
+            if (newGun && newGun.toLowerCase() !== 'none') {
+                addLiveLog(`Auto gun: ✓ AK47 purchased`);
+            } else {
+                addLiveLog(`Auto gun: purchase failed — buy a gun manually`);
+            }
+        } catch(e) { addLiveLog(`Auto gun: error — ${e.message}`); }
+        } finally { autoBuyGunBusy = false; }
+    }
+
+    function startBgSpam() {
+        if (bgSpamActive) return;
+        bgSpamActive = true;
+        const pausedUntil = getSetting('killBgSpamPausedUntil', 0);
+        if (!pausedUntil || Date.now() >= pausedUntil) {
+            addLiveLog(`BG Spam: started — target: ${state.killBgSpamTarget}, interval: ${state.killBgSpamIntervalSecs}s`);
+        }
+        scheduleBgSpam();
+    }
+
+    function stopBgSpam() {
+        bgSpamActive = false;
+        if (bgSpamTimer) { clearTimeout(bgSpamTimer); bgSpamTimer = null; }
+    }
+
+    function scheduleBgSpam() {
+        if (!bgSpamActive) return;
+        const pausedUntil = getSetting('killBgSpamPausedUntil', 0);
+        if (pausedUntil && Date.now() < pausedUntil) {
+            const remainMs = pausedUntil - Date.now();
+            addLiveLog(`BG Spam: paused — ${Math.ceil(remainMs/60000)}m until ${state.killBgSpamTarget} found`);
+            bgSpamTimer = setTimeout(doBgSpam, remainMs);
+            return;
+        }
+        const intervalMs = (state.killBgSpamIntervalSecs || 2) * 1000;
+        bgSpamTimer = setTimeout(doBgSpam, intervalMs);
+    }
+
+    async function doBgSpam() {
+        if (!bgSpamActive || !state.enabled || !state.killBgCheckEnabled || !state.killBgSpamEnabled) {
+            scheduleBgSpam();
+            return;
+        }
+        // Don't fire while in jail — can't travel or shoot
+        if (isLikelyJailPage()) { scheduleBgSpam(); return; }
+
+        // Respect stored pause time from previous "not yet found" detection
+        const pausedUntil = getSetting('killBgSpamPausedUntil', 0);
+        if (pausedUntil && Date.now() < pausedUntil) {
+            const remainingMs = pausedUntil - Date.now();
+            bgSpamTimer = setTimeout(doBgSpam, remainingMs);
+            return;
+        }
+        if (pausedUntil) setSetting('killBgSpamPausedUntil', 0); // clear expired pause
+
+        const target = state.killBgSpamTarget;
+        if (!target) { scheduleBgSpam(); return; }
+
+        // Check if target is in Players Found (not just being searched)
+        // Fetch kill page to get current search status
+        try {
+            const killResp = await fetch('/?p=kill', { credentials: 'include', cache: 'no-store' });
+            const killText = await killResp.text();
+            const killDoc  = new DOMParser().parseFromString(killText, 'text/html');
+
+            // Check if target is in found list (.bgm.chs without .pd)
+            const foundEls = [...killDoc.querySelectorAll('.bgl.i.wb .bgm.chs:not(.pd) a[href*="p=profile"]')];
+            const isFound  = foundEls.some(a => {
+                try { return new URL(a.href).searchParams.get('u')?.toLowerCase() === target.toLowerCase(); } catch(_) { return false; }
+            });
+
+            if (!isFound) {
+                // Check if still being searched (.bgm.chs.pd)
+                const pendingEls = [...killDoc.querySelectorAll('.bgl.i.wb .bgm.chs.pd b')];
+                const pendingEl  = pendingEls.find(b => b.textContent.trim().toLowerCase() === target.toLowerCase());
+                if (pendingEl) {
+                    const timerSpan = pendingEl.closest('.bgm.chs.pd')?.querySelector('.chd');
+                    const foundInMs = timerSpan ? parseLostInMs(textOf(timerSpan)) : null;
+                    if (foundInMs && foundInMs > 0) {
+                        const resumeAt = Date.now() + foundInMs + 5000;
+                        setSetting('killBgSpamPausedUntil', resumeAt);
+                        addLiveLog(`BG Spam: ${target} not yet found (${Math.ceil(foundInMs/60000)}m remaining) — pausing until found`);
+                        bgSpamTimer = setTimeout(doBgSpam, foundInMs + 5000);
+                        return;
+                    }
+                }
+                // Not found and not pending — unknown state, retry in 30s
+                bgSpamTimer = setTimeout(doBgSpam, 30000);
+                return;
+            }
+        } catch(e) {
+            // If fetch fails just continue — don't block BG Spam
+        }
+
+        // Need at least 1 bullet
+        if (getPlayerBullets() < 1) {
+            scheduleBgSpam();
+            return;
+        }
+
+        try {
+            const form = new FormData();
+            form.append('do', 'kill');
+            form.append('username', target);
+            form.append('bullets', '1');
+            form.append('show', state.killAnonymousShooting ? '' : 'y');
+
+            const resp = await fetch('/?p=kill', {
+                method: 'POST',
+                credentials: 'include',
+                body: form
+            });
+            const text = await resp.text();
+            const doc  = new DOMParser().parseFromString(text, 'text/html');
+
+            const failEl = doc.querySelector('.bgm.fail');
+            const credEl = [...doc.querySelectorAll('.bgm.cred')].find(el => /failed to kill/i.test(el.textContent));
+            const failText = failEl?.textContent.trim() || '';
+            if (failEl && /same location/i.test(failText)) {
+                // Target moved country — find new country from Players Found in response
+                const foundRows = [...doc.querySelectorAll('.bgl.i.wb .bgm.chs:not(.pd)')];
+                let newCountry = '';
+                for (const row of foundRows) {
+                    const a = row.querySelector('a[href*="?p=profile&u="]');
+                    if (!a) continue;
+                    try {
+                        const name = new URL(a.getAttribute('href'), window.location.href).searchParams.get('u');
+                        if (name?.toLowerCase() === target.toLowerCase()) {
+                            const bTags = [...row.querySelectorAll('b')];
+                            newCountry = bTags[1]?.textContent.trim() || '';
+                            break;
+                        }
+                    } catch(_) {}
+                }
+
+                if (newCountry) {
+                    // Don't interrupt if kill loop is already handling this or another BG Farm player
+                    const pa = state.pendingKillAction;
+                    const killLoopBusy = pa && (
+                        // Busy with a different player's BG
+                        (pa.bgFor && pa.bgFor.toLowerCase() !== target.toLowerCase()) ||
+                        // Busy travelling/shooting this player's BG
+                        (['travel','travel_car','bg_shoot','bg_farm_shoot','bg_farm_result'].includes(pa.stage))
+                    );
+                    if (killLoopBusy) {
+                        addLiveLog(`BG Spam: ${target} moved to ${newCountry} — kill loop busy (${pa.stage}), updating country for later`);
+                        const players = state.killPlayers || [];
+                        const idx = players.findIndex(p => p.name.toLowerCase() === target.toLowerCase());
+                        if (idx !== -1) { players[idx].country = newCountry; saveKillPlayers(players); }
+                    } else {
+                        addLiveLog(`BG Spam: ${target} moved to ${newCountry} — travelling`);
+                        const players = state.killPlayers || [];
+                        const idx = players.findIndex(p => p.name.toLowerCase() === target.toLowerCase());
+                        if (idx !== -1) { players[idx].country = newCountry; saveKillPlayers(players); }
+                        state.pendingKillAction = {
+                            stage:      'travel',
+                            travelTo:   newCountry,
+                            targetName: target,
+                            afterTravel: { stage: 'bg_farm_shoot', targetName: target, shootAfterBg: isPlayerShootEnabled(target) }
+                        };
+                        state.killLoopActive   = true;
+                        state.killBgSpamPaused = true;
+                        stopBgSpam();
+                        if (!isLikelyJailPage()) gotoPage('cars');
+                    }
+                } else {
+                    addLiveLog(`BG Spam: ${target} not in Players Found — waiting for country update`);
+                }
+
+            } else if (failEl && /has a bodyguard called/i.test(failText)) {
+                // BG detected — check if it's new/different from what we're already handling
+                const bgMatch = failText.match(/has a bodyguard called\s+(.+?)!/i);
+                const bgName  = bgMatch ? bgMatch[1].trim() : null;
+                if (bgName) {
+                    const players = state.killPlayers || [];
+                    const targetPlayer = players.find(p => p.name.toLowerCase() === target.toLowerCase());
+                    const knownBg = targetPlayer?.bodyguard?.toLowerCase();
+                    const farmWaitActive = targetPlayer?.bgFarmWaitUntil && targetPlayer.bgFarmWaitUntil > Date.now();
+                    const alreadyHandling = (state.pendingKillAction &&
+                        ['bg_farm_check','bg_farm_shoot','bg_farm_result','bg_shoot','fetch_profile'].includes(state.pendingKillAction.stage)) ||
+                        (state.killBgWaitUntil > Date.now());
+                    const killLoopBusyWithOther = state.pendingKillAction?.bgFor &&
+                        state.pendingKillAction.bgFor.toLowerCase() !== target.toLowerCase();
+                    const sameBgWaiting = bgName.toLowerCase() === knownBg && farmWaitActive;
+
+                    // Update bodyguard reference immediately so UI reflects current state
+                    if (bgName.toLowerCase() !== knownBg) {
+                        const tIdx = players.findIndex(p => p.name.toLowerCase() === target.toLowerCase());
+                        if (tIdx !== -1) {
+                            const oldBg = players[tIdx].bodyguard;
+                            // Clear any stale pending shoot targeting the old BG
+                            if (oldBg && oldBg.toLowerCase() !== bgName.toLowerCase()) {
+                                addLiveLog(`BG Spam: ${target} swapped BG from ${oldBg} to ${bgName} — clearing stale shoot`);
+                                if (state.killBgShootPending?.bgFor?.toLowerCase() === target.toLowerCase() &&
+                                    state.killBgShootPending?.targetName?.toLowerCase() === oldBg.toLowerCase()) {
+                                    state.killBgShootPending = null;
+                                }
+                                if (state.pendingKillAction?.bgFor?.toLowerCase() === target.toLowerCase() &&
+                                    state.pendingKillAction?.targetName?.toLowerCase() === oldBg.toLowerCase()) {
+                                    state.pendingKillAction = null;
+                                    state.killLoopActive    = false;
+                                }
+                            }
+                            players[tIdx].bodyguard = bgName; saveKillPlayers(players); renderKillList();
+                        }
+                    }
+
+                    // If new BG detected, add to kill list as UNKNOWN so kill scanner searches them
+                    if (bgName.toLowerCase() !== knownBg) {
+                        const pl   = state.killPlayers || [];
+                        const bIdx = pl.findIndex(p => p.name.toLowerCase() === bgName.toLowerCase());
+                        if (bIdx === -1) {
+                            pl.push({ name: bgName, status: KILL_STATUS.UNKNOWN, isBg: true, bgFor: target });
+                            saveKillPlayers(pl);
+                            addLiveLog(`BG Spam: added ${bgName} as unknown — kill scanner will search them`);
+                        } else if (pl[bIdx].status !== KILL_STATUS.ALIVE) {
+                            pl[bIdx].isBg  = true;
+                            pl[bIdx].bgFor = target;
+                            pl[bIdx].status = KILL_STATUS.UNKNOWN;
+                            saveKillPlayers(pl);
+                            addLiveLog(`BG Spam: reset ${bgName} to unknown — kill scanner will search them`);
+                        }
+                    }
+                    // Don't trigger at all while bgFarmWaitUntil is active — searches not done yet
+                    if (farmWaitActive) {
+                        // silently wait
+                    } else if ((bgName.toLowerCase() !== knownBg || !alreadyHandling) && !killLoopBusyWithOther && !sameBgWaiting) {
+                        // New or different BG — hand off to kill loop
+                        addLiveLog(`BG Spam: ${target} has ${knownBg && bgName.toLowerCase() !== knownBg ? 'new ' : ''}BG ${bgName} — triggering kill loop`);
+                        // Don't override the kill loop cooldown — it means the loop just determined there's nothing to do
+                        if (state.killLoopCooldownUntil > now()) {
+                            addLiveLog(`BG Spam: kill loop on cooldown for ${Math.ceil((state.killLoopCooldownUntil - now()) / 1000)}s — waiting`);
+                        } else {
+                        state.pendingKillAction = {
+                            stage:        'bg_farm_check',
+                            targetName:   target,
+                            shootAfterBg: isPlayerShootEnabled(target),
+                        };
+                        state.killLoopActive  = true;
+                        state.killBgSpamPaused = true;
+                        stopBgSpam();
+                        if (!isLikelyJailPage()) gotoPage('kill');
+                        }
+                    }
+                    // else already handling this BG or kill loop busy with another player — keep spamming silently
+                }
+
+            } else if (credEl) {
+                // No BG — target unprotected
+                if (isPlayerShootEnabled(target)) {
+                    addLiveLog(`BG Spam: ${target} has no BG — Kill enabled, handing off to kill loop`);
+                    state.pendingKillAction = { stage: 'fetch_profile', targetName: target };
+                    state.killLoopActive = true;
+                    stopBgSpam();
+                    await wait(navRand());
+                    gotoPage('kill');
+                    return;
+                } else {
+                    addLiveLog(`BG Spam: ${target} has no BG — stopping spam to avoid detection`);
+                    stopBgSpam();
+                    state.killBgSpamEnabled = false;
+                    if (killBgSpamInput) killBgSpamInput.checked = false;
+                    return;
+                }
+            }
+        } catch(e) {
+            addLiveLog(`BG Spam: error — ${e.message}`);
+        }
+
+        scheduleBgSpam();
+    }
+
+            function startQTSniper() {
         if (qtSniperActive) return;
         qtSniperActive = true;
         scheduleQTSniperPoll();
@@ -4454,8 +5394,10 @@
     }
 
     async function doQTSniperPoll() {
-        if (!qtSniperActive || !state.enabled || crimePaused || (!state.bgCrimeEnabled && (isCrimesPage() || hasCrimePageMarkers()))) { scheduleQTSniperPoll(); return; }
-        if (!state.qtBgEnabled && !state.qtBulletsEnabled && !state.qtPointsEnabled) { scheduleQTSniperPoll(); return; }
+        if (!qtSniperActive || !state.enabled || !state.qtPerksEnabled || crimePaused || (!state.bgCrimeEnabled && (isCrimesPage() || hasCrimePageMarkers()))) { scheduleQTSniperPoll(); return; }
+        if (!state.qtBgEnabled && !state.qtBulletsEnabled && !state.qtPointsEnabled &&
+            !state.qtBustEnabled && !state.qtAlwaysSuccEnabled && !state.qtDoubleMeltsEnabled && !state.qtDoubleXpEnabled &&
+            !state.qtDoubleCashEnabled && !state.qtRareEnabled && !state.qtBulletValueEnabled) { scheduleQTSniperPoll(); return; }
         if (hasCTCChallenge()) { scheduleQTSniperPoll(); return; }
         if (actionInFlight) { scheduleQTSniperPoll(); return; }
 
@@ -4644,6 +5586,83 @@
                 }
             }
 
+            // ── Generic points-priced perk buyer ─────────────────────────────
+            // Handles: Bust (pib), Double Melts (pmd), Double XP (px),
+            //          Double Cash (pd), Rare Cars (ps)
+            const pointsPerkChecks = [
+                {
+                    enabled: state.qtBustEnabled, sel: 'table.pib', label: 'Bust',
+                    maxPts: state.qtBustMaxPts, minAmt: state.qtBustMinMins, unit: 'mins',
+                },
+                {
+                    enabled: state.qtAlwaysSuccEnabled, sel: 'table.pn', label: 'Always Successful',
+                    maxPts: state.qtAlwaysSuccMaxPts, minAmt: state.qtAlwaysSuccMinMins, unit: 'mins',
+                },
+                {
+                    enabled: state.qtDoubleMeltsEnabled, sel: 'table.pmd', label: 'Double Melts',
+                    maxPts: state.qtDoubleMeltsMaxPts, minAmt: state.qtDoubleMeltsMinCars, unit: 'cars',
+                },
+                {
+                    enabled: state.qtDoubleXpEnabled, sel: 'table.px', label: 'Double XP',
+                    maxPts: state.qtDoubleXpMaxPts, minAmt: state.qtDoubleXpMinMins, unit: 'mins',
+                },
+                {
+                    enabled: state.qtDoubleCashEnabled, sel: 'table.pd', label: 'Double Cash',
+                    maxPts: state.qtDoubleCashMaxPts, minAmt: state.qtDoubleCashMinMins, unit: 'mins',
+                },
+                {
+                    enabled: state.qtRareEnabled, sel: 'table.ps', label: 'Rare Cars',
+                    maxPts: state.qtRareMaxPts, minAmt: state.qtRareMinCars, unit: 'cars',
+                },
+                {
+                    enabled: state.qtBulletValueEnabled, sel: 'table.pcv', label: 'Bullet Value',
+                    maxPts: state.qtBulletValueMaxPts, minAmt: state.qtBulletValueMinCars, unit: 'cars',
+                },
+            ];
+            for (const { enabled, sel, label, maxPts, minAmt, unit } of pointsPerkChecks) {
+                if (!enabled) continue;
+                const table = doc.querySelector(sel);
+                if (!table) continue;
+                const rows = [...table.querySelectorAll('tr')].filter(r => r.querySelector('input[type="radio"]'));
+                for (const row of rows) {
+                    const cells = row.querySelectorAll('td');
+                    if (cells.length < 3) continue;
+                    // Parse amount (e.g. "56 mins" or "100 cars")
+                    const amtMatch = cells[0].textContent.match(/[\d,]+/);
+                    if (!amtMatch) continue;
+                    const amt = parseInt(amtMatch[0].replace(/,/g, ''), 10);
+                    if (minAmt > 0 && amt < minAmt) continue;
+                    // Parse price in points (e.g. "62 points")
+                    const ptsMatch = cells[1].textContent.match(/[\d,]+/);
+                    if (!ptsMatch) continue;
+                    const pts = parseInt(ptsMatch[0].replace(/,/g, ''), 10);
+                    // Check per-unit price (pts per car/min)
+                    const ptsPerUnit = amt > 0 ? pts / amt : pts;
+                    if (ptsPerUnit > maxPts) {
+                        addLiveLog(`QT Sniper: ${label} ${amt} ${unit} skipped — ${ptsPerUnit.toFixed(2)} pts/${unit.replace('s','')} exceeds max ${maxPts}`);
+                        continue;
+                    }
+                    // Check points balance
+                    const playerPts = getPlayerPoints();
+                    if (playerPts < pts) {
+                        addLiveLog(`QT Sniper: ${label} ${amt} ${unit} costs ${pts} pts but only have ${playerPts} — skipping`);
+                        continue;
+                    }
+                    const radio = row.querySelector('input[type="radio"]');
+                    if (!radio) continue;
+                    const form = new FormData();
+                    form.append('perk', radio.value);
+                    const buyResp = await fetch('/?p=qt&a=perks', { method: 'POST', body: form, credentials: 'include' });
+                    const buyText = await buyResp.text();
+                    if (buyText && !buyText.includes('error')) {
+                        addLiveLog(`QT Sniper: ✓ Bought ${label} ${amt} ${unit} for ${pts} pts`);
+                        anyBought = true;
+                    } else {
+                        addLiveLog(`QT Sniper: ${label} buy failed (${pts} pts)`);
+                    }
+                }
+            }
+
             // ── Perk expiry extension ─────────────────────────────────────────
             // After all purchases, fetch ?p=perks once and extend any BG or
             // bullet perks (5000+ bullets) with expiry of 1 death
@@ -4763,7 +5782,9 @@
                     eligible.push({ carId, price, carName });
                 }
 
-                if (!eligible.length) continue;
+                if (!eligible.length) {
+                    continue;
+                }
 
                 // Check we have enough funds
                 const totalNeeded = eligible.reduce((s, e) => s + e.price, 0);
@@ -5039,6 +6060,13 @@
 
     // Starts a bullet factory run — checks stock and sets up pending run state
     async function startBulletFactoryRun() {
+        // BG Spam takes priority only when actively firing (target found) — not when paused
+        const bgSpamPaused = getSetting('killBgSpamPausedUntil', 0) > Date.now();
+        if (state.killBgSpamEnabled && state.killBgSpamTarget && state.killBgCheckEnabled && !bgSpamPaused) {
+            // Still mark as checked so we don't spin on this every tick
+            state.lastBulletFactoryCheck = lastHalfHourBoundary();
+            return;
+        }
         addLiveLog('Bullet factory: checking Global Owners page for stock...');
         // Record the current boundary as checked — next trigger will be the NEXT boundary
         state.lastBulletFactoryCheck = lastHalfHourBoundary();
@@ -5075,140 +6103,8 @@
         return `/?p=weaponry&show=bullet&id=${countryId}`;
     }
 
-    // ── No Reload Bust — background fetch polling ─────────────────────────────
-    let noReloadBustTimer  = null;
-    let noReloadBustActive = false;
 
-    function startNoReloadBust() {
-        if (noReloadBustActive) return;
-        noReloadBustActive = true;
-        scheduleNoReloadBustPoll();
-    }
 
-    function stopNoReloadBust() {
-        noReloadBustActive = false;
-        if (noReloadBustTimer) {
-            clearTimeout(noReloadBustTimer);
-            noReloadBustTimer = null;
-        }
-    }
-
-    function scheduleNoReloadBustPoll() {
-        if (!noReloadBustActive) return;
-        const delay = rand(state.bustPollMin, state.bustPollMax);
-        noReloadBustTimer = setTimeout(doNoReloadBustPoll, delay);
-    }
-
-    async function doNoReloadBustPoll() {
-        if (!noReloadBustActive || !state.bustNoReload || !state.enabled || crimePaused) {
-            scheduleNoReloadBustPoll();
-            return;
-        }
-        // Pause during CTC or if jailed
-        if (hasCTCChallenge() || getOwnJailRow()) {
-            scheduleNoReloadBustPoll();
-            return;
-        }
-        try {
-            const cache = Math.random();
-            const resp = await fetch(`/a/jailn.php?cache=${cache}`, {
-                credentials: 'include',
-                cache: 'no-store'
-            });
-            const js = await resp.text();
-            // Response is JS: document.getElementById('jailn').innerHTML="..."
-            // Extract player names from escaped name="player" value="PLAYERNAME"
-            const playerRegex = /name=\\"player\\" value=\\"([^\\]+)\\"/g;
-            let match;
-            while ((match = playerRegex.exec(js)) !== null) {
-                const player = match[1];
-                if (!player) continue;
-                const bustResp = await fetch(
-                    `/?p=jail&player=${encodeURIComponent(player)}`,
-                    { credentials: 'include', cache: 'no-store' }
-                );
-                const bustText = await bustResp.text();
-                if (/helped .+ out of jail/i.test(bustText)) {
-                    addLiveLog(`No reload bust: ✓ busted ${player}`);
-                } else if (/failed helping/i.test(bustText)) {
-                }
-            }
-        } catch (e) {
-            // Silent fail — network errors shouldn't stop the loop
-        }
-        scheduleNoReloadBustPoll();
-    }
-
-    async function handleBustPage() {
-        stopJailObserver();
-
-        if (!state.bustEnabled) {
-            addLiveLog('Bust disabled — returning to crimes');
-            state.bustLoopActive = false;
-            stopBustObserver();
-            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
-            gotoPage('crimes');
-            return;
-        }
-
-        // Handle CTC first
-        if (hasCTCChallenge()) {
-            await maybeSolveCTC();
-            return;
-        }
-
-        // Check if we got jailed from a failed bust
-        const ownRow = getOwnJailRow();
-        if (ownRow) {
-            addLiveLog('Jailed after failed bust');
-            if (state.leaveJailEnabled) {
-                const didLeave = await tryLeaveJail();
-                if (didLeave) {
-                    addLiveLog('Left jail — returning to bust');
-                    await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
-                    gotoPage('jail');
-                    return;
-                }
-            }
-            // Wait in jail — jail observer will handle returning to jail page
-            startJailObserver();
-            jailPassiveMode = true;
-            jailHadOwnRow   = true;
-            const jailMs = getOwnJailTimerMs();
-            return;
-        }
-
-        // Log result of previous bust attempt — only once per page load
-        if (!bustResultHandledThisLoad) {
-            if (hasBustSuccess()) {
-                bustResultHandledThisLoad = true;
-                addLiveLog('Bust successful');
-            } else if (hasBustFailure()) {
-                bustResultHandledThisLoad = true;
-                addLiveLog('Bust failed');
-            }
-        }
-
-        // If jail is empty, just wait — the game's AJAX refreshes #jailn every 3s
-        if (isBustJailEmpty()) {
-            return;
-        }
-
-        // Start the instant MutationObserver in fast mode — it fires the moment
-        // a new prisoner appears in #jailn, bypassing the heartbeat delay
-        if (state.bustFastMode) {
-            startBustObserver();
-            // Also attempt an immediate bust for any already-present targets
-            const didBust = await doBust(true);
-            if (!didBust) {
-            }
-        } else {
-            stopBustObserver();
-            const didBust = await doBust(false);
-            if (!didBust) {
-            }
-        }
-    }
 
     // =========================================================================
     // CRIMES
@@ -5837,14 +6733,12 @@
             }
 
             if (jailHadOwnRow || /the jail is empty!/i.test(jailText)) {
+                state.jailReleasesAt = 0;
                 stopJailObserver();
                 clearScheduledReload();
                 await wait(rand(500, 1200));
                 // Return to the correct page based on which loop is active
-                if (state.bustLoopActive) {
-                    addLiveLog('Own jail row gone — returning to jail page (bust active)');
-                    gotoPage('jail');
-                } else if (state.gtaResetLoopActive) {
+                if (state.gtaResetLoopActive) {
                     addLiveLog('Own jail row gone — returning to GTA (loop active)');
                     gotoPage('gta');
                 } else if (state.meltResetLoopActive) {
@@ -5874,18 +6768,25 @@
             if (!jailHadOwnRow) addLiveLog('Confirmed own jail row');
             jailHadOwnRow = true;
 
+            // Store when jail timer expires — used as fallback if DOM stops updating (e.g. death in jail)
+            const jailMs = getOwnJailTimerMs();
+            if (jailMs != null && jailMs > 0) {
+                const releasesAt = now() + jailMs + 2000; // 2s buffer
+                if (releasesAt > state.jailReleasesAt) {
+                    state.jailReleasesAt = releasesAt;
+                }
+            }
+
             // If Leave Jail toggle is on and we have enough points, use it immediately
             if (state.leaveJailEnabled) {
                 const didLeave = await tryLeaveJail();
                 if (didLeave) {
+                    state.jailReleasesAt = 0;
                     stopJailObserver();
                     clearScheduledReload();
                     await wait(rand(800, 1500));
                     // Return to the correct page based on which loop is active
-                    if (state.bustLoopActive) {
-                        addLiveLog('Bust loop: returning to jail after leaving jail');
-                        gotoPage('jail');
-                    } else if (state.gtaResetLoopActive) {
+                    if (state.gtaResetLoopActive) {
                         addLiveLog('GTA reset loop: returning to GTA after jail');
                         gotoPage('gta');
                     } else if (state.meltResetLoopActive) {
@@ -5899,18 +6800,15 @@
                 // Not enough points — fall through to normal wait behaviour
             }
 
-            const jailMs = getOwnJailTimerMs();
             return;
         }
 
+        state.jailReleasesAt = 0;
         stopJailObserver();
         clearScheduledReload();
         await wait(rand(500, 1200));
         // Return to the correct page based on which loop is active
-        if (state.bustLoopActive) {
-            addLiveLog('Not in jail — staying on jail page (bust active)');
-            gotoPage('jail');
-        } else if (state.gtaResetLoopActive) {
+        if (state.gtaResetLoopActive) {
             addLiveLog('Not in jail — returning to GTA (loop active)');
             gotoPage('gta');
         } else if (state.meltResetLoopActive) {
@@ -5920,6 +6818,215 @@
             addLiveLog('Not in jail, leaving jail page');
             gotoPage('crimes');
         }
+    }
+
+    // ── No Reload Bust — background fetch polling ─────────────────────────────
+    let noReloadBustTimer  = null;
+    let noReloadBustActive = false;
+
+    function scheduleNoReloadBustPoll() {
+        if (!noReloadBustActive) return;
+        const delay = rand(state.bustPollMin, state.bustPollMax);
+        noReloadBustTimer = setTimeout(doNoReloadBustPoll, delay);
+    }
+
+    async function doNoReloadBustPoll() {
+        if (!noReloadBustActive) return;
+        try {
+            const cache = Math.random();
+            const resp = await fetch(`/a/jailn.php?cache=${cache}`, {
+                credentials: 'include',
+                cache: 'no-store'
+            });
+            const js = await resp.text();
+            const playerRegex = /name=\\"player\\" value=\\"([^\\]+)\\"/g;
+            let match;
+            while ((match = playerRegex.exec(js)) !== null) {
+                const player = match[1];
+                if (!player) continue;
+                const bustResp = await fetch(
+                    `/?p=jail&player=${encodeURIComponent(player)}`,
+                    { credentials: 'include', cache: 'no-store' }
+                );
+                const bustText = await bustResp.text();
+                if (/helped .+ out of jail/i.test(bustText)) {
+                    addLiveLog(`No-reload bust: ✓ busted ${player}`);
+                }
+            }
+        } catch(e) {
+            // Silent fail — network errors shouldn't stop the loop
+        }
+        scheduleNoReloadBustPoll();
+    }
+
+    function startNoReloadBust() {
+        if (noReloadBustActive) return;
+        noReloadBustActive = true;
+        addLiveLog('No-reload bust started');
+        scheduleNoReloadBustPoll();
+    }
+
+    function stopBustObserver() { /* no-op in compact mode — bust observer not used */ }
+
+    function stopNoReloadBust() {
+        noReloadBustActive = false;
+        if (noReloadBustTimer) { clearTimeout(noReloadBustTimer); noReloadBustTimer = null; }
+    }
+
+    // ── Bonus Points Auto-spend ───────────────────────────────────────────────
+    // Map data-bp values to their point costs
+    const BONUS_PERK_COSTS = {
+        sucjail2:  2,
+        rare2:     4,
+        sucother2: 10,
+        dblxp2:    10,
+    };
+
+    function getBonusPointsFromPage() {
+        // Crimes page header: <a href="?p=my-stats&s=bonus">...Bonus...</a> N
+        const bonusLink = [...document.querySelectorAll('.bgm.c')].find(el =>
+            el.querySelector('a[href*="s=bonus"]')
+        );
+        if (!bonusLink) return 0;
+        const text = bonusLink.textContent.trim();
+        const match = text.match(/(\d+)\s*$/);
+        return match ? parseInt(match[1], 10) : 0;
+    }
+
+    function startBonusPointsSpender() {}  // no-op, runs on crime page visits
+    function stopBonusPointsSpender()  {}  // no-op
+
+    async function maybeBuyBonusPerks() {
+        if (!state.enabled || !state.bonusPointsEnabled) return;
+
+        // Read balance from crimes page DOM — no unnecessary fetches
+        let remaining = getBonusPointsFromPage();
+        if (remaining <= 0) return;
+
+        // Get the priority order from saved setting, fall back to default order
+        let order;
+        try { order = JSON.parse(getSetting('bonusPerkOrder', '[]')); } catch(e) { order = []; }
+        if (!order.length) order = ['sucjail2', 'rare2', 'sucother2', 'dblxp2'];
+
+        // Get which perks are enabled — prefer saved setting, fall back to DOM
+        let enabledPerks;
+        try {
+            enabledPerks = JSON.parse(getSetting('bonusEnabledPerks') || '[]');
+        } catch(e) { enabledPerks = []; }
+        if (!enabledPerks.length) {
+            enabledPerks = [...document.querySelectorAll('#ug-bot-bonus-priority-list .ug-bonus-cb')]
+                .filter(cb => cb.checked)
+                .map(cb => cb.closest('tr')?.dataset.bp)
+                .filter(Boolean);
+        }
+
+        if (!enabledPerks.length) return;
+
+        // Buy perks in priority order until we can't afford any more
+        for (const bp of order) {
+            if (!enabledPerks.includes(bp)) continue;
+            const cost = BONUS_PERK_COSTS[bp];
+            if (!cost || remaining < cost) continue;
+
+            addLiveLog(`Bonus pts: buying ${bp} for ${cost} pts (have ${remaining})`);
+            try {
+                const body = new URLSearchParams();
+                body.append('bp', bp);
+                const resp = await fetch('/?p=my-stats&s=bonus', {
+                    method: 'POST',
+                    credentials: 'include',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body: body.toString()
+                });
+                if (resp.ok) {
+                    // Read updated balance from response
+                    const respText = await resp.text();
+                    const respDoc  = new DOMParser().parseFromString(respText, 'text/html');
+                    const balMatch = respDoc.body?.textContent?.match(/Bonus points:\s*(\d+)/i);
+                    if (balMatch) {
+                        remaining = parseInt(balMatch[1], 10);
+                    } else {
+                        remaining -= cost; // fallback
+                    }
+                    addLiveLog(`Bonus pts: ✓ purchased ${bp} (${remaining} pts remaining)`);
+                } else {
+                    addLiveLog(`Bonus pts: purchase failed for ${bp}`);
+                    break;
+                }
+            } catch(e) {
+                addLiveLog(`Bonus pts: buy error — ${e.message}`);
+                break;
+            }
+        }
+    }
+
+    // ── Auto-buy Robot Bodyguard ──────────────────────────────────────────────
+    let autoBuyBgTimer  = null;
+    let autoBuyBgActive = false;
+
+    function startAutoBuyBg() {
+        if (autoBuyBgActive) return;
+        autoBuyBgActive = true;
+        doAutoBuyBg();
+    }
+
+    function stopAutoBuyBg() {
+        autoBuyBgActive = false;
+        if (autoBuyBgTimer) { clearTimeout(autoBuyBgTimer); autoBuyBgTimer = null; }
+    }
+
+    function scheduleAutoBuyBg() {
+        if (!autoBuyBgActive) return;
+        const intervalMs = state.autoBuyBgMins * 60 * 1000;
+        const lastRun    = Number(getSetting('autoBuyBgLastRun', 0));
+        const elapsed    = Date.now() - lastRun;
+        const delay      = Math.max(0, intervalMs - elapsed);
+        autoBuyBgTimer   = setTimeout(doAutoBuyBg, delay);
+    }
+
+    async function doAutoBuyBg() {
+        if (!autoBuyBgActive || !state.enabled || !state.autoBuyBgEnabled) {
+            scheduleAutoBuyBg();
+            return;
+        }
+
+        const intervalMs = state.autoBuyBgMins * 60 * 1000;
+        const lastRun    = Number(getSetting('autoBuyBgLastRun', 0));
+        if (Date.now() - lastRun < intervalMs) {
+            scheduleAutoBuyBg();
+            return;
+        }
+
+        const pts = getPlayerPoints();
+        if (pts < state.autoBuyBgMinPts) {
+            addLiveLog(`Auto-buy BG: only ${pts} pts, need ${state.autoBuyBgMinPts} — skipping`);
+            scheduleAutoBuyBg();
+            return;
+        }
+
+        setSetting('autoBuyBgLastRun', Date.now());
+        addLiveLog(`Auto-buy BG: ${pts} pts available, purchasing Robot Bodyguard...`);
+
+        try {
+            const body = new URLSearchParams();
+            body.append('itema', 'Special#5');  // Robot Bodyguard = Special#5
+            const resp = await fetch('/?p=points', {
+                method: 'POST',
+                credentials: 'include',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: body.toString()
+            });
+            if (resp.ok) {
+                addLiveLog('Auto-buy BG: ✓ Robot Bodyguard purchased');
+                updateStats(s => { s.lastActionText = 'Bought Robot BG'; });
+            } else {
+                addLiveLog('Auto-buy BG: purchase failed');
+            }
+        } catch (e) {
+            addLiveLog(`Auto-buy BG: error — ${e.message}`);
+        }
+
+        scheduleAutoBuyBg();
     }
 
     // =========================================================================
@@ -6201,7 +7308,7 @@
                 addLiveLog(`Mission submit: only ${checkboxes.length} car(s) available, need ${pending.amount} — mission cannot be completed, clearing pending state`);
                 updateStats(s => { s.lastActionText = `Car mission stuck: insufficient ${pending.carNameRaw}`; });
                 state.pendingMissionCheck = null;
-                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                await wait(navRand());
                 gotoPage('crimes');
                 return true;
             }
@@ -6215,7 +7322,7 @@
                 addLiveLog(`Mission complete: submitted ${pending.amount} x ${pending.carNameRaw}`);
                 state.pendingMissionCheck = null;
                 state.missionGaveUp       = false;
-                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                await wait(navRand());
                 gotoPage('crimes');
                 return true;
             }
@@ -6235,7 +7342,7 @@
                     updateStats(s => { s.lastActionText = `Car mission stuck: insufficient ${pending.carNameRaw}`; });
                     state.pendingMissionCheck = null;
                     state.missionGaveUp       = true;
-                    await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                    await wait(navRand());
                     gotoPage('crimes');
                     return true;
                 }
@@ -6248,7 +7355,7 @@
                     });
                     state.pendingMissionCheck = null;
                     state.missionGaveUp       = false;
-                    await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                    await wait(navRand());
                     gotoPage('crimes');
                     return true;
                 }
@@ -6372,7 +7479,7 @@
                     alreadyAccepted: true,
                     startedAt:       now()
                 };
-                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                await wait(navRand());
                 window.location.href = new URL(hereLink.getAttribute('href'), window.location.href).toString();
                 return true;
             }
@@ -6395,7 +7502,7 @@
                 stage:      'inventory',
                 startedAt:  now()
             };
-            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            await wait(navRand());
             window.location.href = new URL(hereLink.getAttribute('href'), window.location.href).toString();
             return true;
         }
@@ -6494,11 +7601,24 @@
             if (killBgCheckInput) killBgCheckInput.checked = false;
             disabled.push('killBgCheck');
         }
+        if (state.killBgSpamEnabled) {
+            state.killBgSpamEnabled = false;
+            if (killBgSpamInput) killBgSpamInput.checked = false;
+            stopBgSpam();
+            disabled.push('killBgSpam');
+        }
+        if (state.autoBuyGun) {
+            state.autoBuyGun = false;
+            const _autoBuyGunEl = document.querySelector('#ug-bot-auto-buy-gun');
+            if (_autoBuyGunEl) _autoBuyGunEl.checked = false;
+            disabled.push('autoBuyGun');
+        }
         if (disabled.length > 0) {
             GM_setValue('accAutoDisabled', JSON.stringify(disabled));
             const labels = {
                 autoDrugs: 'Drug run', killSearch: 'Search players',
-                killProtectedRecheck: 'Protected re-search', killBgCheck: 'BG check loop'
+                killProtectedRecheck: 'Protected re-search', killBgCheck: 'BG check loop',
+                killBgSpam: 'BG Spam', autoBuyGun: 'Auto buy gun'
             };
             addLiveLog('Auto login: disabled on new account — ' + disabled.map(k => labels[k]).join(', '));
         }
@@ -6508,6 +7628,23 @@
         GM_setValue('killSearchIndex', 0);
         GM_setValue('killCurrentSearch', '');
         GM_setValue('killLastOnlineScan', 0);
+        setSetting('bgSpamTravelTarget', '');
+        setSetting('killBgSpamPaused', false);
+        setSetting('killBgWaitUntil', 0);
+        setSetting('killLoopCooldownUntil', 0);
+        stopBgSpam();
+        // Clear BG Farm state and reset all alive players to unknown — searches are cleared on death
+        const _players = getSetting('killPlayers', []);
+        const _cleared = _players.map(p => {
+            const np = { ...p };
+            delete np.bodyguard;
+            delete np.expectedFoundAt;
+            delete np.bgFarmWaitUntil;
+            delete np.searchExpiresAt;
+            if (np.status === 'alive' || np.status === 'protected') np.status = 'unknown';
+            return np;
+        });
+        setSetting('killPlayers', _cleared);
         // Clear GB disable flag and restore all crimes so new account starts fresh
         setSetting('gbDisableFired', false);
         setSetting('bgCrimeEnabled', true);
@@ -6675,6 +7812,12 @@
             GM_setValue('killLoopActive', false);
             GM_setValue('killSearchIndex', 0);
             GM_setValue('killCurrentSearch', '');
+            // Re-enable bullet factory after death unless BG Spam is active
+            // (BG Spam requires staying in one country so bullet factory is incompatible)
+            if (!state.killBgSpamEnabled || !state.killBgSpamTarget) {
+                GM_setValue('bulletFactoryEnabled', true);
+                addLiveLog('Post-death: bullet factory re-enabled');
+            }
             if (state.accRetrieve) {
                 GM_setValue('accPendingRetrieve', true);
             }
@@ -6805,20 +7948,28 @@
 
         // Detect server-side crimes page block (empty #maincen)
         // This happens when the game detects bot-like behaviour on the crimes page
-        if (!document.querySelector('#maincen')?.textContent.trim()) {
+        // Skip this check in bgCrime mode — we don't need #maincen content
+        const _maincenEmpty = !document.querySelector('#maincen')?.textContent.trim();
+        if (!state.bgCrimeEnabled && _maincenEmpty) {
             addLiveLog('Crimes page blocked by server — switching to other actions');
             // Try to do something else useful instead
             const gtaUsable   = isGTAEnabled()  && !isGTALocked();
             const meltUsable  = isMeltUsable();
             const drugsUsable = isDrugsEnabled();
-            if (drugsUsable && isInternalDriveReady()) {
-                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            if (drugsUsable && isInternalDriveReady() && !(state.killBgSpamEnabled && state.killBgSpamTarget && state.killBgCheckEnabled)) {
+                await wait(navRand());
                 gotoPage('drugs');
             } else if (gtaUsable && isInternalGTAReady()) {
-                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                state.killSearchLoopActive = false; // prevent kill scanner intercepting mid-load
+                // Dupe mode: occasionally delay GTA to look less automated
+                if (PERSONALITY.gtaDelayChancePct > 0 && Math.random() * 100 < PERSONALITY.gtaDelayChancePct) {
+                    await wait(rand(1000, PERSONALITY.gtaDelayExtraMs));
+                }
+                await wait(navRand());
                 gotoPage('gta');
             } else if (meltUsable && isInternalMeltReady()) {
-                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                state.killSearchLoopActive = false; // prevent kill scanner intercepting mid-load
+                await wait(navRand());
                 gotoCleanMeltPage(1);
             } else {
                 // Nothing else to do — good opportunity for a human page visit
@@ -6837,13 +7988,17 @@
         // When background crimes is enabled, skip crime committing entirely and
         // immediately route to the next available non-crime action
         if (state.bgCrimeEnabled) {
+            // Dupe mode: occasionally linger on crimes page before acting
+            if (PERSONALITY.crimePageLingerMs > 0 && Math.random() < 0.3) {
+                await wait(rand(0, PERSONALITY.crimePageLingerMs));
+            }
             const gtaUsable   = isGTAEnabled()  && !isGTALocked();
             const meltUsable  = isMeltUsable();
             const drugsUsable = isDrugsEnabled();
 
             if (shouldRunRepairCycle()) {
                 addLiveLog(`Repair threshold reached (${state.meltsSinceRepair}/${state.repairEveryMelts})`);
-                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                await wait(navRand());
                 gotoPage('cars', { page: 1 });
                 return;
             }
@@ -6854,26 +8009,26 @@
                     const reserve = calcDrugReserve(state.drugCapacityCache);
                     addLiveLog(`Swiss Bank deposit: depositing $${depositAmount.toLocaleString()} (keeping $${reserve.toLocaleString()} reserve)`);
                     state.pendingBankAction = { type: 'deposit', amount: depositAmount };
-                    await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                    await wait(navRand());
                     gotoPage('bank');
                     return;
                 }
             }
 
-            if (drugsUsable && isInternalDriveReady() && !state.killLoopActive) {
-                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            if (drugsUsable && isInternalDriveReady() && !state.killLoopActive && !(state.killBgSpamEnabled && state.killBgSpamTarget && state.killBgCheckEnabled)) {
+                await wait(navRand());
                 gotoPage('drugs');
                 return;
             }
             if (gtaUsable && isInternalGTAReady()) {
-                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                await wait(navRand());
                 gotoPage('gta');
                 return;
             }
             if (meltUsable && isInternalMeltReady()) {
                 resetMeltSearchState();
                 clearPendingMeltResult();
-                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                await wait(navRand());
                 gotoCleanMeltPage(1);
                 return;
             }
@@ -6897,7 +8052,7 @@
 
         if (shouldRunRepairCycle()) {
             addLiveLog(`Repair threshold reached (${state.meltsSinceRepair}/${state.repairEveryMelts})`);
-            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            await wait(navRand());
             gotoPage('cars', { page: 1 });
             return;
         }
@@ -6909,7 +8064,7 @@
                 const reserve = calcDrugReserve(state.drugCapacityCache);
                 addLiveLog(`Swiss Bank deposit: depositing $${depositAmount.toLocaleString()} (keeping $${reserve.toLocaleString()} reserve)`);
                 state.pendingBankAction = { type: 'deposit', amount: depositAmount };
-                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                await wait(navRand());
                 gotoPage('bank');
                 return;
             }
@@ -6975,21 +8130,23 @@
         const meltUsable  = isMeltUsable();
         const drugsUsable = isDrugsEnabled();
 
+        const bgSpamSuppressed = state.killBgSpamEnabled && state.killBgSpamTarget && state.killBgCheckEnabled;
+
         // Comp mode — always go to drugs to buy 1 unit at a time, drive not needed yet
-        if (drugsUsable && state.drugCompEnabled && !state.killLoopActive) {
-            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+        if (drugsUsable && state.drugCompEnabled && !state.killLoopActive && !bgSpamSuppressed) {
+            await wait(navRand());
             gotoPage('drugs');
             return;
         }
 
-        if (drugsUsable && isInternalDriveReady() && !state.killLoopActive) {
-            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+        if (drugsUsable && isInternalDriveReady() && !state.killLoopActive && !bgSpamSuppressed) {
+            await wait(navRand());
             gotoPage('drugs');
             return;
         }
 
         if (gtaUsable && isInternalGTAReady()) {
-            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            await wait(navRand());
             gotoPage('gta');
             return;
         }
@@ -6997,7 +8154,7 @@
         if (meltUsable && isInternalMeltReady()) {
             resetMeltSearchState();
             clearPendingMeltResult();
-            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            await wait(navRand());
             gotoCleanMeltPage(1);
             return;
         }
@@ -7025,7 +8182,7 @@
             addLiveLog('GTA is rank-locked — returning to crimes');
             state.gtaResetLoopActive = false;
             state.resetGTAEnabled    = false;
-            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            await wait(navRand());
             gotoPage('crimes');
             return;
         }
@@ -7033,10 +8190,13 @@
         // Allow entry if GTA toggle is on OR if GTA reset loop is active
         if (!isGTAEnabled() && !state.gtaResetLoopActive) {
             addLiveLog('GTA disabled by user — returning to crimes');
-            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            await wait(navRand());
             gotoPage('crimes');
             return;
         }
+
+        // Check bonus points on GTA page — header shows live balance, visited ~every 90s
+        await maybeBuyBonusPerks();
 
         // CTC can appear on the GTA page after a reset — handle it before anything else.
         // Without this check the bot would see no Steal button and no reset button and
@@ -7056,11 +8216,11 @@
         if (didGTA) {
             // In GTA reset loop mode, come straight back to GTA after stealing
             if (state.gtaResetLoopActive) {
-                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                await wait(navRand());
                 gotoPage('gta');
                 return;
             }
-            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            await wait(navRand());
             gotoPage('crimes');
             return;
         }
@@ -7072,7 +8232,7 @@
                 addLiveLog(`GTA reset loop: points dropped below threshold — exiting GTA reset loop, reverting to normal`);
                 state.gtaResetLoopActive = false;
                 state.resetGTAEnabled    = false;
-                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                await wait(navRand());
                 gotoPage('crimes');
                 return;
             }
@@ -7093,7 +8253,7 @@
 
         addLiveLog('GTA not ready yet — returning to crimes');
         if (await maybeVisitHumanPage()) return;
-        await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+        await wait(navRand());
         gotoPage('crimes');
     }
 
@@ -7106,7 +8266,7 @@
             resetMeltSearchState();
             clearPendingMeltResult();
             state.meltResetLoopActive = false;
-            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            await wait(navRand());
             gotoPage('crimes');
             return;
         }
@@ -7115,7 +8275,7 @@
             addLiveLog('Melting disabled by user — returning to crimes');
             resetMeltSearchState();
             clearPendingMeltResult();
-            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            await wait(navRand());
             gotoPage('crimes');
             return;
         }
@@ -7156,7 +8316,7 @@
             if (state.meltResetLoopActive) {
                 if (shouldRunRepairCycle()) {
                     addLiveLog(`Melt reset loop: repair threshold reached (${state.meltsSinceRepair}/${state.repairEveryMelts}) — going to cars`);
-                    await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                    await wait(navRand());
                     gotoPage('cars', { page: 1 });
                     return;
                 }
@@ -7166,18 +8326,18 @@
                     addLiveLog(`Melt reset loop: points dropped below threshold — exiting melt reset loop, reverting to normal`);
                     state.meltResetLoopActive = false;
                     state.resetMeltEnabled    = false;
-                    await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                    await wait(navRand());
                     gotoPage('crimes');
                     return;
                 }
 
                 addLiveLog('Melt reset loop: melt complete — going back to melt page');
-                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                await wait(navRand());
                 gotoCleanMeltPage(1);
                 return;
             }
 
-            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            await wait(navRand());
             gotoPage('crimes');
             return;
         }
@@ -7215,7 +8375,7 @@
                 state.resetMeltEnabled    = false;
                 resetMeltSearchState();
                 clearPendingMeltResult();
-                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                await wait(navRand());
                 gotoPage('crimes');
                 return;
             }
@@ -7232,7 +8392,7 @@
             if (pagination.hasNext) {
                 resetMeltSearchState();
                 addLiveLog(`Melt page ${pagination.page} still empty — checking page ${pagination.nextPage}`);
-                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                await wait(navRand());
                 gotoCleanMeltPage(pagination.nextPage);
                 return;
             }
@@ -7241,7 +8401,7 @@
             addLiveLog(`No meltable cars found — returning to crimes`);
             resetMeltSearchState();
             clearPendingMeltResult();
-            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            await wait(navRand());
             gotoPage('crimes');
             return;
         }
@@ -7251,7 +8411,7 @@
         if (protectedOnly && pagination.hasNext) {
             resetMeltSearchState();
             addLiveLog(`No safe meltable cars on page ${pagination.page} — checking page ${pagination.nextPage}`);
-            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            await wait(navRand());
             gotoCleanMeltPage(pagination.nextPage);
             return;
         }
@@ -7263,7 +8423,7 @@
             state.resetMeltEnabled    = false;
             resetMeltSearchState();
             clearPendingMeltResult();
-            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            await wait(navRand());
             gotoPage('crimes');
             return;
         }
@@ -7280,7 +8440,7 @@
             addLiveLog('Melt reset loop: points below threshold — exiting melt reset loop, reverting to normal');
             state.meltResetLoopActive = false;
             state.resetMeltEnabled    = false;
-            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            await wait(navRand());
             gotoPage('crimes');
             return;
         }
@@ -7293,7 +8453,7 @@
         resetMeltSearchState();
         clearPendingMeltResult();
         if (await maybeVisitHumanPage()) return;
-        await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+        await wait(navRand());
         gotoPage('crimes');
     }
 
@@ -7317,13 +8477,41 @@
         // Handle pending travel — we've just arrived on a car page to drive somewhere
         // ── Stage: travel — on cars LIST page, find and navigate to best car ──
         if (pending && pending.stage === 'travel' && pending.travelTo) {
+            // Wait for cars page DOM to fully load before searching for car links
+            const carLinks = document.querySelectorAll('a[href*="?p=car&id="]');
+            if (carLinks.length === 0) {
+                // DOM not ready yet — wait and let tick retry
+                await wait(rand(800, 1200));
+                return;
+            }
             // We should be on the cars list page — find best travel car and navigate to it
-            const travelCarUrl = findBestTravelCarUrl();
+            const failedUrls = pending.failedCarUrls || [];
+            const travelCarUrl = findBestTravelCarUrl(failedUrls);
             if (!travelCarUrl) {
+                if (!isInternalDriveReady()) {
+                    // Drive on cooldown — wait for it rather than abandoning
+                    const remaining = Math.ceil(getInternalDriveRemainingMs() / 1000);
+                    addLiveLog(`Kill loop: no travel car available — drive not ready (${remaining}s), waiting`);
+                    state.killSearchLoopActive = false;
+                    await wait(navRand());
+                    gotoPage('crimes');
+                    return;
+                }
+                // Drive ready but no suitable car found — check if this is a BG Farm check
+                // If so, retry after a delay rather than abandoning
+                const isBgFarmTravel = pending.afterTravel?.stage === 'bg_farm_shoot' || pending.afterTravel?.stage === 'bgcheck';
+                if (isBgFarmTravel) {
+                    addLiveLog('Kill loop: no travel car found for BG Farm check — retrying in 30s');
+                    state.killSearchLoopActive = false;
+                    await wait(30000);
+                    gotoPage('cars');
+                    return;
+                }
                 addLiveLog('Kill loop: no suitable travel car found — clearing');
                 state.pendingKillAction = null;
-                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
-                gotoPage('kill');
+                state.killLoopActive    = false;
+                await wait(navRand());
+                gotoPage('crimes');
                 return;
             }
             addLiveLog(`Kill loop: navigating to car detail page for ${pending.travelTo}`);
@@ -7338,7 +8526,7 @@
             if (!locationValue) {
                 addLiveLog(`Kill loop: invalid travel target "${pending.travelTo}" — clearing`);
                 state.pendingKillAction = null;
-                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                await wait(navRand());
                 gotoPage('kill');
                 return;
             }
@@ -7360,7 +8548,7 @@
                     if (!repairBtn) {
                         addLiveLog('Kill loop: car damaged but no repair button — trying next car');
                         state.pendingKillAction = { ...pending, stage: 'travel' };
-                        await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                        await wait(navRand());
                         gotoPage('cars');
                         return;
                     }
@@ -7378,7 +8566,7 @@
                 const remaining = Math.ceil(getInternalDriveRemainingMs() / 1000);
                 addLiveLog(`Kill loop: drive not ready yet (${remaining}s) — returning to crimes to wait`);
                 // Keep pendingKillAction so we resume travel when drive is ready
-                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                await wait(navRand());
                 gotoPage('crimes');
                 return;
             }
@@ -7389,12 +8577,22 @@
             const goBtn = document.querySelector('form input[type="submit"][name="subm"][value="Go"]');
 
             if (!locationRadio || !goBtn) {
-                addLiveLog('Kill loop: drive form not found on car detail page — drive may still be on cooldown, returning to crimes');
-                // Push drive timer forward to prevent tight loop — game cooldown may be longer than our internal timer
-                state.nextDriveReadyAt = now() + 15000;
-                // Don't clear pendingKillAction — retry when drive is ready
-                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
-                gotoPage('crimes');
+                const failedAttempts = (pending.driveAttempts || 0) + 1;
+                if (failedAttempts > 5) {
+                    addLiveLog(`Kill loop: drive form not found after ${failedAttempts} attempts — abandoning travel to ${pending.travelTo}`);
+                    state.pendingKillAction = null;
+                    state.nextDriveReadyAt  = now() + 15000;
+                    await wait(navRand());
+                    gotoPage('crimes');
+                    return;
+                }
+                addLiveLog('Kill loop: drive form not found on car detail page — trying a different car');
+                // Track this car URL as failed so findBestTravelCarUrl skips it
+                const failedUrls = [...(pending.failedCarUrls || []), pending.travelCarUrl].filter(Boolean);
+                state.pendingKillAction = { ...pending, travelCarUrl: null, stage: 'travel', driveAttempts: failedAttempts, failedCarUrls: failedUrls };
+                state.nextDriveReadyAt = now() + 2000;
+                await wait(navRand());
+                gotoPage('cars');
                 return;
             }
 
@@ -7411,7 +8609,7 @@
                 addLiveLog(`Kill loop: drive to ${pending.travelTo} failed after ${attempts} attempts — abandoning`);
                 state.pendingKillAction = null;
                 state.nextDriveReadyAt  = now() + 15000;
-                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                await wait(navRand());
                 gotoPage('kill');
                 return;
             }
@@ -7419,11 +8617,15 @@
 
             freshRadio.checked = true;
             freshRadio.dispatchEvent(new Event('change', { bubbles: true }));
-            state.nextDriveReadyAt = now() + 120000;
+            state.nextDriveReadyAt = now() + 60000;
             humanClick(freshGo);
             addLiveLog(`Kill loop: driving to ${pending.travelTo} (attempt ${attempts})`);
-            state.pendingKillAction = { stage: 'bgcheck', targetName: pending.targetName, shootAfterBg: pending.shootAfterBg, deferred: pending.deferred };
-            state.pendingKillAction = { stage: 'bgcheck', targetName: pending.targetName, shootAfterBg: pending.shootAfterBg, deferred: pending.deferred }; // travelTo cleared intentionally
+            // After driving, use afterTravel action if set, otherwise fall back to bgcheck
+            if (pending.afterTravel) {
+                state.pendingKillAction = { ...pending.afterTravel };
+            } else {
+                state.pendingKillAction = { stage: 'bgcheck', targetName: pending.targetName, shootAfterBg: pending.shootAfterBg, deferred: pending.deferred };
+            }
             return;
         }
 
@@ -7479,7 +8681,7 @@
                 if (!pa || pa.stage !== 'bg_shoot') {
                     state.killLoopActive = false;
                 }
-                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                await wait(navRand());
                 gotoPage('crimes');
                 return;
             }
@@ -7489,7 +8691,7 @@
         if (state.penaltyDropsAt === 0 && isKillPenaltyTooHigh() && !state.pendingPenaltyPage) {
             // Penalty still too high after timer fired — recalculate
             state.pendingPenaltyPage = true;
-            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            await wait(navRand());
             gotoPage('kill-penalty');
             return;
         }
@@ -7498,7 +8700,7 @@
         if (state.killPenaltyThreshold > 0 &&
             !state.penaltyDropsAt && !state.pendingPenaltyPage && isKillPenaltyTooHigh()) {
             state.pendingPenaltyPage = true;
-            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            await wait(navRand());
             gotoPage('kill-penalty');
             return;
         }
@@ -7515,14 +8717,14 @@
         const livePenalty = getKillPenaltyMultiplier();
         const cached = Number(getSetting('cachedKillPenalty', 1.0));
         if (state.killPenaltyThreshold > 0 && !state.pendingPenaltyPage) {
-            const penaltyTooHigh = livePenalty > state.killPenaltyThreshold;
+            const penaltyTooHigh = livePenalty >= state.killPenaltyThreshold;
             const penaltyChanged = Math.abs(livePenalty - cached) >= 0.05;
             const needsCalc = !state.penaltyDropsAt || penaltyChanged;
             if (penaltyTooHigh && needsCalc) {
                 const reason = penaltyChanged ? `penalty changed (${cached}x → ${livePenalty}x)` : `penalty ${livePenalty}x exceeds threshold`;
                 addLiveLog(`Kill loop: ${reason} — navigating to penalty page`);
                 state.pendingPenaltyPage = true;
-                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                await wait(navRand());
                 gotoPage('kill-penalty');
                 return;
             }
@@ -7535,8 +8737,324 @@
             const mult = getKillPenaltyMultiplier();
             addLiveLog(`Kill loop: penalty ${mult}x exceeds threshold — navigating to penalty page`);
             state.pendingPenaltyPage = true;
-            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            await wait(navRand());
             gotoPage('kill-penalty');
+            return;
+        }
+
+
+        // Handle BG Farm 1-bullet check on original target after killing their BG
+        if (pending && pending.stage === 'bg_farm_check') {
+            const target = pending.targetName;
+
+            // Respect kill penalty threshold — pause BG farming if too high
+            if (isKillPenaltyTooHigh()) {
+                addLiveLog(`Kill loop: BG Farm — penalty too high, pausing BG farm for ${target}`);
+                state.pendingKillAction = null;
+                await wait(navRand());
+                gotoPage('crimes');
+                return;
+            }
+
+            addLiveLog(`Kill loop: BG Farm — checking ${target} for next BG`);
+
+            // Check if target is already in Players Found on this page
+            const foundEl = [...document.querySelectorAll('.bgl.i.wb .bgm.chs:not(.pd) a[href*="?p=profile&u="]')]
+                .find(a => { try { return new URL(a.getAttribute('href'), window.location.href).searchParams.get('u').toLowerCase() === target.toLowerCase(); } catch(_){ return false; } });
+
+            if (foundEl) {
+                // Target already found — need 1 bullet, travel to their country if needed
+                const targetPlayer = (state.killPlayers || []).find(p => p.name.toLowerCase() === target.toLowerCase());
+                const targetCountry = targetPlayer?.country;
+                const myCountry = document.querySelector('#player-location')?.textContent.trim();
+
+                if (targetCountry && targetCountry !== myCountry) {
+                    // Need to travel first
+                    addLiveLog(`Kill loop: BG Farm — travelling to ${targetCountry} to 1-bullet check ${target}`);
+                    state.pendingKillAction = {
+                        stage:       'travel',
+                        travelTo:    targetCountry,
+                        targetName:  target,
+                        shootAfterBg: pending.shootAfterBg,
+                        afterTravel: { stage: 'bg_farm_shoot', targetName: target, shootAfterBg: pending.shootAfterBg }
+                    };
+                } else {
+                    state.pendingKillAction = { stage: 'bg_farm_shoot', targetName: target, shootAfterBg: pending.shootAfterBg };
+                }
+            } else {
+                // Check if already being searched
+                const searchingEl = [...document.querySelectorAll('.bgl.i.wb .bgm.chs.pd b')]
+                    .find(b => b.textContent.trim().toLowerCase() === target.toLowerCase());
+
+                if (searchingEl) {
+                    // Already being searched — read remaining time, store per-player
+                    const timerSpan = searchingEl.closest('.bgm.chs.pd')?.querySelector('.chd');
+                    const foundInMs = timerSpan ? parseLostInMs(textOf(timerSpan)) : null;
+                    const waitMins  = foundInMs != null ? Math.ceil(foundInMs / 60000) : '?';
+                    addLiveLog(`Kill loop: BG Farm — ${target} being searched, found in ~${waitMins}m — waiting`);
+                    const pl  = state.killPlayers || [];
+                    const idx = pl.findIndex(p => p.name.toLowerCase() === target.toLowerCase());
+                    if (idx !== -1) {
+                        if (foundInMs != null) pl[idx].bgFarmWaitUntil = now() + foundInMs + (5 * 60 * 1000);
+                        pl[idx].lastBgCheck = now(); // mark as checked so interval resets
+                        saveKillPlayers(pl);
+                    }
+                    // Don't deactivate kill loop — continue to next due player
+                    state.pendingKillAction = null;
+                } else {
+                    // Not being searched — initiate 24-hour search
+                    addLiveLog(`Kill loop: BG Farm — searching ${target} for 24 hours`);
+                    const searchForm = document.querySelector('form input[name="do"][value="search"]');
+                    if (searchForm) {
+                        const form    = searchForm.closest('form');
+                        const nameInput = form?.querySelector('input[name="username"]');
+                        const hoursInput = form?.querySelector('input[name="hours"]');
+                        if (nameInput && hoursInput) {
+                            nameInput.value  = target;
+                            hoursInput.value = '24';
+                            form.querySelector('input[type="submit"]')?.click();
+                            state.killSearchLoopActive = true;
+                            state.killLoopActive       = false;
+                        }
+                    }
+                }
+            }
+            await wait(navRand());
+            gotoPage('kill');
+            return;
+        }
+
+        // Handle the actual 1-bullet shot during BG Farm
+        if (pending && pending.stage === 'bg_farm_shoot') {
+            const target = pending.targetName;
+
+            // Respect kill penalty threshold
+            if (isKillPenaltyTooHigh()) {
+                addLiveLog(`Kill loop: BG Farm — penalty too high, pausing BG farm for ${target}`);
+                state.pendingKillAction = null;
+                await wait(navRand());
+                gotoPage('crimes');
+                return;
+            }
+
+            addLiveLog(`Kill loop: BG Farm — shooting ${target} with 1 bullet to check for BG`);
+
+            // Need at least 1 bullet
+            if (getPlayerBullets() < 1) {
+                addLiveLog(`Kill loop: BG Farm — waiting for bullets to check ${target}`);
+                await wait(navRand());
+                gotoPage('kill');
+                return;
+            }
+
+            const killForm = [...document.querySelectorAll('form')].find(f => f.querySelector('input[name="do"][value="kill"]'));
+            if (killForm) {
+                const usernameSelect = killForm.querySelector('select[name="username"]');
+                const bulletsInput   = killForm.querySelector('input[name="bullets"]');
+                const showCheckbox   = killForm.querySelector('input[name="show"]');
+                const submitBtn      = killForm.querySelector('input[type="submit"][value="Shoot"]');
+                if (usernameSelect && bulletsInput && submitBtn) {
+                    const targetOption = [...usernameSelect.options].find(o =>
+                        o.value.toLowerCase() === target.toLowerCase() ||
+                        o.text.toLowerCase() === target.toLowerCase()
+                    );
+                    if (!targetOption) {
+                        addLiveLog(`Kill loop: BG Farm — ${target} not in kill dropdown — may have moved, retrying`);
+                        state.pendingKillAction = null;
+                        await wait(navRand());
+                        gotoPage('kill');
+                        return;
+                    }
+                    usernameSelect.value = target;
+                    bulletsInput.value   = '1';
+                    if (showCheckbox) showCheckbox.checked = !state.killAnonymousShooting;
+                    state.pendingKillAction = { stage: 'bg_farm_result', targetName: target, shootAfterBg: pending.shootAfterBg, afterVerify: pending.afterVerify };
+                    state.lastActionAt = now();
+                    humanClick(submitBtn);
+                    return;
+                }
+            }
+            addLiveLog(`Kill loop: BG Farm — shoot form not found for ${target}`);
+            state.pendingKillAction = null;
+            await wait(navRand());
+            gotoPage('kill');
+            return;
+        }
+
+        // Handle result of BG Farm 1-bullet shot
+        if (pending && pending.stage === 'bg_farm_result') {
+            const target = pending.targetName;
+            const failEl = document.querySelector('.bgm.fail');
+            const credEl = [...document.querySelectorAll('.bgm.cred')].find(el => /failed to kill/i.test(textOf(el))) || null;
+
+            if (failEl && /has a bodyguard called/i.test(textOf(failEl))) {
+                // New BG found — extract name and search them
+                const bgMatch = textOf(failEl).match(/has a bodyguard called\s+(.+?)!/i);
+                const bgName  = bgMatch ? bgMatch[1].trim() : null;
+                if (bgName) {
+                    addLiveLog(`Kill loop: BG Farm — ${target} has new BG ${bgName} — searching them`);
+                    const players = state.killPlayers || [];
+                    const tIdx    = players.findIndex(p => p.name.toLowerCase() === target.toLowerCase());
+
+                    // Clear any pending shoot action targeting the old BG for this target
+                    const oldBg = tIdx !== -1 ? players[tIdx].bodyguard : null;
+                    if (oldBg && oldBg.toLowerCase() !== bgName.toLowerCase()) {
+                        addLiveLog(`Kill loop: BG Farm — ${target} swapped BG from ${oldBg} to ${bgName} — clearing stale shoot`);
+                        if (state.killBgShootPending?.bgFor?.toLowerCase() === target.toLowerCase() &&
+                            state.killBgShootPending?.targetName?.toLowerCase() === oldBg.toLowerCase()) {
+                            state.killBgShootPending = null;
+                        }
+                        if (state.pendingKillAction?.bgFor?.toLowerCase() === target.toLowerCase() &&
+                            state.pendingKillAction?.targetName?.toLowerCase() === oldBg.toLowerCase()) {
+                            state.pendingKillAction = null;
+                            state.killLoopActive    = false;
+                        }
+                        // Detach old BG player so syncKillExpiryFromPage never re-queues them
+                        const oldBgIdx = players.findIndex(p => p.name.toLowerCase() === oldBg.toLowerCase());
+                        if (oldBgIdx !== -1) {
+                            delete players[oldBgIdx].bgShootQueued;
+                            delete players[oldBgIdx].isBg;
+                            delete players[oldBgIdx].bgFor;
+                            saveKillPlayers(players);
+                        }
+                    }
+
+                    if (tIdx !== -1) { players[tIdx].bodyguard = bgName; saveKillPlayers(players); }
+
+                    // Add BG to kill list if not already there
+                    const bgIdx = players.findIndex(p => p.name.toLowerCase() === bgName.toLowerCase());
+                    if (bgIdx === -1) {
+                        players.push({ name: bgName, status: KILL_STATUS.UNKNOWN, isBg: true, bgFor: target });
+                    } else {
+                        players[bgIdx].isBg  = true;
+                        players[bgIdx].bgFor = target;
+                    }
+                    saveKillPlayers(players);
+                    renderKillList();
+
+                    // Only search if not already found or being searched
+                    const alreadyFound = [...document.querySelectorAll('.bgl.i.wb .bgm.chs:not(.pd) a[href*="?p=profile&u="]')]
+                        .some(a => { try { return new URL(a.getAttribute('href'), window.location.href).searchParams.get('u').toLowerCase() === bgName.toLowerCase(); } catch(_){ return false; } });
+                    const searchingRow = [...document.querySelectorAll('.bgl.i.wb .bgm.chs.pd')]
+                        .find(row => { const b = row.querySelector('b'); return b && textOf(b).toLowerCase() === bgName.toLowerCase(); });
+
+                    if (alreadyFound) {
+                        // Already found — check bullets before queuing shoot
+                        addLiveLog(`Kill loop: BG Farm — ${bgName} already found, proceeding to kill immediately`);
+                        const _bgPlayers = state.killPlayers || [];
+                        const _bgP = _bgPlayers.find(p => p.name.toLowerCase() === bgName.toLowerCase());
+                        const _bgBullets = _bgP?.requiredBullets || 0;
+                        const _shootAction = (pending.afterVerify && pending.afterVerify.targetName?.toLowerCase() === bgName.toLowerCase())
+                            ? pending.afterVerify
+                            : { stage: 'bg_shoot', targetName: bgName, bgFor: target, shootAfterBg: pending.shootAfterBg };
+                        if (_bgBullets && getPlayerBullets() < _bgBullets) {
+                            addLiveLog(`Kill loop: BG Farm — not enough bullets for ${bgName} (need ${_bgBullets.toLocaleString()}, have ${getPlayerBullets().toLocaleString()}) — deferring shoot`);
+                            state.killBgShootPending  = _shootAction;
+                            state.pendingKillAction   = null;
+                            state.killLoopActive      = false;
+                            state.killBgSpamPaused    = false;
+                        } else {
+                            // If this was a verify check and BG matches, restore the original shoot action
+                            if (pending.afterVerify && pending.afterVerify.targetName?.toLowerCase() === bgName.toLowerCase()) {
+                                addLiveLog(`Kill loop: BG Farm — verified ${target} still has BG ${bgName} — proceeding to shoot`);
+                            }
+                            state.pendingKillAction = _shootAction;
+                            state.killSearchLoopActive = false;
+                            state.killLoopActive       = true;
+                            state.killBgWaitUntil      = 0;
+                        }
+                    } else if (searchingRow) {
+                        // Already being searched — store wait per-player, not globally
+                        const timerSpan = searchingRow.querySelector('.chd');
+                        const foundInMs = timerSpan ? parseLostInMs(textOf(timerSpan)) : null;
+                        const waitMins  = foundInMs != null ? Math.ceil(foundInMs / 60000) : '?';
+                        addLiveLog(`Kill loop: BG Farm — ${bgName} already being searched, found in ~${waitMins}m — waiting`);
+                        const pl  = state.killPlayers || [];
+                        const idx = pl.findIndex(p => p.name.toLowerCase() === target.toLowerCase());
+                        if (idx !== -1) {
+                            if (foundInMs != null) pl[idx].bgFarmWaitUntil = now() + foundInMs + (5 * 60 * 1000);
+                            pl[idx].lastBgCheck = now(); // reset interval so we don't immediately re-trigger
+                            saveKillPlayers(pl);
+                        }
+                        state.pendingKillAction    = null;
+                        state.killSearchLoopActive = true;
+                        state.killLoopActive       = false;
+                    } else {
+                        // Not found or searching — add as UNKNOWN so kill scanner searches them
+                        addLiveLog(`Kill loop: BG Farm — ${bgName} added as unknown — kill scanner will search them`);
+                        const pl2  = state.killPlayers || [];
+                        const bIdx2 = pl2.findIndex(p => p.name.toLowerCase() === bgName.toLowerCase());
+                        if (bIdx2 === -1) {
+                            pl2.push({ name: bgName, status: KILL_STATUS.UNKNOWN, isBg: true, bgFor: target });
+                        } else {
+                            pl2[bIdx2].status = KILL_STATUS.UNKNOWN;
+                            pl2[bIdx2].isBg   = true;
+                            pl2[bIdx2].bgFor  = target;
+                        }
+                        const tIdx2 = pl2.findIndex(p => p.name.toLowerCase() === target.toLowerCase());
+                        if (tIdx2 !== -1) {
+                            pl2[tIdx2].lastBgCheck     = now();
+                            pl2[tIdx2].bgFarmWaitUntil = now() + (24 * 60 * 60 * 1000);
+                        }
+                        saveKillPlayers(pl2);
+                        state.pendingKillAction    = null;
+                        state.killSearchLoopActive = true;
+                        state.killLoopActive       = false;
+                    }
+                }
+            } else if (credEl) {
+                // No BG — target is unprotected
+                if (pending.afterVerify) {
+                    addLiveLog(`Kill loop: BG Farm — ${target} no longer has BG ${pending.afterVerify.targetName} — aborting shot`);
+                    const pl  = state.killPlayers || [];
+                    const idx = pl.findIndex(p => p.name.toLowerCase() === target.toLowerCase());
+                    if (idx !== -1) { delete pl[idx].bodyguard; pl[idx].lastBgCheck = now(); saveKillPlayers(pl); }
+                    if (pending.afterVerify.shootAfterBg && isPlayerShootEnabled(target)) {
+                        addLiveLog(`Kill loop: BG Farm — Kill enabled, proceeding to kill unprotected ${target}`);
+                        state.pendingKillAction = { stage: 'fetch_profile', targetName: target };
+                        await doKillShootFlow(target);
+                        return;
+                    } else {
+                        addLiveLog(`Kill loop: BG Farm — waiting for ${target} to get a new BG`);
+                        state.pendingKillAction = null;
+                    }
+                } else if (pending.shootAfterBg && isPlayerShootEnabled(target)) {
+                    // Kill toggle on — proceed to kill
+                    addLiveLog(`Kill loop: BG Farm — ${target} has no BG`);
+                    addLiveLog(`Kill loop: BG Farm — Kill enabled, proceeding to kill ${target}`);
+                    state.pendingKillAction = { stage: 'fetch_profile', targetName: target };
+                    await doKillShootFlow(target);
+                    return;
+                } else {
+                    // BG Farm only — log and wait for them to get a new BG
+                    addLiveLog(`Kill loop: BG Farm — ${target} has no BG, waiting for next BG check interval`);
+                    // Update lastBgCheck so interval applies
+                    const pl  = state.killPlayers || [];
+                    const idx = pl.findIndex(p => p.name.toLowerCase() === target.toLowerCase());
+                    if (idx !== -1) { pl[idx].lastBgCheck = now(); saveKillPlayers(pl); }
+                    state.pendingKillAction = null;
+                }
+            } else {
+                addLiveLog(`Kill loop: BG Farm — unexpected result for ${target}, retrying`);
+                state.pendingKillAction = null;
+            }
+            // Check if there are more BG Farm players due for a check — if so keep kill loop active
+            if (!state.killLoopActive && !state.pendingKillAction) {
+                const _allPlayers = state.killPlayers || [];
+                const _nowMs = now();
+                const _moreDue = _allPlayers.some(p =>
+                    p.status === KILL_STATUS.ALIVE &&
+                    isPlayerBgFarmEnabled(p.name) &&
+                    getBgCheckDueMs(p) <= 0
+                );
+                if (_moreDue) {
+                    state.killLoopActive   = true;
+                    state.killBgSpamPaused = true;
+                    state.pendingKillAction = { stage: 'bgcheck' };
+                }
+            }
+            await wait(navRand());
+            gotoPage('kill');
             return;
         }
 
@@ -7600,7 +9118,7 @@
                                     state.killCurrentSearch = bgName;
                                     state.pendingKillAction = null;
                                     state.killLoopActive    = false;
-                                    state.killBgWaitUntil   = now() + (24 * 60 * 60 * 1000); // wait up to 24hrs
+                                    state.killBgWaitUntil   = now() + (3 * 60 * 60 * 1000); // max search time ~3hrs
                                     state.lastActionAt = now();
                                     await wait(rand(DEFAULTS.actionDelayMin, DEFAULTS.actionDelayMax));
                                     humanClick(submitBtn);
@@ -7635,15 +9153,20 @@
                                     bgFor:       target,
                                     shootAfterBg: isPlayerShootEnabled(target)
                                 };
-                                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                                await wait(navRand());
                                 gotoPage('kill');
                                 return;
                             } else {
                                 // Still searching (pending) — let search loop find them, then shoot
-                                addLiveLog(`Kill loop: ${bgName} already being searched — will shoot when found`);
+                                const bgPlayerEntry = players.find(b => b.name.toLowerCase() === bgName.toLowerCase());
+                                const searchExpiry = bgPlayerEntry?.searchExpiresAt && bgPlayerEntry.searchExpiresAt > now()
+                                    ? bgPlayerEntry.searchExpiresAt
+                                    : now() + (3 * 60 * 60 * 1000);
+                                const waitMins = Math.round((searchExpiry - now()) / 60000);
+                                addLiveLog(`Kill loop: ${bgName} already being searched, found in ~${waitMins}m — waiting`);
                                 state.killSearchLoopActive = true;
                                 state.killLoopActive       = false;
-                                state.killBgWaitUntil      = now() + (24 * 60 * 60 * 1000);
+                                state.killBgWaitUntil      = searchExpiry;
                             }
                         }
 
@@ -7654,8 +9177,9 @@
                         renderKillList();
                     }
                     state.pendingKillAction = null;
+                    state.killBgSpamPaused  = false; // resume spam — kill loop done
                     // Go to crimes — kill loop is paused until BG search resolves
-                    await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                    await wait(navRand());
                     gotoPage('crimes');
                     return;
                 }
@@ -7668,7 +9192,7 @@
                     const newDeferred2 = deferred2.filter(n => n !== target.toLowerCase());
                     state.pendingKillAction = newDeferred2.length ? { stage: 'bgcheck_deferred', deferred: newDeferred2 } : null;
                     renderKillList();
-                    await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                    await wait(navRand());
                     gotoPage('kill');
                     return;
                 }
@@ -7678,7 +9202,7 @@
                     updateKillPlayerStatus(target, KILL_STATUS.PROTECTED);
                     state.pendingKillAction = null;
                     renderKillList();
-                    await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                    await wait(navRand());
                     gotoPage('crimes');
                     return;
                 }
@@ -7688,7 +9212,7 @@
                     updateKillPlayerStatus(target, KILL_STATUS.UNKILLABLE);
                     state.pendingKillAction = null;
                     renderKillList();
-                    await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                    await wait(navRand());
                     gotoPage('crimes');
                     return;
                 }
@@ -7721,18 +9245,19 @@
                 // If none, exit loop directly to avoid an unnecessary kill page trip
                 const morePlayers = getKillPlayers().filter(p => {
                     if (p.status !== KILL_STATUS.ALIVE && p.status !== KILL_STATUS.UNKNOWN) return false;
-                    if (isPlayerBgCheckEnabled(p.name) && getBgCheckDueMs(p) <= 0) return true;
+                    if (isBgCheckable(p.name) && getBgCheckDueMs(p) <= 0) return true;
                     if (!isPlayerShootEnabled(p.name)) return false;
                     if (p.requiredBullets && getPlayerBullets() < p.requiredBullets) return false;
-                    if (isPlayerBgCheckEnabled(p.name) && getBgCheckDueMs(p) > 0) return true;
-                    if (!isPlayerBgCheckEnabled(p.name)) return true;
+                    if (isBgCheckable(p.name) && getBgCheckDueMs(p) > 0) return true;
+                    if (!isBgCheckable(p.name)) return true;
                     return false;
                 });
                 if (!morePlayers.length) {
                     addLiveLog('Kill loop: no more targets — reverting to normal script');
-                    state.killLoopActive = false;
+                    await resumeBgSpamAfterCheck();
+                    return;
                 }
-                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                await wait(navRand());
                 gotoPage(morePlayers.length ? 'kill' : 'crimes');
                 return;
             }
@@ -7745,11 +9270,11 @@
                 const pIdxK = plsK.findIndex(p => p.name.toLowerCase() === target.toLowerCase());
                 if (pIdxK !== -1) { delete plsK[pIdxK].requiredBullets; saveKillPlayers(plsK); }
 
-                // Check if this was a bodyguard kill — if so, BG check the original target next
+                // Check if this was a bodyguard kill — capture BEFORE status update removes the player
                 const players = state.killPlayers || [];
                 const tIdx = players.findIndex(p => p.name.toLowerCase() === target.toLowerCase());
                 const wasBg = tIdx !== -1 && players[tIdx].isBg;
-                const bgFor = wasBg ? players[tIdx].bgFor : null;
+                const bgFor = wasBg ? players[tIdx].bgFor : (state.pendingKillAction?.bgFor || null);
 
                 // Clear bgShootQueued flag — player is dead
                 const plsDead = state.killPlayers || [];
@@ -7758,9 +9283,8 @@
                 updateKillPlayerStatus(target, KILL_STATUS.DEAD);
                 renderKillList();
 
-                if (wasBg && bgFor && isPlayerShootEnabled(bgFor)) {
-                    // Was a bodyguard kill — re-BG check the original target
-                    addLiveLog(`Kill loop: ${target} was BG for ${bgFor} — re-BG checking ${bgFor}`);
+                if ((wasBg || bgFor) && bgFor) {
+                    const bgForPlayer = (state.killPlayers || []).find(p => p.name.toLowerCase() === bgFor.toLowerCase());
                     // Clear bodyguard from original target
                     const bgForIdx = (state.killPlayers || []).findIndex(p => p.name.toLowerCase() === bgFor.toLowerCase());
                     if (bgForIdx !== -1) {
@@ -7768,21 +9292,45 @@
                         pl[bgForIdx].bodyguard = null;
                         saveKillPlayers(pl);
                     }
-                    state.pendingKillAction = {
-                        stage:       'shoot_result',
-                        targetName:  bgFor,
-                        shootAfterBg: true,
-                        recheck:     true
-                    };
-                    state.killBgWaitUntil = 0; // BG killed — clear wait
-                    await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
-                    gotoPage('kill');
-                    return;
+
+                    if (isPlayerBgFarmEnabled(bgFor)) {
+                        // Clear per-player farm wait — we're now acting on this player
+                        const plFarm = state.killPlayers || [];
+                        const farmIdx = plFarm.findIndex(p => p.name.toLowerCase() === bgFor.toLowerCase());
+                        if (farmIdx !== -1 && plFarm[farmIdx].bgFarmWaitUntil) {
+                            delete plFarm[farmIdx].bgFarmWaitUntil;
+                            saveKillPlayers(plFarm);
+                        }
+                        // BG Farm mode — shoot original target with 1 bullet to find next BG
+                        addLiveLog(`Kill loop: ${target} was BG for ${bgFor} — BG Farm: 1-bullet checking ${bgFor} for next BG`);
+                        state.pendingKillAction = {
+                            stage:        'bg_farm_check',
+                            targetName:   bgFor,
+                            shootAfterBg: isPlayerShootEnabled(bgFor),
+                        };
+                        state.killBgWaitUntil = 0;
+                        await wait(navRand());
+                        gotoPage('kill');
+                        return;
+                    } else if (isPlayerShootEnabled(bgFor)) {
+                        // Normal mode — re-BG check the original target
+                        addLiveLog(`Kill loop: ${target} was BG for ${bgFor} — re-BG checking ${bgFor}`);
+                        state.pendingKillAction = {
+                            stage:       'shoot_result',
+                            targetName:  bgFor,
+                            shootAfterBg: true,
+                            recheck:     true
+                        };
+                        state.killBgWaitUntil = 0;
+                        await wait(navRand());
+                        gotoPage('kill');
+                        return;
+                    }
                 }
 
                 // Continue kill loop — go back to kill page to process next player
                 state.pendingKillAction = null;
-                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                await wait(navRand());
                 gotoPage('kill');
                 return;
             }
@@ -7801,7 +9349,7 @@
                 addLiveLog(`Kill loop: bodyguard search confirmed for ${target} — continuing`);
                 state.pendingKillAction = null;
                 state.killLoopActive    = false; // pause until BG is found
-                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                await wait(navRand());
                 gotoPage('crimes');
                 return;
             }
@@ -7824,7 +9372,7 @@
             }
             state.pendingKillAction = null;
             state.killLoopActive    = false;
-            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            await wait(navRand());
             gotoPage('crimes');
             return;
         }
@@ -7869,9 +9417,18 @@
                     const url  = new URL(link.getAttribute('href'), window.location.href);
                     const name = url.searchParams.get('u') || '';
                     if (name.toLowerCase() === bgName.toLowerCase()) {
+                        // Only look at text AFTER the player name to avoid matching country names inside it
                         const rowText = textOf(row);
-                        const cm = rowText.match(/in\s+([A-Za-z\s]+?)Lost in/i);
-                        if (cm) bgCountry = cm[1].trim();
+                        const nameIdx = rowText.toLowerCase().indexOf(name.toLowerCase());
+                        const afterName = nameIdx !== -1 ? rowText.slice(nameIdx + name.length).toLowerCase() : rowText.toLowerCase();
+                        for (const country of Object.keys(COUNTRY_LOCATION_MAP)) {
+                            if (afterName.includes(` in ${country}`)) {
+                                bgCountry = country === 'south africa' ? 'South Africa' :
+                                            country === 'usa' ? 'USA' :
+                                            country.charAt(0).toUpperCase() + country.slice(1);
+                                break;
+                            }
+                        }
                         break;
                     }
                 } catch (_) {}
@@ -7880,7 +9437,7 @@
             if (!bgCountry) {
                 addLiveLog(`Kill loop: bodyguard ${bgName} not in Players Found — waiting for search`);
                 state.pendingKillAction = null;
-                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                await wait(navRand());
                 gotoPage('crimes');
                 return;
             }
@@ -7896,11 +9453,13 @@
             if (needsBgTravel && !isInternalDriveReady()) {
                 const remaining = Math.ceil(getInternalDriveRemainingMs() / 1000);
                 addLiveLog(`Kill loop: drive not ready (${remaining}s) — waiting to travel to bodyguard ${bgName}`);
-                // Update nextDriveReadyAt so the tick doesn't immediately re-enable killLoopActive
                 state.nextDriveReadyAt = now() + getInternalDriveRemainingMs();
-                // Keep pendingKillAction set so the bg_shoot isn't re-queued next visit
-                // Go to crimes so the search loop can run while we wait for the drive
-                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                // Set travel stage so we're ready when drive is ready
+                // Use killBgWaitUntil to suppress bounce — travel stage bypasses it when ready
+                state.pendingKillAction = { stage: 'travel', travelTo: bgCountry, targetName: bgName,
+                    afterTravel: { stage: 'bg_shoot', targetName: bgName, bgFor, shootAfterBg: pendingNow.shootAfterBg } };
+                state.killBgWaitUntil = now() + getInternalDriveRemainingMs() + 2000;
+                await wait(navRand());
                 gotoPage('crimes');
                 return;
             }
@@ -7909,57 +9468,65 @@
                 addLiveLog(`Kill loop: travelling to ${bgCountry} to shoot bodyguard ${bgName}`);
                 state.pendingKillAction = { stage: 'travel', travelTo: bgCountry, targetName: bgName,
                     afterTravel: { stage: 'bg_shoot', targetName: bgName, bgFor, shootAfterBg: pendingNow.shootAfterBg } };
-                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                await wait(navRand());
                 gotoPage('cars');
                 return;
             }
 
-            // In same country — calculate combined cost before shooting bodyguard
-            // Fetch target profile to get bullets needed AFTER killing BG (penalty +0.1x)
-            if (pendingNow.shootAfterBg && isPlayerShootEnabled(bgFor)) {
-                addLiveLog(`Kill loop: calculating combined cost for ${bgFor} + bodyguard ${bgName}`);
-                const targetProfile = await fetchPlayerProfile(bgFor);
-                const bgProfile     = await fetchPlayerProfile(bgName);
-                if (targetProfile && bgProfile) {
-                    const currentMult  = getKillPenaltyMultiplier();
-                    const postKillMult = currentMult + 0.1; // penalty after killing BG
-                    const bgBulletsBase    = await fetchBulletCount(bgProfile.rankIndex, bgProfile.prestige);
-                    const bgBullets        = bgProfile.isVip ? bgBulletsBase * 2 : bgBulletsBase;
-                    // Calculate target bullets at elevated penalty by adjusting fetched value
-                    // fetchBulletCount already uses live penalty — we simulate +0.1x manually
-                    const targetBulletsBase = await fetchBulletCount(targetProfile.rankIndex, targetProfile.prestige);
-                    // Re-scale: targetBulletsBase uses currentMult, we need postKillMult
-                    // Double if target is VIP
-                    const targetBullets = Math.ceil(targetBulletsBase * (postKillMult / currentMult)) * (targetProfile.isVip ? 2 : 1);
-                    const totalNeeded  = (bgBullets || 0) + (targetBullets || 0);
-                    const available    = getPlayerBullets();
-                    addLiveLog(`Kill loop: need ${totalNeeded} bullets total (BG: ${bgBullets}, target at ${postKillMult.toFixed(1)}x: ${targetBullets}) — have ${available}`);
-                    // Store required bullets on both players for ordering
-                    const pls3 = state.killPlayers || [];
-                    const tIdx3 = pls3.findIndex(p => p.name.toLowerCase() === bgFor.toLowerCase());
-                    const bIdx3 = pls3.findIndex(p => p.name.toLowerCase() === bgName.toLowerCase());
-                    if (tIdx3 !== -1) { pls3[tIdx3].requiredBullets = targetBullets; }
-                    if (bIdx3 !== -1) { pls3[bIdx3].requiredBullets = bgBullets; }
-                    if (tIdx3 !== -1 || bIdx3 !== -1) saveKillPlayers(pls3);
-                    if (available < totalNeeded) {
-                        addLiveLog(`Kill loop: not enough bullets for BG + target (need ${totalNeeded.toLocaleString()}, have ${available.toLocaleString()}) — waiting`);
-                        // Keep pendingKillAction and bgShootQueued set — we're waiting for bullets
-                        // Set killLoopActive = false so normal script runs and accumulates bullets
-                        // The tick will re-enable killLoopActive once bullets are sufficient
-                        state.killLoopActive = false;
-                        state.nextDriveReadyAt = now(); // don't suppress on drive grounds
-                        await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
-                        gotoPage('crimes');
-                        return;
-                    }
-                    // Check penalty won't exceed threshold after killing BG
-                    if (state.killPenaltyThreshold > 0 && postKillMult > state.killPenaltyThreshold) {
-                        addLiveLog(`Kill loop: killing ${bgName} would push penalty to ${postKillMult.toFixed(1)}x — skipping`);
-                        state.pendingKillAction = null;
-                        if (bIdx3 !== -1) { delete pls3[bIdx3].bgShootQueued; saveKillPlayers(pls3); }
-                        return;
-                    }
+            // Only check bullet cost for the BG shot — target kill comes in a later cycle
+            {
+                const bgProfile = await fetchPlayerProfile(bgName);
+                if (!bgProfile) {
+                    addLiveLog(`Kill loop: could not fetch profile for ${bgName} — aborting BG shot`);
+                    state.pendingKillAction = null;
+                    state.killLoopActive = false;
+                    await wait(navRand());
+                    gotoPage('crimes');
+                    return;
                 }
+                const bgBulletsBase = await fetchBulletCount(bgProfile.rankIndex, bgProfile.prestige);
+                if (!bgBulletsBase) {
+                    addLiveLog(`Kill loop: could not calculate bullet cost for ${bgName} — aborting BG shot`);
+                    state.pendingKillAction = null;
+                    state.killLoopActive = false;
+                    await wait(navRand());
+                    gotoPage('crimes');
+                    return;
+                }
+                const bgBullets = bgProfile.isVip ? bgBulletsBase * 2 : bgBulletsBase;
+                const available = getPlayerBullets();
+                addLiveLog(`Kill loop: need ${bgBullets.toLocaleString()} bullets for BG ${bgName} — have ${available.toLocaleString()}`);
+                const pls3  = state.killPlayers || [];
+                const bIdx3 = pls3.findIndex(p => p.name.toLowerCase() === bgName.toLowerCase());
+                if (bIdx3 !== -1) { pls3[bIdx3].requiredBullets = bgBullets; saveKillPlayers(pls3); }
+                if (available < bgBullets) {
+                    await redeemBulletPerksForKill(bgBullets);
+                }
+                if (getPlayerBullets() < bgBullets) {
+                    addLiveLog(`Kill loop: not enough bullets for BG shot (need ${bgBullets.toLocaleString()}, have ${getPlayerBullets().toLocaleString()}) — waiting`);
+                    // Store shoot target separately so BG Farm interval checks can still run
+                    state.killBgShootPending  = { stage: 'bg_shoot', targetName: bgName, bgFor: bgFor || null, shootAfterBg: pending.shootAfterBg };
+                    state.pendingKillAction   = null;
+                    state.killLoopActive      = false;
+                    state.killBgSpamPaused    = false;
+                    await wait(navRand());
+                    gotoPage('crimes');
+                    return;
+                }
+            }
+            // For BG Farm players without BG Spam, do a 1-bullet verify before shooting
+            // to confirm the target still has this BG (they may have dropped protection)
+            if (bgFor && isPlayerBgFarmEnabled(bgFor) && !state.killBgSpamEnabled &&
+                !pendingNow.bgVerified) {
+                addLiveLog(`Kill loop: BG Farm — verifying ${bgFor} still has BG ${bgName} before shooting`);
+                state.pendingKillAction = {
+                    stage: 'bg_farm_check',
+                    targetName: bgFor,
+                    afterVerify: { stage: 'bg_shoot', targetName: bgName, bgFor, shootAfterBg: pendingNow.shootAfterBg, bgVerified: true }
+                };
+                await wait(navRand());
+                gotoPage('kill');
+                return;
             }
             // Sufficient bullets — shoot the bodyguard
             addLiveLog(`Kill loop: shooting bodyguard ${bgName}`);
@@ -7998,10 +9565,64 @@
         // All due BG check players (including deferred)
         const duePlayers = players.filter(p => {
             if (p.status !== KILL_STATUS.ALIVE) return false;
-            if (!isPlayerBgCheckEnabled(p.name)) return false;
+            if (!isBgCheckable(p.name)) return false;
             if (deferred.includes(p.name.toLowerCase())) return true; // deferred always retry
-            return getBgCheckDueMs(p) <= 0;
+            if (getBgCheckDueMs(p) > 0) return false;
+            // Only include if actually in Players Found — not still being searched
+            if (!foundMap.has(p.name.toLowerCase())) return false;
+            return true;
         });
+
+        // If no due players are in Players Found yet, check pending searches and wait
+        // Also check if due players are found but in a different country — travel there
+        if (!duePlayers.length) {
+            const pendingRows = [...document.querySelectorAll('.bgl.i.wb .bgm.chs.pd')];
+            let earliestFoundMs = null;
+
+            for (const p of players) {
+                if (!isBgCheckable(p.name) || p.status !== KILL_STATUS.ALIVE) continue;
+                if (getBgCheckDueMs(p) > 0) continue;
+
+                // Check if found in a different country
+                const foundEl = [...document.querySelectorAll('.bgl.i.wb .bgm.chs:not(.pd)')].find(row => {
+                    const a = row.querySelector('a[href*="p=profile"]');
+                    if (!a) return false;
+                    try { return new URL(a.getAttribute('href'), window.location.href).searchParams.get('u').toLowerCase() === p.name.toLowerCase(); } catch(_) { return false; }
+                });
+                if (foundEl) {
+                    // Found but in different country — travel there
+                    const rowText = foundEl.textContent;
+                    const countryMatch = rowText.match(/in\s+([A-Za-z ]+?)(?:\s+Lost|\s*$)/);
+                    const targetCountry = countryMatch ? countryMatch[1].trim() : null;
+                    if (targetCountry && targetCountry.toLowerCase() !== getPlayerLocation().toLowerCase()) {
+                        addLiveLog(`Kill loop: BG Farm — ${p.name} found in ${targetCountry} — travelling to check`);
+                        state.pendingKillAction = { stage: 'travel', travelTo: targetCountry, afterTravel: { stage: 'bgcheck' } };
+                        await navigateToTravel(targetCountry);
+                        return;
+                    }
+                }
+
+                // Check if still pending search
+                const pendingEl = pendingRows.find(row => {
+                    const b = row.querySelector('b');
+                    return b?.textContent?.trim().toLowerCase() === p.name.toLowerCase();
+                });
+                if (pendingEl) {
+                    const timerSpan = pendingEl.querySelector('.chd');
+                    const foundInMs = timerSpan ? parseLostInMs(textOf(timerSpan)) : null;
+                    if (foundInMs && (earliestFoundMs === null || foundInMs < earliestFoundMs)) {
+                        earliestFoundMs = foundInMs;
+                    }
+                }
+            }
+            if (earliestFoundMs !== null && earliestFoundMs > 0) {
+                const waitMins = Math.ceil(earliestFoundMs / 60000);
+                addLiveLog(`Kill loop: BG Farm targets not yet in Players Found — waiting ${waitMins}m`);
+                state.killBgWaitUntil = now() + earliestFoundMs + 5000;
+                await resumeBgSpamAfterCheck();
+                return;
+            }
+        }
 
         // Kill-only players: shoot directly without BG check. Two cases:
         // 1. Kill ticked, BG not ticked — always shoot directly
@@ -8019,7 +9640,7 @@
             // Skip if player has a known bodyguard currently being searched
             if (p.bodyguard) return false;
             // If BG ticked and interval is due — handle via BG check path, not here
-            if (isPlayerBgCheckEnabled(p.name) && getBgCheckDueMs(p) <= 0) return false;
+            if (isBgCheckable(p.name) && getBgCheckDueMs(p) <= 0) return false;
             // Must be in Players Found right now — skip if dead, pending, or not found
             if (!foundMap.has(p.name.toLowerCase())) return false;
             // Skip all kill-only players when penalty too high
@@ -8074,21 +9695,22 @@
                     state.nextDriveReadyAt = now() + getInternalDriveRemainingMs();
                     // Set travel stage so tick intercept knows to wait rather than bounce to kill page
                     state.pendingKillAction = { stage: 'travel', travelTo: bestCountry, targetName: tgt.name, shootAfterBg: false, killOnly: true };
-                    await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                    await wait(navRand());
                     // Stay on crimes — tick intercept will wait until drive is ready
                     return;
                 }
                 addLiveLog(`Kill loop: travelling to ${bestCountry} for kill-only player ${tgt.name}`);
                 state.pendingKillAction = { stage: 'travel', travelTo: bestCountry, targetName: tgt.name, shootAfterBg: false, killOnly: true };
-                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                await wait(navRand());
                 gotoPage('cars');
                 return;
             }
             // Kill-only players not in Players Found — exit loop, reactivate when found
             addLiveLog('Kill loop: kill-only players not yet in Players Found — reverting to normal script');
+            state.killBgSpamPaused  = false;
             state.killLoopActive    = false;
             state.pendingKillAction = null;
-            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            await wait(navRand());
             gotoPage('crimes');
             return;
         }
@@ -8101,22 +9723,76 @@
         );
         if (!duePlayers.length) {
             if (allSkippedForBg) {
-                // Kill-only players have pending BGs — set a 3hr wait so the kill loop
-                // doesn't re-activate until the search completes, then revert to normal script
-                const waitUntil = Date.now() + (3 * 60 * 60 * 1000);
-                state.killBgWaitUntil = waitUntil;
-                addLiveLog('Kill loop: bodyguard search pending — waiting 3hrs for result');
-                state.killLoopActive = false;
-                if (!state.pendingKillAction || state.pendingKillAction.stage !== 'bg_shoot') {
-                    state.pendingKillAction = null;
+                // Use the actual search expiry of the pending BG — fall back to 30min if unknown
+                // Only consider BGs that are still being searched (not yet found)
+                const nowMs = Date.now();
+                const foundNamesOnPage = new Set(
+                    [...document.querySelectorAll('.bgl.i.wb .bgm.chs:not(.pd) a[href*="?p=profile&u="]')]
+                        .map(a => { try { return new URL(a.getAttribute('href'), window.location.href).searchParams.get('u').toLowerCase(); } catch(_){ return ''; } })
+                        .filter(Boolean)
+                );
+                let earliestExpiry = 0;
+                const pendingSearchRows = [...document.querySelectorAll('.bgl.i.wb .bgm.chs.pd')];
+                for (const p of players) {
+                    if (!isPlayerBgFarmEnabled(p.name) || p.status !== KILL_STATUS.ALIVE || !p.bodyguard) continue;
+                    const bgNameLower = p.bodyguard.toLowerCase();
+                    // Skip BGs that are already in Players Found — those should be shot, not waited on
+                    if (foundNamesOnPage.has(bgNameLower)) continue;
+                    // Read the "Found in Xh Xm Xs" timer from the pending search list on the kill page
+                    const pendingRow = pendingSearchRows.find(row => {
+                        const b = row.querySelector('b');
+                        return b && textOf(b).toLowerCase() === bgNameLower;
+                    });
+                    if (pendingRow) {
+                        const timerSpan = pendingRow.querySelector('.chd');
+                        const foundInMs = timerSpan ? parseLostInMs(textOf(timerSpan)) : null;
+                        if (foundInMs) {
+                            const expiry = nowMs + foundInMs;
+                            earliestExpiry = earliestExpiry ? Math.min(earliestExpiry, expiry) : expiry;
+                        }
+                    }
                 }
-                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
-                gotoPage('crimes');
+                // Fall back to 3hr if no search expiry found
+                if (!earliestExpiry) earliestExpiry = nowMs + (3 * 60 * 60 * 1000);
+                const waitMins = Math.round((earliestExpiry - nowMs) / 60000);
+                state.killBgWaitUntil  = earliestExpiry;
+                addLiveLog(`Kill loop: bodyguard search pending — waiting ${waitMins}m for result`);
+                // Reset lastBgCheck only for BG Farm players whose BG is actually being waited on
+                // (not all BG Farm players — that would prevent other players' intervals from firing)
+                const _bfPlayers = state.killPlayers || [];
+                let _bfChanged = false;
+                for (const _bfp of _bfPlayers) {
+                    if (!isPlayerBgFarmEnabled(_bfp.name) || _bfp.status !== KILL_STATUS.ALIVE || !_bfp.bodyguard) continue;
+                    const _bgLower = _bfp.bodyguard.toLowerCase();
+                    // Only reset if this player's BG is still pending (not yet found)
+                    const _bgPending = pendingSearchRows.some(row => {
+                        const b = row.querySelector('b');
+                        return b && textOf(b).toLowerCase() === _bgLower;
+                    });
+                    const _bgFound = foundNamesOnPage.has(_bgLower);
+                    if (_bgPending && !_bgFound) {
+                        _bfp.lastBgCheck = now();
+                        _bfChanged = true;
+                    }
+                }
+                if (_bfChanged) saveKillPlayers(_bfPlayers);
+                await resumeBgSpamAfterCheck();
                 return;
             } else {
                 addLiveLog('Kill loop: no actionable targets — reverting to normal script');
+                state.killBgSpamPaused  = false;
                 state.killLoopActive    = false;
                 state.pendingKillAction = null;
+                // Reset lastBgCheck for all BG Farm players so interval doesn't re-trigger immediately
+                const _bfPlayers2 = state.killPlayers || [];
+                let _bfChanged2 = false;
+                for (const _bfp2 of _bfPlayers2) {
+                    if (isPlayerBgFarmEnabled(_bfp2.name) && _bfp2.status === KILL_STATUS.ALIVE && !_bfp2.lastBgCheck) {
+                        _bfp2.lastBgCheck = now();
+                        _bfChanged2 = true;
+                    }
+                }
+                if (_bfChanged2) saveKillPlayers(_bfPlayers2);
 
                 // Set cooldown based on the exact time Kill-ticked players will be found
                 // so we don't keep hitting the kill page unnecessarily
@@ -8138,10 +9814,10 @@
                         }
                     }
                 }
-                state.killLoopCooldownUntil = now() + longestWaitMs;
-                addLiveLog(`Kill loop: waiting ${Math.ceil(longestWaitMs / 60000)}m for player to be found`);
+                state.killLoopCooldownUntil = now() + Math.min(longestWaitMs, 60000);
+                addLiveLog(`Kill loop: waiting ${Math.ceil(Math.min(longestWaitMs, 60000) / 60000)}m for player to be found`);
 
-                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                await wait(navRand());
                 gotoPage('crimes');
             }
             return;
@@ -8192,7 +9868,7 @@
             }
             state.killLoopActive    = false;
             state.pendingKillAction = null;
-            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            await wait(navRand());
             gotoPage('crimes');
             return;
         }
@@ -8227,7 +9903,7 @@
         if (!bgTarget) {
             addLiveLog('Kill loop: could not select BG check target');
             state.pendingKillAction = null;
-            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            await wait(navRand());
             gotoPage('crimes');
             return;
         }
@@ -8242,7 +9918,7 @@
             // Set travel stage so tick intercept waits rather than bouncing to kill page
             state.pendingKillAction = { stage: 'travel', travelTo: targetCountry, targetName: bgTarget.name,
                 shootAfterBg: isPlayerShootEnabled(bgTarget.name), deferred };
-            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            await wait(navRand());
             return;
         }
 
@@ -8250,7 +9926,7 @@
             addLiveLog(`Kill loop: travelling to ${targetCountry} (${byCountry.get(targetCountry).length} player(s) to check)`);
             state.pendingKillAction = { stage: 'travel', travelTo: targetCountry, targetName: bgTarget.name,
                 shootAfterBg: isPlayerShootEnabled(bgTarget.name), deferred };
-            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            await wait(navRand());
             gotoPage('cars');
             return;
         }
@@ -8283,7 +9959,7 @@
         if (bullets < 1) {
             addLiveLog('Kill loop: no bullets available — pausing');
             state.killLoopActive = false;
-            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            await wait(navRand());
             gotoPage('crimes');
             return;
         }
@@ -8342,7 +10018,7 @@
                 saveKillPlayers(pls);
             }
             state.pendingKillAction = null;
-            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            await wait(navRand());
             gotoPage('crimes');
             return;
         }
@@ -8354,7 +10030,7 @@
         if (!bulletCount) {
             addLiveLog(`Kill loop: could not calculate bullets for ${targetName} — skipping`);
             state.pendingKillAction = null;
-            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            await wait(navRand());
             gotoPage('crimes');
             return;
         }
@@ -8371,18 +10047,21 @@
             saveKillPlayers(pls2);
         }
 
-        // Check available bullets — if not enough, skip this player and try next
+        // Check available bullets — attempt perk redemption if short
         const available = getPlayerBullets();
-        if (available < requiredBullets) {
-            addLiveLog(`Kill loop: insufficient bullets (${available}/${requiredBullets}) for ${targetName} — waiting for more bullets`);
-            // Clear bgShootQueued so it re-queues when bullets are sufficient
-            const plsBQ = state.killPlayers || [];
-            const bqIdx = plsBQ.findIndex(p => p.name.toLowerCase() === targetName.toLowerCase());
-            if (bqIdx !== -1 && plsBQ[bqIdx].bgShootQueued) { delete plsBQ[bqIdx].bgShootQueued; saveKillPlayers(plsBQ); }
-            state.pendingKillAction = null;
-            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
-            gotoPage('kill'); // Continue loop — check other players
-            return;
+        if (getPlayerBullets() < requiredBullets) {
+            await redeemBulletPerksForKill(requiredBullets);
+            if (getPlayerBullets() < requiredBullets) {
+                addLiveLog(`Kill loop: insufficient bullets (${getPlayerBullets()}/${requiredBullets}) for ${targetName} — waiting for more bullets`);
+                // Clear bgShootQueued so it re-queues when bullets are sufficient
+                const plsBQ = state.killPlayers || [];
+                const bqIdx = plsBQ.findIndex(p => p.name.toLowerCase() === targetName.toLowerCase());
+                if (bqIdx !== -1 && plsBQ[bqIdx].bgShootQueued) { delete plsBQ[bqIdx].bgShootQueued; saveKillPlayers(plsBQ); }
+                state.pendingKillAction = null;
+                await wait(navRand());
+                gotoPage('kill');
+                return;
+            }
         }
 
         // Shoot with correct bullet count
@@ -8399,6 +10078,18 @@
             const submitBtn      = killForm.querySelector('input[type="submit"][value="Shoot"]');
 
             if (usernameSelect && bulletsInput && submitBtn) {
+                // Verify target is actually in the dropdown — if not, they may not be in this country
+                const targetOption = [...usernameSelect.options].find(o =>
+                    o.value.toLowerCase() === targetName.toLowerCase() ||
+                    o.text.toLowerCase() === targetName.toLowerCase()
+                );
+                if (!targetOption) {
+                    addLiveLog(`Kill loop: ${targetName} not in kill dropdown — may have moved, retrying`);
+                    state.pendingKillAction = null;
+                    await wait(navRand());
+                    gotoPage('kill');
+                    return;
+                }
                 usernameSelect.value = targetName;
                 bulletsInput.value   = String(requiredBullets);
                 if (showCheckbox) showCheckbox.checked = !state.killAnonymousShooting;
@@ -8412,6 +10103,94 @@
         state.pendingKillAction = null;
     }
 
+
+    // Redeem bullet perks to cover a kill shortfall. Returns true if bullets are now sufficient.
+    async function redeemBulletPerksForKill(requiredBullets) {
+        if (!state.redeemBullets) return false;
+        const available = getPlayerBullets();
+        const shortfall = requiredBullets - available;
+        if (shortfall <= 0) return true;
+
+        try {
+            const resp = await fetch('/?p=perks&v=con', { credentials: 'include', cache: 'no-store' });
+            const text = await resp.text();
+            const doc  = new DOMParser().parseFromString(text, 'text/html');
+            const rows = [...doc.querySelectorAll('table.pb tr.sortable-row')]
+                .map(row => {
+                    const txt = row.querySelector('.lm')?.textContent || '';
+                    const m   = txt.match(/[\d,]+/);
+                    return { id: row.dataset.id, amt: m ? parseInt(m[0].replace(/,/g, ''), 10) : 0 };
+                })
+                .filter(r => r.id && r.amt > 0)
+                .sort((a, b) => a.amt - b.amt); // smallest first
+
+            // Cap: don't redeem a perk more than X times the shortfall
+            // Default 2x — so needing 20k won't use a 200k perk
+            const cap = (state.redeemBulletsCap || 2.0) * shortfall;
+
+            // Strategy 1: find smallest single perk that covers shortfall AND is within cap
+            const singlePerk = rows.find(r => r.amt >= shortfall && r.amt <= cap);
+
+            // Strategy 2: greedy smallest perks within cap until covered
+            let greedyCovered = 0;
+            const greedyPerks = [];
+            for (const row of rows) {
+                if (greedyCovered >= shortfall) break;
+                if (row.amt > cap && greedyPerks.length === 0) {
+                    // First perk already exceeds cap — nothing we can do within cap
+                    break;
+                }
+                greedyPerks.push(row);
+                greedyCovered += row.amt;
+            }
+
+            let toRedeem = [];
+            let covered = 0;
+
+            if (singlePerk) {
+                // Best case: one perk covers it cleanly within cap
+                toRedeem = [singlePerk.id];
+                covered = singlePerk.amt;
+            } else if (greedyCovered >= shortfall) {
+                // Greedy combination within cap
+                toRedeem = greedyPerks.map(r => r.id);
+                covered = greedyCovered;
+            } else {
+                // Nothing within cap — wait for bullets to accumulate naturally
+                const capK = Math.round(cap / 1000);
+                addLiveLog(`Kill loop: no bullet perk within ${capK}k cap covers shortfall (${shortfall.toLocaleString()}) — waiting for bullets`);
+                return false;
+            }
+
+            const form = new FormData();
+            toRedeem.forEach(id => form.append('selected_perks[]', id));
+            form.append('redeem_selected', 'Redeem Selected');
+            await fetch('/?p=perks&v=con', { method: 'POST', credentials: 'include', body: form });
+            addLiveLog(`Kill loop: redeemed ${toRedeem.length} bullet perk(s) (+${covered.toLocaleString()} bullets) to cover kill cost`);
+
+            await wait(1500);
+
+            // DOM bullet count is stale after fetch-based redemption — get fresh count from server
+            try {
+                const freshResp = await fetch('/?p=kill', { credentials: 'include', cache: 'no-store' });
+                const freshText = await freshResp.text();
+                const freshDoc  = new DOMParser().parseFromString(freshText, 'text/html');
+                const freshBullets = parseUnits((freshDoc.querySelector('#player-bullets')?.textContent || '0').replace(/[^0-9,]/g, ''));
+                if (freshBullets > 0) {
+                    // Update DOM element so getPlayerBullets() returns correct value
+                    const domEl = document.querySelector('#player-bullets');
+                    if (domEl) domEl.textContent = freshBullets.toLocaleString();
+                    addLiveLog(`Kill loop: bullet count after redeem — ${freshBullets.toLocaleString()}`);
+                }
+            } catch(e) { /* non-fatal — proceed with possibly stale count */ }
+
+            return getPlayerBullets() >= requiredBullets;
+        } catch (e) {
+            addLiveLog(`Kill loop: bullet perk redeem error — ${e.message}`);
+            return false;
+        }
+    }
+
     async function handleCarsPage() {
         stopJailObserver();
 
@@ -8423,14 +10202,14 @@
 
         if (!shouldRunRepairCycle()) {
             addLiveLog('Repair not needed right now — returning to crimes');
-            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            await wait(navRand());
             gotoPage('crimes');
             return;
         }
 
         if (!state.autoRepairEnabled) {
             addLiveLog('Auto repair disabled — returning to crimes');
-            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            await wait(navRand());
             gotoPage('crimes');
             return;
         }
@@ -8440,18 +10219,18 @@
             // If we came here from the melt reset loop, go back to melt
             if (state.meltResetLoopActive) {
                 addLiveLog('Repair done — resuming melt reset loop');
-                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                await wait(navRand());
                 gotoCleanMeltPage(1);
                 return;
             }
             // If we came from kill loop travel, return to kill page
             if (state.killLoopActive) {
                 addLiveLog('Repair done — resuming kill loop');
-                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                await wait(navRand());
                 gotoPage('kill');
                 return;
             }
-            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            await wait(navRand());
             gotoPage('crimes');
             return;
         }
@@ -8460,7 +10239,7 @@
         state.meltsSinceRepair    = 0; // reset so we don't immediately trigger again
         state.meltResetLoopActive = false;
         state.resetMeltEnabled    = false;
-        await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+        await wait(navRand());
         gotoPage('crimes');
     }
 
@@ -8474,6 +10253,15 @@
         // ── Auto account creation — runs even when bot is paused ──────────────
         // Death navigates to the login page regardless of bot state, so this
         // must fire before the state.enabled check.
+        // Death takes you to the username creation page — manual logout only goes to login page.
+        // So only fire the death reset on the username page to avoid false triggers.
+        if (isUsernamePage()) {
+            applyDeathSettingsReset();
+        } else if (GM_getValue('accDeathSettingsReset', false)) {
+            // Back on a normal game page after death — clear the guard so next death is detected
+            GM_setValue('accDeathSettingsReset', false);
+        }
+
         if (state.accEnabled && !loopBusy) {
             if (isLoginPage()) {
                 loopBusy = true;
@@ -8513,7 +10301,7 @@
                 updatePanel();
                 state.pendingPenaltyPage = false;
                 state.penaltyDropsAt = calcPenaltyDropsAt();
-                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                await wait(navRand());
                 gotoPage('crimes');
             } finally { loopBusy = false; }
             return;
@@ -8525,7 +10313,20 @@
         // so the bot can leave jail and return to the loop immediately.
 
         // Kill loop — BG check and shoot mode, runs alongside or instead of kill search
-        if (state.killLoopActive) {
+        // Allow travel and active shoot stages to bypass killBgWaitUntil
+        const _kpa = state.pendingKillAction;
+        const _bypassWait = _kpa && (
+            _kpa.stage === 'travel' ||
+            _kpa.stage === 'travel_car' ||
+            _kpa.stage === 'bg_shoot' ||
+            _kpa.stage === 'bg_farm_check' ||
+            _kpa.stage === 'bg_farm_shoot' ||
+            _kpa.stage === 'bg_farm_result' ||
+            _kpa.stage === 'fetch_profile' ||
+            _kpa.stage === 'shoot_result' ||
+            _kpa.stage === 'bgcheck'
+        );
+        if (state.killLoopActive && (!(state.killBgWaitUntil > Date.now()) || _bypassWait)) {
             if (isLikelyJailPage()) {
                 loopBusy = true;
                 try { updatePanel(); await handleJailState(); } finally { loopBusy = false; }
@@ -8537,11 +10338,16 @@
                 return;
             }
             // If drive isn't ready and we need to travel, let normal script run until it is
+            // Exception: always proceed with travel stage — we need to select the car regardless
             const kpa = state.pendingKillAction;
             const needsDrive = kpa && (kpa.stage === 'travel' || kpa.stage === 'travel_car');
-            if (needsDrive && !isInternalDriveReady()) {
-                // Let normal script handle this tick — don't bounce to kill page
-                const remSec = Math.ceil(getInternalDriveRemainingMs() / 1000);
+            if (needsDrive && kpa.stage === 'travel_car' && !isInternalDriveReady()) {
+                // Car selected but drive timer not ready — stay on crimes, suppress search loop
+                state.killSearchLoopActive = false;
+                // Fall through to normal script handling below
+            } else if (needsDrive && kpa.stage === 'travel' && !isInternalDriveReady()) {
+                // Travel stage but drive not ready — suppress search loop to avoid kill page bouncing
+                state.killSearchLoopActive = false;
                 // Fall through to normal script handling below
             } else {
             // Handle travel stages
@@ -8581,14 +10387,18 @@
                 gotoPage('kill');
                 return;
             }
-            if (!isKillPage() && !isKillPenaltyPage()) {
+            // Don't intercept GTA or melt pages — let them complete
+            if (isGTAPage() || hasGTAPageMarkers() || isMeltPage() || hasMeltPageMarkers()) {
+                // Fall through to normal page handling
+            } else if (!isKillPage() && !isKillPenaltyPage()) {
                 addLiveLog('Kill loop: navigating to kill page');
                 gotoPage('kill');
                 return;
+            } else {
+                loopBusy = true;
+                try { updatePanel(); await handleKillLoopPage(); } finally { loopBusy = false; }
+                return;
             }
-            loopBusy = true;
-            try { updatePanel(); await handleKillLoopPage(); } finally { loopBusy = false; }
-            return;
             } // end drive-ready else block
         }
 
@@ -8606,12 +10416,10 @@
                 if (pa.stage === 'bg_shoot') {
                     const pls = getKillPlayers();
                     const bgP = pls.find(p => p.name.toLowerCase() === (pa.targetName || '').toLowerCase());
-                    const tgtP = pls.find(p => p.name.toLowerCase() === (pa.bgFor || '').toLowerCase());
                     const bgB = bgP?.requiredBullets || 0;
-                    const tgtB = tgtP?.requiredBullets || 0;
-                    if (bgB && tgtB && getPlayerBullets() < bgB + tgtB) waitingForBullets = true;
+                    if (bgB && getPlayerBullets() < bgB) waitingForBullets = true;
                 }
-                if (!waitingForDrive && !waitingForBullets && (!isKillPenaltyTooHigh() || pa.stage === 'bg_shoot' || pa.stage === 'travel')) {
+                if (!waitingForDrive && !waitingForBullets && (!isKillPenaltyTooHigh() || pa.stage === 'travel')) {
                     state.killLoopActive = true;
                 }
             }
@@ -8629,7 +10437,7 @@
                 if (p.searchExpiresAt) return (p.searchExpiresAt - nowMs) < RESCAN_BUFFER_MS;
                 return (nowMs - p.lastChecked) >= KILL_SCANNER_RESCAN_MS;
             });
-            const protectedIntervalMs = state.killProtectedRecheckMs || KILL_SCANNER_PROTECTED_RESCAN_MS;
+            const protectedIntervalMs = state.killProtectedRecheckEnabled ? state.killProtectedRecheckMins * 60 * 1000 : KILL_SCANNER_PROTECTED_RESCAN_MS;
             const hasProtectedDue = players.some(p =>
                 p.status === KILL_STATUS.PROTECTED &&
                 (nowMs - p.lastChecked) >= protectedIntervalMs
@@ -8648,12 +10456,63 @@
             const players = getKillPlayers();
             const hasKillReady = players.some(p => {
                 if (!isPlayerShootEnabled(p.name)) return false;
-                if (p.status !== KILL_STATUS.ALIVE) return false; // skip Protected, Unknown, Dead etc.
-                if (p.bodyguard) return false;
+                if (p.status !== KILL_STATUS.ALIVE) return false;
+                if (p.bodyguard) return false; // BG being searched — wait
                 if (!p.searchExpiresAt || p.searchExpiresAt < now()) return false;
+                if (p.requiredBullets && getPlayerBullets() < p.requiredBullets) return false;
                 return true;
             });
-            if (hasKillReady && !(state.killBgWaitUntil > Date.now())) state.killLoopActive = true;
+            if (hasKillReady && !(state.killLoopCooldownUntil > Date.now())) { state.killLoopActive = true; }
+        }
+        // Clean up stuck state: killLoopActive=true with no pendingKillAction and no deferred shoot
+        if (state.killLoopActive && !state.pendingKillAction && !state.killBgShootPending && !isKillPage()) {
+            state.killLoopActive = false;
+        }
+
+        // Restore deferred bg_shoot when bullets become sufficient
+        if (state.killBgShootPending && !state.pendingKillAction && !state.killLoopActive) {
+            const _bsp = state.killBgShootPending;
+            const _bspPlayers = getKillPlayers();
+            const _bspBgP = _bspPlayers.find(p => p.name.toLowerCase() === (_bsp.targetName || '').toLowerCase());
+            const _bspBgB = _bspBgP?.requiredBullets || 0;
+            if (_bspBgB && getPlayerBullets() >= _bspBgB) {
+                addLiveLog(`Kill loop: bullets sufficient for ${_bsp.targetName} — restoring bg_shoot`);
+                state.pendingKillAction  = _bsp;
+                state.killBgShootPending = null;
+                state.killLoopActive     = true;
+            }
+        }
+
+        // Also check BG Farm players — periodically visit kill page so syncKillExpiryFromPage
+        // can detect their BGs in Players Found and queue the bg_shoot automatically
+        if (state.killBgCheckEnabled && !state.killLoopActive && !state.pendingKillAction && !midBgShoot && !killLoopOnCooldown) {
+            const players = getKillPlayers();
+            const nowMs = now();
+            const globalWaitExpired = !(state.killBgWaitUntil > nowMs);
+            const hasBgFarmPending = players.some(p => {
+                if (!isPlayerBgFarmEnabled(p.name)) return false;
+                if (p.status !== KILL_STATUS.ALIVE) return false;
+                const dueMs = getBgCheckDueMs(p);
+                if (dueMs <= 0 && globalWaitExpired) return true;
+                // Bypass bgFarmWaitUntil if the global killBgWaitUntil has also expired
+                if (p.bgFarmWaitUntil && p.bgFarmWaitUntil > nowMs && !globalWaitExpired) return false;
+                // BG is found and ready to shoot
+                if (p.bodyguard) {
+                    const bgPlayer = players.find(b => b.name.toLowerCase() === p.bodyguard.toLowerCase());
+                    if (!bgPlayer || bgPlayer.status !== KILL_STATUS.ALIVE) return false;
+                    const isActuallyFound = bgPlayer.expectedFoundAt !== undefined && bgPlayer.expectedFoundAt <= nowMs;
+                    if (!isActuallyFound) return false;
+                    if (bgPlayer.requiredBullets && getPlayerBullets() < bgPlayer.requiredBullets) return false;
+                    return true;
+                }
+                return false;
+            });
+            if (hasBgFarmPending && !(state.killLoopCooldownUntil > Date.now())) {
+                state.killLoopActive    = true;
+                state.killBgSpamPaused  = true;
+                state.pendingKillAction = { stage: 'bgcheck' };
+                stopBgSpam();
+            }
         }
         // Also runs if kill loop is active but waiting for drive (needsDrive && !driveReady)
         const killLoopWaitingForDrive = state.killLoopActive &&
@@ -8671,6 +10530,14 @@
             !killLoopWaitingForDrive &&
             !bgShootWaitingForDrive;
         if (state.killSearchLoopActive && !killLoopBlocksSearch) {
+            // Don't intercept GTA or melt pages — let them complete
+            if (isGTAPage() || hasGTAPageMarkers() || isMeltPage() || hasMeltPageMarkers()) {
+                // Fall through to normal page handling
+            } else if (isCrimesPage() || hasCrimePageMarkers()) {
+                // On crimes page — let GTA/melt fire first if ready, then kill scanner can run
+                const gtaReady  = isGTAEnabled() && !isGTALocked() && isInternalGTAReady();
+                const meltReady = isMeltUsable() && isInternalMeltReady();
+                if (!gtaReady && !meltReady) {
             // Don't intercept jail page — kill page is accessible whilst jailed,
             // so continue searching. Jail observer handles release separately.
             if (hasCTCChallenge()) {
@@ -8692,32 +10559,29 @@
                 try { updatePanel(); await handleKillPage(); } finally { loopBusy = false; }
                 return;
             }
+                } // end !gtaReady && !meltReady
+            } else {
+                // Not on crimes/GTA/melt page — handle kill search normally
+                if (hasCTCChallenge()) {
+                    loopBusy = true;
+                    try { updatePanel(); setLastActionText('CTC solving…'); await maybeSolveCTC(); } finally { loopBusy = false; }
+                    return;
+                }
+                if (!isKillPage()) {
+                    if (isKillPenaltyPage()) {
+                        // Let penalty page handle first
+                    } else {
+                        addLiveLog('Kill search: navigating to kill page');
+                        gotoPage('kill');
+                        return;
+                    }
+                } else {
+                    loopBusy = true;
+                    try { updatePanel(); await handleKillPage(); } finally { loopBusy = false; }
+                    return;
+                }
+            } // end isCrimesPage else-if
         }
-
-        // Bust mode — always route to jail page, bust continuously
-        if (state.bustLoopActive) {
-            if (hasCTCChallenge()) {
-                loopBusy = true;
-                try { updatePanel(); setLastActionText('CTC solving…'); await maybeSolveCTC(); } finally { loopBusy = false; }
-                return;
-            }
-            // If jailed (from failed bust), handle jail
-            if (isLikelyJailPage() && getOwnJailRow()) {
-                loopBusy = true;
-                try { updatePanel(); await handleBustPage(); } finally { loopBusy = false; }
-                return;
-            }
-            // Navigate to jail page if not already there
-            if (!hasBustPageMarkers()) {
-                addLiveLog('Bust loop: navigating to jail');
-                gotoPage('jail');
-                return;
-            }
-            loopBusy = true;
-            try { updatePanel(); await handleBustPage(); } finally { loopBusy = false; }
-            return;
-        }
-
         // Crime reset mode — always route to crimes page, ignore everything else
         if (state.resetCrimesEnabled) {
             if (isLikelyJailPage()) {
@@ -8810,18 +10674,44 @@
             const ownRow = getOwnJailRow();
             if (ownRow) {
                 jailHadOwnRow = true;
-                const jailMs  = getOwnJailTimerMs();
+                // Update stored release time if timer has changed
+                const jailMs = getOwnJailTimerMs();
+                if (jailMs != null && jailMs > 0) {
+                    const releasesAt = now() + jailMs + 2000;
+                    if (releasesAt > state.jailReleasesAt) {
+                        state.jailReleasesAt = releasesAt;
+                    }
+                }
+                // Fallback: if stored timer has elapsed and DOM still shows our row,
+                // the page has stopped updating (death in jail) — navigate away
+                if (state.jailReleasesAt > 0 && now() >= state.jailReleasesAt) {
+                    addLiveLog('Jail timer elapsed — navigating away (possible death in jail)');
+                    state.jailReleasesAt = 0;
+                    stopJailObserver();
+                    clearScheduledReload();
+                    await wait(rand(500, 1200));
+                    if (state.gtaResetLoopActive) {
+                        gotoPage('gta');
+                    } else if (state.meltResetLoopActive) {
+                        gotoCleanMeltPage(1);
+                    } else {
+                        gotoPage('crimes');
+                    }
+                }
                 return;
             }
 
+            state.jailReleasesAt = 0;
             stopJailObserver();
             clearScheduledReload();
-            await wait(rand(500, 1200));
+            // Dupe mode: optionally linger before leaving jail, or navigate away immediately
+            if (PERSONALITY.jailLeaveDelayMs > 0) {
+                await wait(rand(500, PERSONALITY.jailLeaveDelayMs));
+            } else {
+                await wait(rand(500, 1200));
+            }
             // Return to the correct page based on which loop is active
-            if (state.bustLoopActive) {
-                addLiveLog('Passive check: no own jail row — returning to jail (bust active)');
-                gotoPage('jail');
-            } else if (state.gtaResetLoopActive) {
+                if (state.gtaResetLoopActive) {
                 addLiveLog('Passive check: no own jail row — returning to GTA (loop active)');
                 gotoPage('gta');
             } else if (state.meltResetLoopActive) {
@@ -8839,7 +10729,7 @@
             updatePanel();
 
             if (reloadPending) return;
-            if (recentlyActed(600)) return;
+            if (recentlyActed(600)) { if (isCrimesPage()||hasCrimePageMarkers()) addLiveLog(`tick blocked: recentlyActed ${now()-state.lastActionAt}ms ago`); return; }
 
             if (hasCTCChallenge()) {
                 await maybeSolveCTC();
@@ -8873,7 +10763,7 @@
 
             // Bullet factory check — fires every 30 minutes on the half-hour
             // Start a run if due and no other dedicated loop is active
-            if (isBulletFactoryCheckDue() && !state.bustLoopActive && !state.killLoopActive &&
+            if (isBulletFactoryCheckDue() && !state.killLoopActive &&
                 !state.gtaResetLoopActive && !state.meltResetLoopActive) {
                 await startBulletFactoryRun();
                 return;
@@ -8901,7 +10791,7 @@
                     if (!isBankPage()) {
                         addLiveLog('Bullet factory: navigating to bank to withdraw');
                         state.pendingBankAction = { type: 'withdraw', amount: run.withdrawAmount, source: 'bulletFactory' };
-                        await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                        await wait(navRand());
                         gotoPage('bank');
                         return;
                     }
@@ -8916,7 +10806,7 @@
                     if (!isBankPage()) {
                         addLiveLog(`Bullet factory: navigating to bank for mid-run top-up`);
                         state.pendingBankAction = { type: 'withdraw', amount: run.withdrawAmount, source: 'bulletFactory', substage: 'topup' };
-                        await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                        await wait(navRand());
                         gotoPage('bank');
                         return;
                     }
@@ -8935,7 +10825,7 @@
                         // tick will naturally retry bullet factory when drive becomes available
                     } else if (!isCarsPage() && !hasCarsPageMarkers()) {
                         addLiveLog(`Bullet factory: navigating to cars page to travel to ${run.targets[0]?.country}`);
-                        await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                        await wait(navRand());
                         gotoPage('cars');
                         return;
                     } else {
@@ -8965,7 +10855,7 @@
                     const onBuyPage = url.includes('p=weaponry') && url.includes('show=bullet');
                     if (target && !onBuyPage) {
                         addLiveLog(`Bullet factory: navigating to bullet factory in ${target?.country}`);
-                        await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                        await wait(navRand());
                         window.location.href = getBulletFactoryUrl(target.countryId);
                         return;
                     }
@@ -8976,7 +10866,7 @@
 
             // Players Online scan — fires opportunistically during normal script.
             // Only runs when no dedicated loop is active and scan is due.
-            if (isKillOnlineScanDue() && !state.bustLoopActive && !state.gtaResetLoopActive &&
+            if (isKillOnlineScanDue() && !state.gtaResetLoopActive &&
                 !state.meltResetLoopActive && !state.resetCrimesEnabled && !isKillPenaltyPage() &&
                 !state.pendingBulletRun) {
                 addLiveLog('Kill scanner: online scan due — navigating to Players Online');
@@ -8986,7 +10876,7 @@
 
             // Penalty drop timer — navigate to kill page when penalty should have dropped
             if (state.penaltyDropsAt && now() >= state.penaltyDropsAt &&
-                !state.killLoopActive && !state.bustLoopActive && !isKillPage() && !isKillPenaltyPage()) {
+                !state.killLoopActive && !isKillPage() && !isKillPenaltyPage()) {
                 addLiveLog('Kill loop: penalty drop timer elapsed — checking kill page');
                 state.penaltyDropsAt = 0;
                 gotoPage('kill');
@@ -8994,7 +10884,7 @@
             }
 
             // Bodyguard expected found — navigate to kill page when timer elapses
-            if (state.killBgCheckEnabled && !state.killLoopActive && !state.bustLoopActive &&
+            if (state.killBgCheckEnabled && !state.killLoopActive &&
                 !state.gtaResetLoopActive && !state.meltResetLoopActive && !isKillPage()) {
                 const playerReady = getKillPlayers().some(p =>
                     p.expectedFoundAt && now() >= p.expectedFoundAt
@@ -9041,7 +10931,7 @@
             if (isDrugsPage() || hasDrugsPageMarkers()) {
                 if (state.killLoopActive) {
                     // Kill loop takes priority — drive timer is shared, return to kill page
-                    await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                    await wait(navRand());
                     gotoPage('kill');
                     return;
                 }
@@ -9050,6 +10940,12 @@
             }
 
             if (isCarPage()) {
+                if (state.killLoopActive) {
+                    // Kill loop takes priority — return to kill page
+                    await wait(navRand());
+                    gotoPage('kill');
+                    return;
+                }
                 await handleCarPage();
                 return;
             }
@@ -9074,7 +10970,7 @@
                 return;
             }
 
-            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            await wait(navRand());
             gotoPage('crimes');
         } finally {
             loopBusy = false;
@@ -9086,11 +10982,21 @@
     // ── Bullet Factory Page Handler ───────────────────────────────────────────
     // Handles the weaponry page (?p=weaponry&show=bullet&id=X) during a bullet run
     async function handleBulletFactoryPage() {
+        // BG Spam takes priority only when actively firing — not when paused waiting for target
+        const bgSpamPaused2 = getSetting('killBgSpamPausedUntil', 0) > Date.now();
+        if (state.killBgSpamEnabled && state.killBgSpamTarget && state.killBgCheckEnabled && !bgSpamPaused2) {
+
+            state.pendingBulletRun = null;
+            await wait(navRand());
+            gotoPage('crimes');
+            return;
+        }
+
         const run = state.pendingBulletRun;
         if (!run || !run.targets || !run.targets.length) {
             addLiveLog('Bullet factory: no pending run — returning to crimes');
             state.pendingBulletRun = null;
-            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            await wait(navRand());
             gotoPage('crimes');
             return;
         }
@@ -9108,14 +11014,14 @@
                 addLiveLog('Bullet factory: all countries done — run complete');
                 // Keep pendingBulletRun alive until after navigation so kill scanner stays suppressed
                 state.pendingBulletRun = { ...run, targets: [], stage: 'complete' };
-                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                await wait(navRand());
                 state.pendingBulletRun = null;
                 gotoPage('crimes');
                 return;
             }
             addLiveLog(`Bullet factory: moving to next country (${newTargets[0].country})`);
             state.pendingBulletRun = { ...run, targets: newTargets, stage: 'travel' };
-            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            await wait(navRand());
             if (isInternalDriveReady()) {
                 gotoPage('cars');
             } else {
@@ -9138,13 +11044,13 @@
             if (!newTargets.length) {
                 addLiveLog('Bullet factory: all countries done — run complete');
                 state.pendingBulletRun = { ...run, targets: [], stage: 'complete' };
-                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                await wait(navRand());
                 state.pendingBulletRun = null;
                 gotoPage('crimes');
                 return;
             }
             state.pendingBulletRun = { ...run, targets: newTargets, stage: 'travel' };
-            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            await wait(navRand());
             if (isInternalDriveReady()) {
                 gotoPage('cars');
             } else {
@@ -9165,13 +11071,13 @@
             const newTargets = run.targets.slice(1);
             if (!newTargets.length) {
                 state.pendingBulletRun = { ...run, targets: [], stage: 'complete' };
-                await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                await wait(navRand());
                 state.pendingBulletRun = null;
                 gotoPage('crimes');
                 return;
             }
             state.pendingBulletRun = { ...run, targets: newTargets, stage: 'travel' };
-            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            await wait(navRand());
             if (isInternalDriveReady()) {
                 gotoPage('cars');
             } else {
@@ -9197,7 +11103,7 @@
             // Use 'topup' stage — preserves targets so we return to the right country after withdraw
             state.pendingBulletRun  = { ...run, stage: 'topup' };
             state.pendingBankAction = { type: 'withdraw', amount: remainingCost, source: 'bulletFactory', substage: 'topup' };
-            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            await wait(navRand());
             gotoPage('bank');
             return;
         }
@@ -9240,7 +11146,7 @@
         if (playerCountry.toLowerCase() === target.country.toLowerCase()) {
             addLiveLog(`Bullet factory: already in ${target.country} — going to buy`);
             state.pendingBulletRun = { ...run, stage: 'buy' };
-            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            await wait(navRand());
             window.location.href = getBulletFactoryUrl(target.countryId);
             return;
         }
@@ -9258,11 +11164,11 @@
                 if (!newTargets.length) {
                     addLiveLog('Bullet factory: no more countries with stock — run complete');
                     state.pendingBulletRun = null;
-                    await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                    await wait(navRand());
                     gotoPage('crimes');
                 } else {
                     state.pendingBulletRun = { ...run, targets: newTargets, stage: 'travel' };
-                    await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+                    await wait(navRand());
                     gotoPage('cars');
                 }
                 return;
@@ -9278,7 +11184,7 @@
         if (!travelCarUrl) {
             addLiveLog('Bullet factory: no travel car found — aborting run');
             state.pendingBulletRun = null;
-            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            await wait(navRand());
             gotoPage('crimes');
             return;
         }
@@ -9323,7 +11229,7 @@
             // No repair button — try another car
             addLiveLog('Bullet factory: car damaged, no repair button — finding another car');
             state.pendingBulletRun = { ...run, stage: 'travel' };
-            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            await wait(navRand());
             gotoPage('cars');
             return;
         }
@@ -9347,7 +11253,7 @@
             // Go straight to the buy stage
             addLiveLog(`Bullet factory: already in ${target.country} — going to buy`);
             state.pendingBulletRun = { ...run, stage: 'buy' };
-            await wait(rand(DEFAULTS.navDelayMin, DEFAULTS.navDelayMax));
+            await wait(navRand());
             window.location.href = getBulletFactoryUrl(target.countryId);
             return;
         }
@@ -9360,7 +11266,7 @@
         if (!freshRadio || !freshGo) return;
 
         freshRadio.checked     = true;
-        state.nextDriveReadyAt = now() + 120000;
+        state.nextDriveReadyAt = now() + 60000;
         humanClick(freshGo);
         addLiveLog(`Bullet factory: driving to ${target.country}`);
         // After drive — go buy bullets
@@ -9370,9 +11276,43 @@
     function startHeartbeat() {
         stopHeartbeat();
         startRuntimeIfNeeded();
-        heartbeatHandle = setInterval(() => tick(), DEFAULTS.heartbeatMs);
+        heartbeatHandle = setInterval(() => tick(), PERSONALITY.heartbeatMs);
         setTimeout(() => tick(), 400);
         addLiveLog('Heartbeat started');
+        // Clear stale kill loop state — only if wait is implausibly long (>1 day = truly stale)
+        // Don't clear legitimate 3hr BG search waits
+        if (state.killLoopActive && !state.pendingKillAction && state.killBgWaitUntil > Date.now() + (23 * 60 * 60 * 1000)) {
+            state.killLoopActive  = false;
+            state.killBgWaitUntil = 0;
+            addLiveLog('Kill loop: cleared stale 24hr wait — resuming normal operation');
+        }
+        // Clear spam pause if no pending kill action
+        if (state.killBgSpamPaused && !state.pendingKillAction) {
+            state.killBgSpamPaused = false;
+        }
+
+        // Clear spam pause if kill loop has no active work to do
+        if (state.killBgSpamPaused && !state.pendingKillAction && !state.killLoopActive) {
+            state.killBgSpamPaused = false;
+        }
+        syncBgSpamState();
+        // Detect gun change — if gun changed since last page load, clear all stored
+        // requiredBullets so they get recalculated with the new gun on next kill page visit
+        const _currentGun = (document.querySelector('#player-gun')?.textContent || '').trim();
+        if (_currentGun && state.lastKnownGun && _currentGun !== state.lastKnownGun) {
+            addLiveLog(`Gun changed from ${state.lastKnownGun} to ${_currentGun} — clearing stored bullet costs`);
+            const _gPlayers = getKillPlayers();
+            let _gChanged = false;
+            for (const p of _gPlayers) {
+                if (p.requiredBullets) { delete p.requiredBullets; _gChanged = true; }
+            }
+            if (_gChanged) saveKillPlayers(_gPlayers);
+        }
+        if (_currentGun) state.lastKnownGun = _currentGun;
+        // Auto buy gun if enabled and no gun
+        if (state.autoBuyGun && getPlayerGunValue() === 0 && !autoBuyGunBusy) {
+            autoBuyGun();
+        }
         // Refresh kill list every 10s so BG countdown timers tick live
         if (window._ugKillListRefresh) clearInterval(window._ugKillListRefresh);
         window._ugKillListRefresh = setInterval(() => {
@@ -9392,11 +11332,15 @@
                 (nowMs - (p.lastChecked || 0)) >= recheckMs
             );
             if (hasProtectedDue) {
-                // Don't reactivate if we just exited with no targets — respect the cooldown
                 const noTargetUntil = Number(getSetting('killSearchNoTargetUntil', 0));
                 if (Date.now() >= noTargetUntil) {
-                    addLiveLog('Kill scanner: protected recheck due — activating search');
-                    state.killSearchLoopActive = true;
+                    // Don't interrupt if GTA or melt is ready to fire
+                    const gtaReady  = isGTAEnabled() && !isGTALocked() && isInternalGTAReady();
+                    const meltReady = isMeltUsable() && isInternalMeltReady();
+                    if (!gtaReady && !meltReady) {
+                        addLiveLog('Kill scanner: protected recheck due — activating search');
+                        state.killSearchLoopActive = true;
+                    }
                 }
             }
         }, 10000);
@@ -9480,8 +11424,9 @@
         const gtaRow  = checkboxRow(GTA_DEF.id,  GTA_DEF.name,  enabled.includes(GTA_DEF.id),  isGTALocked());
         const meltRow = checkboxRow(MELT_DEF.id, MELT_DEF.name, enabled.includes(MELT_DEF.id), isMeltLocked());
 
-        crimesContainer.innerHTML = crimeRows.join('');
-        gtaContainer.innerHTML    = [gtaRow, meltRow].join('');
+        const TABLE = (rows) => `<table style="width:auto;border-collapse:collapse;">${rows.join('')}</table>`;
+        crimesContainer.innerHTML = TABLE(crimeRows);
+        gtaContainer.innerHTML    = TABLE([gtaRow, meltRow]);
     }
 
     function refreshActionLockStates() {
@@ -9489,7 +11434,7 @@
 
         for (const def of allDefs) {
             const cb    = document.querySelector(`.ug-action-cb[data-id="${def.id}"]`);
-            const label = cb?.closest('.ug-action-label');
+            const label = cb?.closest('tr');
             if (!cb || !label) continue;
 
             const locked =
@@ -9498,7 +11443,7 @@
                 isCrimeLocked(def.id);
 
             cb.disabled = locked;
-            label.classList.toggle('ug-action-locked', locked);
+            if (label) { label.querySelectorAll('td').forEach((td, i) => { if (i > 0) td.style.color = locked ? '#555' : '#ddd'; }); }
 
             let tag = label.querySelector('.ug-locked-tag');
             if (locked && !tag) {
@@ -9513,28 +11458,27 @@
     }
 
     function checkboxRow(id, name, checked, locked) {
-        return `
-            <label class="ug-action-label ${locked ? 'ug-action-locked' : ''}">
-                <input
-                    type="checkbox"
-                    class="ug-action-cb"
-                    data-id="${id}"
-                    ${checked ? 'checked' : ''}
-                    ${locked ? 'disabled' : ''}
-                />
+        return `<tr class="${locked ? 'ug-action-locked' : ''}">
+            <td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;">
+                <input type="checkbox" class="ug-action-cb" data-id="${id}"
+                    style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;"
+                    ${checked ? 'checked' : ''} ${locked ? 'disabled' : ''} />
+            </td>
+            <td style="color:${locked ? '#555' : '#ddd'};font-size:12px;padding:3px 0;vertical-align:middle;white-space:nowrap;text-align:left;">
                 ${escapeHtml(name)}
-                ${locked ? '<span class="ug-locked-tag">locked</span>' : ''}
-            </label>
-        `;
+                ${locked ? '<span class="ug-locked-tag" style="color:#555;font-size:10px;margin-left:4px;">[locked]</span>' : ''}
+            </td>
+        </tr>`;
     }
 
     // Active tab persisted so it survives page navigation.
-    // If a user had 'stats' or 'log' saved from a previous version, map to 'statslog'.
-    let activeTab = getSetting('activeTab', 'crimes');
+    // Map old tab names to new ones for users upgrading from previous versions.
+    let activeTab = getSetting('activeTab', 'ranking');
     if (activeTab === 'stats' || activeTab === 'log') activeTab = 'statslog';
+    if (activeTab === 'crimes' || activeTab === 'gta' || activeTab === 'points') activeTab = 'ranking';
     // Ensure activeTab is a valid tab that exists in the current version
-    const validTabs = ['crimes', 'gta', 'drugs', 'points', 'kill', 'statslog', 'qt', 'acc'];
-    if (!validTabs.includes(activeTab)) activeTab = 'crimes';
+    const validTabs = ['ranking', 'perks', 'drugs', 'kill', 'statslog', 'qt', 'acc'];
+    if (!validTabs.includes(activeTab)) activeTab = 'ranking';
 
 
     function saveSettings() {
@@ -9548,6 +11492,17 @@
         state.enabledActions             = checked;
         state.autoDepositEnabled         = autoDepositInput   ? autoDepositInput.checked   : state.autoDepositEnabled;
         state.autoDepositThreshold       = thresholdValue;
+        if (bustNoReloadInput) state.bustNoReload = bustNoReloadInput.checked;
+        if (bustPollMinEl) state.bustPollMin = Math.max(100, parseInt(bustPollMinEl.value) || DEFAULTS.bustPollMin);
+        if (bustPollMaxEl) state.bustPollMax = Math.max(100, parseInt(bustPollMaxEl.value) || DEFAULTS.bustPollMax);
+        state.extendBulletsThreshold     = extendBulletsThreshEl     ? (parseFormattedNumber(extendBulletsThreshEl.value)     || DEFAULTS.extendBulletsThreshold)     : state.extendBulletsThreshold;
+        state.extendRaresThreshold       = extendRaresThreshEl       ? (parseFormattedNumber(extendRaresThreshEl.value)       || DEFAULTS.extendRaresThreshold)       : state.extendRaresThreshold;
+        state.extendDoubleMeltsThreshold = extendDoubleMeltsThreshEl ? (parseFormattedNumber(extendDoubleMeltsThreshEl.value) || DEFAULTS.extendDoubleMeltsThreshold) : state.extendDoubleMeltsThreshold;
+        state.extendBulletValueThreshold = extendBulletValueThreshEl ? (parseFormattedNumber(extendBulletValueThreshEl.value) || DEFAULTS.extendBulletValueThreshold) : state.extendBulletValueThreshold;
+        state.extendDoubleXpThreshold    = extendDoubleXpThreshEl    ? (parseFormattedNumber(extendDoubleXpThreshEl.value)    || DEFAULTS.extendDoubleXpThreshold)    : state.extendDoubleXpThreshold;
+        state.extendAlwaysSuccThreshold  = extendAlwaysSuccThreshEl  ? (parseFormattedNumber(extendAlwaysSuccThreshEl.value)  || DEFAULTS.extendAlwaysSuccThreshold)  : state.extendAlwaysSuccThreshold;
+        state.extendAlwaysBustThreshold  = extendAlwaysBustThreshEl  ? (parseFormattedNumber(extendAlwaysBustThreshEl.value)  || DEFAULTS.extendAlwaysBustThreshold)  : state.extendAlwaysBustThreshold;
+        state.extendDoubleCashThreshold  = extendDoubleCashThreshEl  ? (parseFormattedNumber(extendDoubleCashThreshEl.value)  || DEFAULTS.extendDoubleCashThreshold)  : state.extendDoubleCashThreshold;
         state.autoRepairEnabled          = autoRepairInput    ? autoRepairInput.checked    : state.autoRepairEnabled;
         state.repairEveryMelts           = repairEveryValue;
         state.autoMissionsEnabled        = autoMissionsInput  ? autoMissionsInput.checked  : state.autoMissionsEnabled;
@@ -9563,49 +11518,93 @@
         state.resetCrimesFastMode = resetCrimesFastModeInput ? resetCrimesFastModeInput.checked : state.resetCrimesFastMode;
         state.resetGTAEnabled     = resetGTAInput            ? resetGTAInput.checked            : state.resetGTAEnabled;
         state.resetMeltEnabled    = resetMeltInput           ? resetMeltInput.checked           : state.resetMeltEnabled;
-        const newBustEnabled  = bustEnabledInput    ? bustEnabledInput.checked    : state.bustEnabled;
-        const newBustNoReload = bustNoReloadInput  ? bustNoReloadInput.checked  : state.bustNoReload;
-        // Mutual exclusivity — no reload bust vs enable bust
-        if (newBustNoReload && !state.bustNoReload) {
-            // Switching to no reload — disable enable bust
-            state.bustEnabled  = false;
-            state.bustFastMode = false;
-            if (bustEnabledInput)  bustEnabledInput.checked  = false;
-            if (bustFastModeInput) bustFastModeInput.checked = false;
-        } else if (newBustEnabled && !state.bustEnabled && state.bustNoReload) {
-            // Switching to enable bust — disable no reload
-            state.bustNoReload = false;
-            if (bustNoReloadInput) bustNoReloadInput.checked = false;
-        } else {
-            state.bustEnabled  = newBustEnabled;
-            state.bustFastMode = bustFastModeInput ? bustFastModeInput.checked : state.bustFastMode;
-        }
-        state.bustNoReload = bustNoReloadInput ? bustNoReloadInput.checked : state.bustNoReload;
-        if (bustPollMinEl) state.bustPollMin = Math.max(100, parseInt(bustPollMinEl.value) || DEFAULTS.bustPollMin);
-        if (bustPollMaxEl) state.bustPollMax = Math.max(100, parseInt(bustPollMaxEl.value) || DEFAULTS.bustPollMax);
+
         if (bgCrimeEnabledInput) {
             state.bgCrimeEnabled = bgCrimeEnabledInput.checked;
             if (state.bgCrimeEnabled) startBgCrime();
             else stopBgCrime();
         }
+        if (diceJoinEnabledInput) {
+            state.diceJoinEnabled = diceJoinEnabledInput.checked;
+            if (state.diceJoinEnabled) startDiceJoiner();
+            else stopDiceJoiner();
+        }
         if (bulletFactoryEnabledInput) {
             state.bulletFactoryEnabled = bulletFactoryEnabledInput.checked;
         }
+        if (drugCompModeInput) state.drugCompEnabled = drugCompModeInput.checked;
         if (killProtectedRecheckInput)  state.killProtectedRecheckEnabled = killProtectedRecheckInput.checked;
         if (killProtectedRecheckMinsEl) state.killProtectedRecheckMins    = Number(killProtectedRecheckMinsEl.value) || DEFAULTS.killProtectedRecheckMins;
         if (qtBgEnabledInput)      state.qtBgEnabled       = qtBgEnabledInput.checked;
-        if (qtBgThresholdEl)       state.qtBgThreshold     = Number(qtBgThresholdEl.value) || DEFAULTS.qtBgThreshold;
+        const _qtPerksEnabledEl = document.querySelector('#ug-bot-qt-perks-enabled');
+        if (_qtPerksEnabledEl)     state.qtPerksEnabled    = _qtPerksEnabledEl.checked;
+        if (qtBgThresholdEl)       state.qtBgThreshold     = parseFormattedNumber(qtBgThresholdEl.value) || DEFAULTS.qtBgThreshold;
         if (qtBulletsEnabledInput) state.qtBulletsEnabled  = qtBulletsEnabledInput.checked;
-        if (qtBulletsThresholdEl)  state.qtBulletsThreshold = Number(qtBulletsThresholdEl.value) || DEFAULTS.qtBulletsThreshold;
-        if (qtBulletsMinEl)        state.qtBulletsMin        = Number(qtBulletsMinEl.value) || 0;
+        if (qtBulletsThresholdEl)  state.qtBulletsThreshold = parseFormattedNumber(qtBulletsThresholdEl.value) || DEFAULTS.qtBulletsThreshold;
+        if (qtBulletsMinEl)        state.qtBulletsMin        = parseFormattedNumber(qtBulletsMinEl.value) || 0;
         if (qtPollMinEl)           state.qtPollMin          = Number(qtPollMinEl.value) || DEFAULTS.qtPollMin;
         if (qtPollMaxEl)           state.qtPollMax          = Number(qtPollMaxEl.value) || DEFAULTS.qtPollMax;
         if (qtPointsEnabledInput)  state.qtPointsEnabled    = qtPointsEnabledInput.checked;
-        if (qtPointsThresholdEl)   state.qtPointsThreshold  = Number(qtPointsThresholdEl.value) || DEFAULTS.qtPointsThreshold;
+        if (qtPointsThresholdEl)   state.qtPointsThreshold  = parseFormattedNumber(qtPointsThresholdEl.value) || DEFAULTS.qtPointsThreshold;
+        if (qtBustEnabledInput)       state.qtBustEnabled       = qtBustEnabledInput.checked;
+        if (qtBustMaxPtsEl)           state.qtBustMaxPts        = Number(qtBustMaxPtsEl.value) || DEFAULTS.qtBustMaxPts;
+        if (qtBustMinAmtEl)           state.qtBustMinMins       = Number(qtBustMinAmtEl.value) || DEFAULTS.qtBustMinMins;
+        if (qtAlwaysSuccEnabledInput) state.qtAlwaysSuccEnabled = qtAlwaysSuccEnabledInput.checked;
+        if (qtAlwaysSuccMaxPtsEl)     state.qtAlwaysSuccMaxPts  = Number(qtAlwaysSuccMaxPtsEl.value) || DEFAULTS.qtAlwaysSuccMaxPts;
+        if (qtAlwaysSuccMinAmtEl)     state.qtAlwaysSuccMinMins = Number(qtAlwaysSuccMinAmtEl.value) || DEFAULTS.qtAlwaysSuccMinMins;
+        if (qtDoubleMeltsEnabledInput) state.qtDoubleMeltsEnabled = qtDoubleMeltsEnabledInput.checked;
+        if (qtDoubleMeltsMaxPtsEl)    state.qtDoubleMeltsMaxPts  = Number(qtDoubleMeltsMaxPtsEl.value) || DEFAULTS.qtDoubleMeltsMaxPts;
+        if (qtDoubleMeltsMinAmtEl)    state.qtDoubleMeltsMinCars = Number(qtDoubleMeltsMinAmtEl.value) || DEFAULTS.qtDoubleMeltsMinCars;
+        if (qtDoubleXpEnabledInput)   state.qtDoubleXpEnabled    = qtDoubleXpEnabledInput.checked;
+        if (qtDoubleXpMaxPtsEl)       state.qtDoubleXpMaxPts     = Number(qtDoubleXpMaxPtsEl.value) || DEFAULTS.qtDoubleXpMaxPts;
+        if (qtDoubleXpMinAmtEl)       state.qtDoubleXpMinMins    = Number(qtDoubleXpMinAmtEl.value) || DEFAULTS.qtDoubleXpMinMins;
+        if (qtDoubleCashEnabledInput) state.qtDoubleCashEnabled  = qtDoubleCashEnabledInput.checked;
+        if (qtDoubleCashMaxPtsEl)     state.qtDoubleCashMaxPts   = Number(qtDoubleCashMaxPtsEl.value) || DEFAULTS.qtDoubleCashMaxPts;
+        if (qtDoubleCashMinAmtEl)     state.qtDoubleCashMinMins  = Number(qtDoubleCashMinAmtEl.value) || DEFAULTS.qtDoubleCashMinMins;
+        if (qtRareEnabledInput)       state.qtRareEnabled        = qtRareEnabledInput.checked;
+        if (qtRareMaxPtsEl)           state.qtRareMaxPts         = Number(qtRareMaxPtsEl.value) || DEFAULTS.qtRareMaxPts;
+        if (qtRareMinAmtEl)           state.qtRareMinCars        = Number(qtRareMinAmtEl.value) || DEFAULTS.qtRareMinCars;
+        if (qtBulletValueEnabledInput) state.qtBulletValueEnabled = qtBulletValueEnabledInput.checked;
+        if (qtBulletValueMaxPtsEl)    state.qtBulletValueMaxPts  = Number(qtBulletValueMaxPtsEl.value) || DEFAULTS.qtBulletValueMaxPts;
+        if (qtBulletValueMinAmtEl)    state.qtBulletValueMinCars = Number(qtBulletValueMinAmtEl.value) || DEFAULTS.qtBulletValueMinCars;
         if (qtCarsEnabledInput)    state.qtCarsEnabled      = qtCarsEnabledInput.checked;
         if (qtCarsIntervalEl)      state.qtCarsScanInterval = Number(qtCarsIntervalEl.value) || DEFAULTS.qtCarsScanInterval;
         if (qtPerkExtendEnabledInput) state.qtPerkExtendEnabled = qtPerkExtendEnabledInput.checked;
         if (qtPerkExtendMinsEl)    state.qtPerkExtendMins   = Number(qtPerkExtendMinsEl.value) || DEFAULTS.qtPerkExtendMins;
+        if (qtPerkRedeemEnabledInput) state.qtPerkRedeemEnabled = qtPerkRedeemEnabledInput.checked;
+        if (qtPerkRedeemMinsEl)    state.qtPerkRedeemMins   = Number(qtPerkRedeemMinsEl.value) || DEFAULTS.qtPerkRedeemMins;
+        if (disableCrimesRankEl)   state.disableCrimesRank  = disableCrimesRankEl.value;
+        if (disableGtaRankEl)      state.disableGtaRank     = disableGtaRankEl.value;
+        if (leaveCashEnabledInput) state.leaveCashEnabled   = leaveCashEnabledInput.checked;
+        if (leaveCashOnHandEl)     state.leaveCashOnHand    = parseFormattedNumber(leaveCashOnHandEl.value) || 0;
+        if (bonusPointsEnabledInput) state.bonusPointsEnabled = bonusPointsEnabledInput.checked;
+        if (state.bonusPointsEnabled) { startBonusPointsSpender(); } else { stopBonusPointsSpender(); }
+        if (autoBuyBgEnabledInput)   state.autoBuyBgEnabled   = autoBuyBgEnabledInput.checked;
+        if (state.autoBuyBgEnabled) { startAutoBuyBg(); } else { stopAutoBuyBg(); }
+        if (autoBuyBgMinPtsEl)       state.autoBuyBgMinPts    = parseInt(autoBuyBgMinPtsEl.value.replace(/[^\d]/g, ''), 10) || DEFAULTS.autoBuyBgMinPts;
+        if (autoBuyBgMinsEl)         state.autoBuyBgMins      = parseInt(autoBuyBgMinsEl.value.replace(/[^\d]/g, ''), 10)   || DEFAULTS.autoBuyBgMins;
+        if (extendBgsInput)          state.extendBgs         = extendBgsInput.checked;
+        if (extendCarsInput)         state.extendCars        = extendCarsInput.checked;
+        if (extendBulletsInput)      state.extendBullets     = extendBulletsInput.checked;
+        if (extendRaresInput)        state.extendRares       = extendRaresInput.checked;
+        if (extendDoubleMeltsInput)  state.extendDoubleMelts = extendDoubleMeltsInput.checked;
+        if (extendBulletValueInput)  state.extendBulletValue = extendBulletValueInput.checked;
+        if (extendDoubleXpInput)     state.extendDoubleXp    = extendDoubleXpInput.checked;
+        if (extendAlwaysSuccInput)   state.extendAlwaysSucc  = extendAlwaysSuccInput.checked;
+        if (extendAlwaysBustInput)   state.extendAlwaysBust  = extendAlwaysBustInput.checked;
+        if (extendDoubleCashInput)   state.extendDoubleCash  = extendDoubleCashInput.checked;
+        if (redeemBulletValueInput) state.redeemBulletValue = redeemBulletValueInput.checked;
+        if (redeemCashInput)        state.redeemCash        = redeemCashInput.checked;
+        if (redeemCarsInput)        state.redeemCars        = redeemCarsInput.checked;
+        if (redeemPairFloorEl)      state.redeemPairFloor   = Number(redeemPairFloorEl.value) || 100;
+        if (redeemBgInput)           state.redeemBg          = redeemBgInput.checked;
+        if (redeemBulletsInput)      state.redeemBullets     = redeemBulletsInput.checked;
+        if (redeemDoubleXpInput)     state.redeemDoubleXp    = redeemDoubleXpInput.checked;
+        if (redeemAlwaysSuccInput)   state.redeemAlwaysSucc  = redeemAlwaysSuccInput.checked;
+        if (redeemDoubleCashInput)   state.redeemDoubleCash  = redeemDoubleCashInput.checked;
+        if (redeemRareInput)         state.redeemRare        = redeemRareInput.checked;
+        if (redeemDoubleMeltInput)   state.redeemDoubleMelt  = redeemDoubleMeltInput.checked;
+        if (redeemAlwaysBustInput)   state.redeemAlwaysBust  = redeemAlwaysBustInput.checked;
         // Save per-car-type settings from the rendered list
         const carTypes = (state.qtCarsTypes || DEFAULTS.qtCarsTypes).map(t => ({ ...t }));
         carTypes.forEach(t => {
@@ -9626,6 +11625,16 @@
         // Start or stop perk extender
         if (state.qtPerkExtendEnabled) {
             startQTPerkExtender();
+        }
+        if (state.qtPerkRedeemEnabled) {
+            startQTPerkRedeemer();
+        }
+        if (state.autoBuyBgEnabled) {
+            startAutoBuyBg();
+        }
+        syncBgSpamState();
+        if (state.bonusPointsEnabled) {
+            startBonusPointsSpender();
         } else {
             stopQTPerkExtender();
         }
@@ -9633,8 +11642,17 @@
         state.killScanOnlineInterval = killScanIntervalEl    ? Number(killScanIntervalEl.value) : state.killScanOnlineInterval;
         state.killSearchEnabled      = killSearchInput       ? killSearchInput.checked       : state.killSearchEnabled;
         state.killBgCheckEnabled     = killBgCheckInput      ? killBgCheckInput.checked      : state.killBgCheckEnabled;
+        if (killBgSpamInput)       state.killBgSpamEnabled      = killBgSpamInput.checked;
+        if (killBgSpamIntervalEl)  state.killBgSpamIntervalSecs = Number(killBgSpamIntervalEl.value) || 2;
+        if (killBgSpamTargetEl)    state.killBgSpamTarget       = killBgSpamTargetEl.value || '';
         state.killShootEnabled       = killShootInput        ? killShootInput.checked        : state.killShootEnabled;
         state.killAnonymousShooting  = killAnonymousInput    ? killAnonymousInput.checked    : state.killAnonymousShooting;
+        const _autoBuyGunEl    = document.querySelector('#ug-bot-auto-buy-gun');
+        const _autoBuyGunAwpEl = document.querySelector('#ug-bot-auto-buy-gun-awp');
+        const _autoBuyGunPtsEl = document.querySelector('#ug-bot-auto-buy-gun-pts');
+        if (_autoBuyGunEl)    state.autoBuyGun            = _autoBuyGunEl.checked;
+        if (_autoBuyGunAwpEl) state.autoBuyGunType        = _autoBuyGunAwpEl.checked ? 'awp' : 'ak47';
+        if (_autoBuyGunPtsEl && _autoBuyGunPtsEl.value) state.autoBuyGunPtThreshold = parseInt(_autoBuyGunPtsEl.value, 10) || 100;
         state.killBgCheckIntervalHrs = killBgCheckIntervalEl ? Number(killBgCheckIntervalEl.value) : state.killBgCheckIntervalHrs;
         const penaltyVal = killPenaltyThresholdEl ? parseFloat(killPenaltyThresholdEl.value) : 0;
         const newThreshold = isNaN(penaltyVal) ? 0 : Math.max(0, penaltyVal);
@@ -9651,12 +11669,20 @@
         // Activate kill loop if BG check is enabled and there are ticked players.
         // Also force scan and search on — the kill loop requires both to function.
         if (state.killBgCheckEnabled) {
-            const hasBgTargets = (state.killBgCheckPlayers || []).length > 0;
+            const hasBgTargets = ((state.killBgCheckPlayers || []).length > 0 || (state.killBgFarmPlayers || []).length > 0) &&
+                getKillPlayers().some(p =>
+                    (isPlayerBgCheckEnabled(p.name) || isPlayerBgFarmEnabled(p.name)) &&
+                    p.status === KILL_STATUS.ALIVE &&
+                    !p.bodyguard // skip if BG currently being searched
+                );
             // Clear killBgWaitUntil if a bg_shoot is already queued — BG was found
             if (state.pendingKillAction?.stage === 'bg_shoot') state.killBgWaitUntil = 0;
             // Don't re-enable kill loop if we're explicitly waiting for a BG search to complete
             const waitingForBg = state.killBgWaitUntil > Date.now();
-            if (hasBgTargets && !waitingForBg) state.killLoopActive = true;
+            if (hasBgTargets && !waitingForBg && !state.killBgSpamPaused && !state.killLoopActive) {
+                // Only re-activate if there's actually something to do right now
+                // (don't set killLoopActive=true without a pendingKillAction — causes stuck state)
+            }
             // Force scan online and search players on
             state.killScanOnlineEnabled = true;
             state.killSearchEnabled     = true;
@@ -9673,13 +11699,8 @@
         // These survive page reloads so the dedicated loops maintain themselves.
         state.gtaResetLoopActive   = state.resetGTAEnabled;
         state.meltResetLoopActive  = state.resetMeltEnabled;
-        state.bustLoopActive       = state.bustEnabled;
-        // Start or stop no reload bust background loop
-        if (state.bustNoReload) {
-            startNoReloadBust();
-        } else {
-            stopNoReloadBust();
-        }
+        if (state.bustNoReload) { startNoReloadBust(); } else { stopNoReloadBust(); }
+
         // Kill search loop activation logic:
         // - If the toggle is off, always deactivate
         // - If the loop was already active (persisted), keep it active — never
@@ -9706,7 +11727,7 @@
             });
             const hasProtectedDue = players.some(p =>
                 p.status === KILL_STATUS.PROTECTED &&
-                (nowMs - p.lastChecked) >= KILL_SCANNER_PROTECTED_RESCAN_MS
+                (nowMs - p.lastChecked) >= (state.killProtectedRecheckEnabled ? state.killProtectedRecheckMins * 60 * 1000 : KILL_SCANNER_PROTECTED_RESCAN_MS)
             );
             state.killSearchLoopActive = hasUnknowns || hasExpiringAlives || hasProtectedDue;
         }
@@ -9734,13 +11755,12 @@
     // When one is checked, the other two are unchecked in both the UI and state.
     // Also handles the fast mode checkbox which is tied to crime reset.
     function handleResetCheckboxChange(changedId) {
-        if (!resetCrimesInput || !resetGTAInput || !resetMeltInput || !bustEnabledInput || !killSearchInput) return;
+        if (!resetCrimesInput || !resetGTAInput || !resetMeltInput || !killSearchInput) return;
 
         const all = [
             { id: 'crimes',      el: resetCrimesInput },
             { id: 'gta',         el: resetGTAInput },
             { id: 'melt',        el: resetMeltInput },
-            { id: 'bust',        el: bustEnabledInput },
             { id: 'killsearch',  el: killSearchInput }
         ];
 
@@ -9759,13 +11779,6 @@
             if (!crimesNowChecked) resetCrimesFastModeInput.checked = false;
         }
 
-        // Fast bust only applies when bust is active
-        if (bustFastModeInput) {
-            const bustNowChecked = bustEnabledInput.checked;
-            bustFastModeInput.disabled = !bustNowChecked;
-            if (!bustNowChecked) bustFastModeInput.checked = false;
-        }
-
         saveSettings();
     }
 
@@ -9780,6 +11793,7 @@
 
 
     function switchTab(tab) {
+        const _pane = document.querySelector(`.ug-tab-pane[data-tab="${tab}"]`);
         activeTab = tab;
         setSetting('activeTab', tab);
 
@@ -9791,12 +11805,45 @@
         });
 
         tabPanes.forEach(pane => {
-            pane.style.display = pane.dataset.tab === tab ? 'block' : 'none';
+            if (pane.dataset.tab === tab) {
+                pane.style.setProperty('display', 'block', 'important');
+            } else {
+                pane.style.setProperty('display', 'none', 'important');
+            }
         });
 
-        // When switching to the statslog tab, restore the active sub-tab
-        if (tab === 'statslog') {
+        // Ensure sub-panes in the newly visible tab are correctly initialised,
+        // restoring saved sub-tab position if available
+        const activePane = document.querySelector(`.ug-tab-pane[data-tab="${tab}"]`);
+        if (activePane) {
+            const subParents = [...new Set([...activePane.querySelectorAll('.ug-sub-pane')].map(p => p.dataset.parent))];
+            subParents.forEach(parent => {
+                const panes = [...activePane.querySelectorAll(`.ug-sub-pane[data-parent="${parent}"]`)];
+                const btns  = [...activePane.querySelectorAll(`.ug-sub-btn[data-parent="${parent}"]`)];
+                // Check for a saved sub-tab
+                const saved = getSetting(`activeSubTab_${parent}`, null);
+                const savedPane = saved ? activePane.querySelector(`.ug-sub-pane[data-sub="${saved}"][data-parent="${parent}"]`) : null;
+                const savedBtn  = saved ? activePane.querySelector(`.ug-sub-btn[data-sub="${saved}"][data-parent="${parent}"]`) : null;
+                if (savedPane && savedBtn) {
+                    // Restore saved position
+                    btns.forEach(b => b.classList.remove('ug-sub-active'));
+                    panes.forEach(p => p.style.setProperty('display', 'none', 'important'));
+                    savedBtn.classList.add('ug-sub-active');
+                    savedPane.style.setProperty('display', 'block', 'important');
+                } else {
+                    // Default: first pane visible
+                    btns.forEach((b, i) => i === 0 ? b.classList.add('ug-sub-active') : b.classList.remove('ug-sub-active'));
+                    panes.forEach((p, i) => {
+                        if (i === 0) {
+                            p.style.setProperty('display', 'block', 'important');
+                        } else {
+                            p.style.setProperty('display', 'none', 'important');
+                        }
+                    });
+                }
+            });
         }
+
     }
 
     function createPanel() {
@@ -9818,498 +11865,504 @@
                 </div>
             </div>
 
-            <div id="ug-bot-collapsed-controls">
-            </div>
+            <div id="ug-bot-collapsed-controls"></div>
 
             <div id="ug-bot-extra">
+
+                <!-- TOP-LEVEL TABS -->
                 <div id="ug-bot-tabs">
-                    <button class="ug-tab-btn" data-tab="crimes">Crimes</button>
-                    <button class="ug-tab-btn" data-tab="gta">GTA</button>
+                    <button class="ug-tab-btn ug-tab-active" data-tab="ranking">Ranking</button>
+                    <button class="ug-tab-btn" data-tab="perks">Perks</button>
                     <button class="ug-tab-btn" data-tab="drugs">Drugs</button>
-                    <button class="ug-tab-btn" data-tab="points">Points</button>
                     <button class="ug-tab-btn" data-tab="kill">Kill</button>
                     <button class="ug-tab-btn" data-tab="qt">QT</button>
-                    <button class="ug-tab-btn" data-tab="statslog">Log</button>
                     <button class="ug-tab-btn" data-tab="acc">Acc</button>
+                    <button class="ug-tab-btn" data-tab="statslog">Log</button>
                 </div>
 
                 <div id="ug-bot-tab-content">
 
-                <!-- CRIMES TAB -->
-                <div class="ug-tab-pane" data-tab="crimes">
-                    <div class="ug-row ug-check">
-                        <label><input id="ug-bot-autodeposit" type="checkbox" /> Enable auto quick deposit</label>
-                    </div>
-                    <div class="ug-row ug-check">
-                        <label><input id="ug-bot-bg-crime" type="checkbox" /> Enable background crimes</label>
-                        <div class="ug-helptext" style="margin-top:2px;">Commits crimes in the background while doing GTA, melt, drugs etc. Uses the crime AJAX endpoint.</div>
-                    </div>
-                    <div class="ug-row">
-                        <div class="ug-subtitle">Auto deposit threshold</div>
-                        <input id="ug-bot-deposit-threshold" type="text" inputmode="numeric" />
-                        <div class="ug-helptext">Deposit when cash is at or above this amount. Disabled automatically when drug running is on.</div>
-                    </div>
-                    <div class="ug-row">
-                        <div style="display:flex;gap:6px;margin-bottom:6px;">
-                            <button id="ug-bot-crimes-select-all" type="button" style="font-size:11px;padding:4px 8px;">Select All</button>
-                        </div>
-                        <div id="ug-bot-actions"></div>
-                    </div>
-                    <div class="ug-row">
-                        <div class="ug-section-box">
-                            <div class="ug-section-title">Disable ranking at Global Boss</div>
-                            <div class="ug-helptext" style="margin-bottom:6px;">Automatically disables selected actions when you reach Global Boss (protection begins). Useful for continuing to melt while protected.</div>
-                            <div style="display:flex;gap:16px;align-items:center;">
-                                <label class="ug-action-label">
-                                    <input id="ug-bot-disable-crimes-at-gb" type="checkbox" /> Crimes
-                                </label>
-                                <label class="ug-action-label">
-                                    <input id="ug-bot-disable-gta-at-gb" type="checkbox" /> GTA
-                                </label>
-                            </div>
-                        </div>
-                    </div>
-                </div>
+                <!-- ==================== RANKING TAB ==================== -->
+                <div class="ug-tab-pane" data-tab="ranking" style="display:none;">
 
-                <!-- GTA TAB — includes GTA/Melt toggles, repair settings, and missions -->
-                <div class="ug-tab-pane" data-tab="gta">
-                    <div class="ug-row">
-                        <div id="ug-bot-gta-actions">
-                            <div id="ug-bot-gta-checkboxes"></div>
-                            <div class="ug-action-divider"></div>
-                            <label class="ug-action-label">
-                                <input id="ug-bot-autorepair" type="checkbox" /> Enable auto repair
-                            </label>
-                            <div style="margin-top:6px;">
-                                <div class="ug-subtitle" style="margin-bottom:4px;">Repair every X melts</div>
-                                <input id="ug-bot-repair-every" type="number" min="1" step="1" style="width:100%;box-sizing:border-box;padding:7px 8px;border:1px solid #555;border-radius:6px;background:#111;color:#fff;font-size:12px;" />
-                                <div class="ug-helptext">After this many melts, go to My Cars, click Select All, then Repair.</div>
-                            </div>
-                            <div class="ug-action-divider"></div>
-                            <label class="ug-action-label">
-                                <input id="ug-bot-automissions" type="checkbox" /> Enable missions
-                            </label>
-                            <label class="ug-action-label">
-                                <input id="ug-bot-autogivecars" type="checkbox" /> Enable give car missions
-                            </label>
-                            <div class="ug-action-divider"></div>
-                            <label class="ug-action-label">
-                                <input id="ug-bot-bullet-factory" type="checkbox" /> Enable bullet factory buying
-                            </label>
-                            <div class="ug-helptext" style="margin-top:2px;">Every 30 minutes, checks the Global Owners page for bullet factory stock (300+ bullets per country), withdraws cash and buys all available bullets by travelling to each country.</div>
-                        </div>
+                    <!-- Ranking sub-tabs -->
+                    <div class="ug-sub-tabs">
+                        <button class="ug-sub-btn ug-sub-active" data-sub="crimes" data-parent="ranking">Crimes</button>
+                        <button class="ug-sub-btn" data-sub="gtaplus" data-parent="ranking">GTA+</button>
+                        <button class="ug-sub-btn" data-sub="rankpoints" data-parent="ranking">Points</button>
                     </div>
-                </div>
 
-                <!-- DRUGS TAB -->
-                <div class="ug-tab-pane" data-tab="drugs">
-                    <div class="ug-row">
-                        <div id="ug-bot-drugs">
-                            <label class="ug-action-label">
-                                <input id="ug-bot-autodrugs" type="checkbox" /> Enable drug running
-                            </label>
-                            <div class="ug-helptext" style="margin-top:4px;">Route: USA &#8596; England — Heroin outbound, Cannabis inbound. Swiss Bank deposit replaces quick deposit when enabled.</div>
-                            <div class="ug-helptext" style="margin-top:2px;color:#f8c84a;">Requires a favourited car.</div>
-                            <div class="ug-action-divider"></div>
-                            <label class="ug-action-label">
-                                <input id="ug-bot-drug-comp" type="checkbox" /> Drug comp mode
-                            </label>
-                            <div class="ug-helptext" style="margin-top:4px;">Buys 1 unit at a time up to your full capacity, then drives and sells. Each unit counts as a separate batch for competition scoring.</div>
-                            <div class="ug-action-divider"></div>
-                            <button id="ug-bot-sell-all-drugs" class="ug-action-btn" style="width:100%;">Sell All Drugs</button>
-                            <div id="ug-bot-sell-all-status" class="ug-helptext" style="margin-top:4px;"></div>
+                    <!-- CRIMES sub-tab -->
+                    <div class="ug-sub-pane" data-sub="crimes" data-parent="ranking" style="display:none;">
+<div style="width:100%;background:#1b1b1b;border:1px solid #444;border-radius:6px;padding:8px;box-sizing:border-box;margin-bottom:4px;overflow:hidden;"><table style="width:auto;border-collapse:collapse;">
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-autodeposit" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;">Quick deposit</td><td style="vertical-align:middle;white-space:nowrap;padding:3px 0;width:120px;"><input id="ug-bot-deposit-threshold" type="text" inputmode="numeric" class="ug-compact-input" placeholder="Threshold" style="width:130px !important;max-width:130px !important;" /></td></tr>
+
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-automissions" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;">Crime missions</td></tr>
+
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-disable-crimes-at-gb" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;">Disable crimes at</td><td style="vertical-align:middle;white-space:nowrap;padding:3px 0;width:1px;"><select id="ug-bot-disable-crimes-rank" data-role="none" class="ug-compact-select">
+                                <option value="Civilian">Civilian</option>
+                                <option value="Vandal">Vandal</option>
+                                <option value="Hustler">Hustler</option>
+                                <option value="Riff-Raff">Riff-Raff</option>
+                                <option value="Ruffian">Ruffian</option>
+                                <option value="Homeboy">Homeboy</option>
+                                <option value="Homie">Homie</option>
+                                <option value="Criminal">Criminal</option>
+                                <option value="Hitman">Hitman</option>
+                                <option value="Trusted Hitman">Trusted Hitman</option>
+                                <option value="Assassin">Assassin</option>
+                                <option value="Trusted Assassin">Trusted Assassin</option>
+                                <option value="Gangster">Gangster</option>
+                                <option value="Original Gangster">Original Gangster</option>
+                                <option value="Boss">Boss</option>
+                                <option value="Regional Boss">Regional Boss</option>
+                                <option value="Global Boss" selected>Global Boss</option>
+                            </select></td></tr>
+
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-bg-crime" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;">Background crimes</td></tr>
+</table></div>
+
+                        <div class="ug-compact-row" style="margin-top:4px;">
+                            <button id="ug-bot-crimes-select-all" type="button" class="ug-small-btn">Select All</button>
                         </div>
+                        <div id="ug-bot-actions" style="margin-top:4px;"></div>
+
                     </div>
-                    <div class="ug-row">
-                        <div class="ug-subtitle">Swiss Bank deposit multiplier</div>
-                        <input id="ug-bot-drug-deposit-multiplier" type="number" min="1" step="1" />
-                        <div class="ug-helptext">Deposit to Swiss Bank when cash exceeds this many times the cost of a full Heroin run. Scales automatically with your capacity and rank.</div>
-                        <div id="ug-bot-drug-deposit-calc" class="ug-drug-calc-info"></div>
+
+                    <!-- GTA+ sub-tab -->
+                    <div class="ug-sub-pane" data-sub="gtaplus" data-parent="ranking" style="display:none;">
+
+                        <div id="ug-bot-gta-checkboxes" style="margin-bottom:4px;"></div>
+<div style="width:100%;background:#1b1b1b;border:1px solid #444;border-radius:6px;padding:8px;box-sizing:border-box;margin-bottom:4px;overflow:hidden;"><table style="width:auto;border-collapse:collapse;">
+
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-bullet-factory" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;">Bullet factory buying</td></tr>
+
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-autogivecars" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;">Car missions</td></tr>
+
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-autorepair" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;">Repair every X melts</td><td style="vertical-align:middle;white-space:nowrap;padding:3px 0;width:1px;"><input id="ug-bot-repair-every" type="text" inputmode="numeric" class="ug-compact-input ug-compact-input-sm" placeholder="10" /></td></tr>
+
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-disable-gta-at-gb" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;">Disable GTA at</td><td style="vertical-align:middle;white-space:nowrap;padding:3px 0;width:1px;"><select id="ug-bot-disable-gta-rank" data-role="none" class="ug-compact-select">
+                                <option value="Civilian">Civilian</option>
+                                <option value="Vandal">Vandal</option>
+                                <option value="Hustler">Hustler</option>
+                                <option value="Riff-Raff">Riff-Raff</option>
+                                <option value="Ruffian">Ruffian</option>
+                                <option value="Homeboy">Homeboy</option>
+                                <option value="Homie">Homie</option>
+                                <option value="Criminal">Criminal</option>
+                                <option value="Hitman">Hitman</option>
+                                <option value="Trusted Hitman">Trusted Hitman</option>
+                                <option value="Assassin">Assassin</option>
+                                <option value="Trusted Assassin">Trusted Assassin</option>
+                                <option value="Gangster">Gangster</option>
+                                <option value="Original Gangster">Original Gangster</option>
+                                <option value="Boss">Boss</option>
+                                <option value="Regional Boss">Regional Boss</option>
+                                <option value="Global Boss" selected>Global Boss</option>
+                            </select></td></tr>
+
+                        <tr>
+  <td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-bust-noreload" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td>
+  <td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;white-space:nowrap;">No reload bust</td>
+  <td style="vertical-align:middle;padding:3px 2px;white-space:nowrap;">
+    <input id="ug-bot-bust-poll-min" type="text" inputmode="numeric" style="width:28px;max-width:28px;box-sizing:border-box;padding:2px 3px;border:1px solid #444;border-radius:4px;background:#111;color:#fff;font-size:11px;text-align:right;" placeholder="800" />
+    <input id="ug-bot-bust-poll-max" type="text" inputmode="numeric" style="width:28px;max-width:28px;box-sizing:border-box;padding:2px 3px;border:1px solid #444;border-radius:4px;background:#111;color:#fff;font-size:11px;text-align:right;" placeholder="1200" />
+  </td>
+</tr>
+<tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-dice-join-enabled" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;">Join free MDs</td></tr>
+</table></div>
+
                     </div>
-                    <div class="ug-row">
-                        <div class="ug-section-box">
-                            <div class="ug-section-title">Bust</div>
-                            <div class="ug-helptext" style="margin-bottom:6px;">Stays on the jail page busting the lowest-timer prisoner continuously. If jail is empty, waits for new prisoners. Enabling bust disables timer reset modes and vice versa.</div>
-                            <label class="ug-action-label">
-                                <input id="ug-bot-bust-enabled" type="checkbox" class="ug-reset-cb" data-reset="bust" />
-                                Enable bust
-                            </label>
-                            <label class="ug-action-label ug-fast-mode-label" id="ug-bot-bust-fast-label">
-                                <input id="ug-bot-bust-fast" type="checkbox" />
-                                Fast bust — bust players instantly
-                            </label>
-                            <label class="ug-action-label" style="margin-top:6px;">
-                                <input id="ug-bot-bust-noreload" type="checkbox" />
-                                No reload bust — busts in background via fetch, no page navigation needed
-                            </label>
-                            <div class="ug-helptext" style="margin:6px 0 4px;">No reload bust poll interval</div>
-                            <div style="display:flex;gap:8px;margin-top:4px;">
-                                <div style="flex:1;">
-                                    <div class="ug-subtitle" style="margin-bottom:4px;">Min (ms)</div>
-                                    <input id="ug-bot-bust-poll-min" type="number" min="100" step="100" style="width:100%;box-sizing:border-box;padding:7px 8px;border:1px solid #555;border-radius:6px;background:#111;color:#fff;font-size:12px;" />
+
+                    <!-- POINTS sub-tab -->
+                    <div class="ug-sub-pane" data-sub="rankpoints" data-parent="ranking" style="display:none;">
+<div style="width:100%;background:#1b1b1b;border:1px solid #444;border-radius:6px;padding:8px;box-sizing:border-box;margin-bottom:4px;overflow:hidden;"><table style="width:auto;border-collapse:collapse;">
+
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-leavejail" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;">Leave jail</td><td style="vertical-align:middle;white-space:nowrap;padding:3px 0;width:1px;"><input id="ug-bot-leavejail-minpoints" type="text" inputmode="numeric" class="ug-compact-input" placeholder="Min pts" /></td><td style="color:#888;font-size:10px;padding-left:3px;vertical-align:middle;white-space:nowrap;">min pts</td></tr>
+
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-reset-crimes" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;">Reset crimes</td><td style="vertical-align:middle;white-space:nowrap;padding:3px 0;width:1px;"><label style="display:flex;align-items:center;gap:4px;color:#aaa;font-size:11px;cursor:pointer;white-space:nowrap;"><input id="ug-bot-reset-crimes-fast" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;" /> fast mode</label></td>
+
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-reset-gta" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;">Reset GTA</td></tr>
+
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-reset-melt" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;">Reset melt</td></tr>
+
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;"></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;">Min pts for resets</td><td style="vertical-align:middle;white-space:nowrap;padding:3px 0;width:1px;"><input id="ug-bot-reset-minpoints" type="text" inputmode="numeric" class="ug-compact-input" placeholder="Min pts" /></td></tr>
+<tr><td colspan="3"><div style="border-top:1px solid #333;margin:4px 0;"></div></td></tr>
+<tr><td colspan="4" style="color:#888;font-size:11px;padding:4px 0 2px 0;">Auto-buy Robot BG — min points balance / check every X mins</td></tr>
+<tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-auto-buy-bg" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;">Robot BG</td><td style="vertical-align:middle;white-space:nowrap;padding:3px 0;width:1px;"><input id="ug-bot-auto-buy-bg-minpts" type="text" inputmode="numeric" class="ug-compact-input ug-compact-input-sm" placeholder="1300" /></td><td style="vertical-align:middle;white-space:nowrap;padding:3px 0;width:1px;"><input id="ug-bot-auto-buy-bg-mins" type="text" inputmode="numeric" class="ug-compact-input ug-compact-input-sm" placeholder="60" /></td></tr>
+</table></div>
+
+                    </div><!-- end rankpoints sub-pane -->
+                </div><!-- end ranking tab-pane -->
+
+                <!-- ==================== PERKS TAB ==================== -->
+                <div class="ug-tab-pane" data-tab="perks" style="display:none;">
+
+                    <!-- Perks sub-tabs -->
+                    <div class="ug-sub-tabs">
+                        <button class="ug-sub-btn ug-sub-active" data-sub="extend" data-parent="perks">Extend</button>
+                        <button class="ug-sub-btn" data-sub="redeem" data-parent="perks">Redeem</button>
+                        <button class="ug-sub-btn" data-sub="bonuspoints" data-parent="perks">Bonus</button>
+                    </div>
+
+                    <!-- EXTEND sub-tab -->
+                    <div class="ug-sub-pane" data-sub="extend" data-parent="perks" style="display:none;">
+<div style="width:100%;background:#1b1b1b;border:1px solid #444;border-radius:6px;padding:8px;box-sizing:border-box;margin-bottom:4px;overflow:hidden;"><table style="width:auto;border-collapse:collapse;">
+
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-qt-perk-extend-enabled" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">Auto-extend perks</td><td style="vertical-align:middle;white-space:nowrap;padding:3px 0;width:1px;"><input id="ug-bot-qt-perk-extend-mins" type="text" inputmode="numeric" class="ug-compact-input ug-compact-input-sm" placeholder="5" /></td><td style="color:#888;font-size:10px;padding-left:3px;vertical-align:middle;white-space:nowrap;">min interval</td></tr>
+
+<tr><td colspan="4"><div style="border-top:1px solid #333;margin:4px 0;"></div></td></tr>
+
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-extend-bgs" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">BGs</td></tr>
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-extend-cars" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">Cars</td></tr>
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-extend-bullets" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">Bullets</td><td style="vertical-align:middle;white-space:nowrap;padding:3px 0;width:1px;"><input id="ug-bot-extend-bullets-threshold" type="text" inputmode="numeric" class="ug-compact-input" placeholder="7500" /></td><td style="color:#888;font-size:10px;padding-left:3px;vertical-align:middle;white-space:nowrap;">min bullets</td></tr>
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-extend-rares" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">Rares</td><td style="vertical-align:middle;white-space:nowrap;padding:3px 0;width:1px;"><input id="ug-bot-extend-rares-threshold" type="text" inputmode="numeric" class="ug-compact-input" placeholder="50" /></td><td style="color:#888;font-size:10px;padding-left:3px;vertical-align:middle;white-space:nowrap;">min cars</td></tr>
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-extend-double-melts" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">Double melts</td><td style="vertical-align:middle;white-space:nowrap;padding:3px 0;width:1px;"><input id="ug-bot-extend-double-melts-threshold" type="text" inputmode="numeric" class="ug-compact-input" placeholder="50" /></td><td style="color:#888;font-size:10px;padding-left:3px;vertical-align:middle;white-space:nowrap;">min cars</td></tr>
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-extend-bullet-value" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">Bullet value</td><td style="vertical-align:middle;white-space:nowrap;padding:3px 0;width:1px;"><input id="ug-bot-extend-bullet-value-threshold" type="text" inputmode="numeric" class="ug-compact-input" placeholder="50" /></td><td style="color:#888;font-size:10px;padding-left:3px;vertical-align:middle;white-space:nowrap;">min cars</td></tr>
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-extend-double-xp" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">Double XP</td><td style="vertical-align:middle;white-space:nowrap;padding:3px 0;width:1px;"><input id="ug-bot-extend-double-xp-threshold" type="text" inputmode="numeric" class="ug-compact-input" placeholder="50" /></td><td style="color:#888;font-size:10px;padding-left:3px;vertical-align:middle;white-space:nowrap;">min mins</td></tr>
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-extend-always-successful" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">Always successful</td><td style="vertical-align:middle;white-space:nowrap;padding:3px 0;width:1px;"><input id="ug-bot-extend-always-successful-threshold" type="text" inputmode="numeric" class="ug-compact-input" placeholder="50" /></td><td style="color:#888;font-size:10px;padding-left:3px;vertical-align:middle;white-space:nowrap;">min mins</td></tr>
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-extend-always-bust" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">Always bust</td><td style="vertical-align:middle;white-space:nowrap;padding:3px 0;width:1px;"><input id="ug-bot-extend-always-bust-threshold" type="text" inputmode="numeric" class="ug-compact-input" placeholder="50" /></td><td style="color:#888;font-size:10px;padding-left:3px;vertical-align:middle;white-space:nowrap;">min mins</td></tr>
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-extend-double-cash" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">Double cash</td><td style="vertical-align:middle;white-space:nowrap;padding:3px 0;width:1px;"><input id="ug-bot-extend-double-cash-threshold" type="text" inputmode="numeric" class="ug-compact-input" placeholder="50" /></td><td style="color:#888;font-size:10px;padding-left:3px;vertical-align:middle;white-space:nowrap;">min mins</td></tr>
+</table></div>
+
+
+                    </div>
+
+                    <!-- REDEEM sub-tab -->
+                    <div class="ug-sub-pane" data-sub="redeem" data-parent="perks" style="display:none;">
+<div style="width:100%;background:#1b1b1b;border:1px solid #444;border-radius:6px;padding:8px;box-sizing:border-box;margin-bottom:4px;overflow:hidden;"><table style="width:auto;border-collapse:collapse;">
+
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-qt-perk-redeem-enabled" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">Auto redeem perks</td><td style="vertical-align:middle;white-space:nowrap;padding:3px 0;width:1px;"><input id="ug-bot-qt-perk-redeem-mins" type="text" inputmode="numeric" class="ug-compact-input ug-compact-input-sm" placeholder="30" /></td><td style="color:#888;font-size:10px;padding-left:3px;vertical-align:middle;white-space:nowrap;">min</td></tr>
+<tr><td colspan="4"><div style="border-top:1px solid #333;margin:4px 0;"></div></td></tr>
+
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-redeem-cash" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;">Cash</td><td colspan="2" style="color:#666;font-size:10px;padding:3px 8px 3px 0;vertical-align:middle;white-space:nowrap;">always — redeems all</td></tr>
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-redeem-cars" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;">Cars</td><td colspan="2" style="color:#666;font-size:10px;padding:3px 8px 3px 0;vertical-align:middle;white-space:nowrap;">always — redeems all</td></tr>
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-redeem-bg" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;">BGs</td><td colspan="2" style="color:#666;font-size:10px;padding:3px 8px 3px 0;vertical-align:middle;white-space:nowrap;">always — redeems all</td></tr>
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-redeem-double-cash" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;">Double cash</td><td colspan="2" style="color:#666;font-size:10px;padding:3px 8px 3px 0;vertical-align:middle;white-space:nowrap;">crimes on — redeems all</td></tr>
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-redeem-double-xp" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;">Double XP</td><td colspan="2" style="color:#666;font-size:10px;padding:3px 8px 3px 0;vertical-align:middle;white-space:nowrap;">crimes on — redeems all</td></tr>
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-redeem-always-successful" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;">Always successful</td><td colspan="2" style="color:#666;font-size:10px;padding:3px 8px 3px 0;vertical-align:middle;white-space:nowrap;">crimes/GTA on — redeems all</td></tr>
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-redeem-always-bust" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;">Always bust</td><td colspan="2" style="color:#666;font-size:10px;padding:3px 8px 3px 0;vertical-align:middle;white-space:nowrap;">bust on — redeems all</td></tr>
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-redeem-bullets" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;">Bullets</td><td colspan="2" style="color:#666;font-size:10px;padding:3px 8px 3px 0;vertical-align:middle;white-space:nowrap;">kill loop — <input id="ug-bot-redeem-bullets-cap" type="text" inputmode="decimal" placeholder="2" maxlength="4" /><span style="padding-left:3px;">perk multi</span></td></tr>
+
+                        <tr><td colspan="4"><div style="border-top:1px solid #333;margin:4px 0;"></div></td></tr>
+
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-redeem-rare" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;">Rare cars</td><td colspan="2" style="color:#666;font-size:10px;padding:3px 8px 3px 0;vertical-align:middle;white-space:nowrap;">GTA on — balanced with melts</td></tr>
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-redeem-double-melt" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;">Double melts</td><td colspan="2" style="color:#666;font-size:10px;padding:3px 8px 3px 0;vertical-align:middle;white-space:nowrap;">GTA on — balanced with rares</td></tr>
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;"></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">Min floor</td><td style="vertical-align:middle;white-space:nowrap;padding:3px 2px;width:1px;"><input id="ug-bot-redeem-pair-floor" type="text" inputmode="numeric" class="ug-compact-input ug-compact-input-sm" placeholder="100" /></td><td style="color:#888;font-size:10px;padding-left:3px;vertical-align:middle;white-space:nowrap;">cars</td></tr>
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-redeem-bullet-value" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;">Bullet value</td><td colspan="2" style="color:#666;font-size:10px;padding:3px 8px 3px 0;vertical-align:middle;white-space:nowrap;">GTA on — redeems all</td></tr>
+</table></div>
+
+
+                    </div>
+
+                    <!-- BONUS POINTS sub-tab -->
+                    <div class="ug-sub-pane" data-sub="bonuspoints" data-parent="perks" style="display:none;">
+                        <div class="ug-row">
+                            <div class="ug-section-box">
+                                <div class="ug-section-title">Bonus Points <span id="ug-bot-bonus-points-count" style="font-weight:normal;color:#9fe79f;font-size:11px;"></span></div>
+<table style="width:auto;border-collapse:collapse;">
+                                <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-bonus-points-enabled" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">Auto-spend bonus points</td></tr>
+
+<tr><td colspan="4" style="padding:2px 0;"><div class="ug-helptext" style="margin-top:4px;">Buys perks in priority order whenever you have enough points.<br>Drag to reorder.</div>
+                                <div class="ug-action-divider"></div>
+                                <table id="ug-bot-bonus-priority-list" style="width:100%;border-collapse:collapse;">
+                                    <tbody>
+                                    <tr class="ug-bonus-item" data-bp="sucjail2" data-cost="2" draggable="true">
+                                        <td style="width:18px;cursor:grab;color:#888;font-size:16px;text-align:center;vertical-align:middle;padding:3px 4px;">≡</td>
+                                        <td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input type="checkbox" class="ug-bonus-cb" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td>
+                                        <td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">Bust 3 hours</td>
+                                        <td style="color:#888;font-size:11px;white-space:nowrap;vertical-align:middle;text-align:right;">2pts</td>
+                                    </tr>
+                                    <tr class="ug-bonus-item" data-bp="rare2" data-cost="4" draggable="true">
+                                        <td style="width:18px;cursor:grab;color:#888;font-size:16px;text-align:center;vertical-align:middle;padding:3px 4px;">≡</td>
+                                        <td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input type="checkbox" class="ug-bonus-cb" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td>
+                                        <td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">Next 3 cars rare</td>
+                                        <td style="color:#888;font-size:11px;white-space:nowrap;vertical-align:middle;text-align:right;">4pts</td>
+                                    </tr>
+                                    <tr class="ug-bonus-item" data-bp="sucother2" data-cost="10" draggable="true">
+                                        <td style="width:18px;cursor:grab;color:#888;font-size:16px;text-align:center;vertical-align:middle;padding:3px 4px;">≡</td>
+                                        <td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input type="checkbox" class="ug-bonus-cb" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td>
+                                        <td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">Always successful 60 mins</td>
+                                        <td style="color:#888;font-size:11px;white-space:nowrap;vertical-align:middle;text-align:right;">10pts</td>
+                                    </tr>
+                                    <tr class="ug-bonus-item" data-bp="dblxp2" data-cost="10" draggable="true">
+                                        <td style="width:18px;cursor:grab;color:#888;font-size:16px;text-align:center;vertical-align:middle;padding:3px 4px;">≡</td>
+                                        <td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input type="checkbox" class="ug-bonus-cb" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td>
+                                        <td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">Double XP 10 mins</td>
+                                        <td style="color:#888;font-size:11px;white-space:nowrap;vertical-align:middle;text-align:right;">10pts</td>
+                                    </tr>
+                                    </tbody>
+                                </table>
+                                </td></tr>
+</table>
                                 </div>
-                                <div style="flex:1;">
-                                    <div class="ug-subtitle" style="margin-bottom:4px;">Max (ms)</div>
-                                    <input id="ug-bot-bust-poll-max" type="number" min="100" step="100" style="width:100%;box-sizing:border-box;padding:7px 8px;border:1px solid #555;border-radius:6px;background:#111;color:#fff;font-size:12px;" />
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- POINTS TAB -->
-                <div class="ug-tab-pane" data-tab="points">
-
-                    <!-- Leave Jail section -->
-                    <div class="ug-row">
-                        <div class="ug-section-box">
-                            <div class="ug-section-title">Leave Jail</div>
-                            <label class="ug-action-label">
-                                <input id="ug-bot-leavejail" type="checkbox" /> Leave Jail instantly (costs 1 point)
-                            </label>
-                            <div style="margin-top:6px;">
-                                <div class="ug-subtitle" style="margin-bottom:4px;">Minimum points to use Leave Jail</div>
-                                <input id="ug-bot-leavejail-minpoints" type="number" min="1" step="1" style="width:100%;box-sizing:border-box;padding:7px 8px;border:1px solid #555;border-radius:6px;background:#111;color:#fff;font-size:12px;" />
-                                <div class="ug-helptext">Only spend a point to leave jail if you have at least this many points remaining.</div>
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- Timer Resets section -->
-                    <div class="ug-row">
-                        <div class="ug-section-box">
-                            <div class="ug-section-title">Timer Resets</div>
-                            <div class="ug-helptext" style="margin-bottom:8px;">Only one can be active at a time — enabling one disables the others. When active, the bot focuses exclusively on that action until points drop below the threshold or no valid targets remain.</div>
-                            <label class="ug-action-label">
-                                <input id="ug-bot-reset-crimes" type="checkbox" class="ug-reset-cb" data-reset="crimes" />
-                                Reset Crime timers
-                            </label>
-                            <label class="ug-action-label ug-fast-mode-label">
-                                <input id="ug-bot-reset-crimes-fast" type="checkbox" />
-                                Fast mode — commit crimes instantly after reset
-                            </label>
-                            <label class="ug-action-label">
-                                <input id="ug-bot-reset-gta" type="checkbox" class="ug-reset-cb" data-reset="gta" />
-                                Reset GTA timer
-                            </label>
-                            <label class="ug-action-label">
-                                <input id="ug-bot-reset-melt" type="checkbox" class="ug-reset-cb" data-reset="melt" />
-                                Reset Melt timer
-                            </label>
-                            <div style="margin-top:8px;">
-                                <div class="ug-subtitle" style="margin-bottom:4px;">Minimum points for timer resets</div>
-                                <input id="ug-bot-reset-minpoints" type="number" min="1" step="1" style="width:100%;box-sizing:border-box;padding:7px 8px;border:1px solid #555;border-radius:6px;background:#111;color:#fff;font-size:12px;" />
-                                <div class="ug-helptext">Never spend points on timer resets if below this threshold. Shared across all three reset types.</div>
                             </div>
                         </div>
                     </div>
 
                 </div>
 
-                <!-- KILL TAB -->
-                <div class="ug-tab-pane" data-tab="kill">
-                    <div class="ug-row">
-                        <div class="ug-section-box">
-                            <div class="ug-section-title">Players Online Scanner</div>
-                            <div class="ug-helptext" style="margin-bottom:6px;">Periodically visits the Players Online page and adds new players to the list. Runs in the background during normal script operation only &mdash; not during dedicated modes.</div>
-                            <label class="ug-action-label">
-                                <input id="ug-bot-kill-scan-online" type="checkbox" />
-                                Scan Players Online
-                            </label>
-                            <div style="margin-top:6px;">
-                                <div class="ug-subtitle" style="margin-bottom:4px;">Scan interval</div>
-                                <select id="ug-bot-kill-scan-interval" data-role="none" style="width:100%;box-sizing:border-box;padding:7px 8px;border:1px solid #555;border-radius:6px;background:#111;color:#fff;font-size:12px;">
-                                    <option value="0.5">Every 30 seconds</option>
-                                    <option value="1">Every 1 minute</option>
-                                    <option value="1.5">Every 1 min 30 secs</option>
-                                    <option value="2">Every 2 minutes</option>
-                                    <option value="2.5">Every 2 mins 30 secs</option>
-                                    <option value="3">Every 3 minutes</option>
-                                    <option value="3.5">Every 3 mins 30 secs</option>
-                                    <option value="4">Every 4 minutes</option>
-                                    <option value="4.5">Every 4 mins 30 secs</option>
-                                    <option value="5">Every 5 minutes</option>
-                                </select>
-                            </div>
-                        </div>
+                <!-- ==================== DRUGS TAB ==================== -->
+                <div class="ug-tab-pane" data-tab="drugs" style="display:none;">
+<div style="width:100%;background:#1b1b1b;border:1px solid #444;border-radius:6px;padding:8px;box-sizing:border-box;margin-bottom:4px;overflow:hidden;"><table style="width:auto;border-collapse:collapse;">
+                    <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-autodrugs" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">Drug run</td><td style="width:1px;"></td></tr>
+                    <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-drug-comp" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">Comp mode</td><td style="width:1px;"></td></tr>
+                    <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;"></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">Swiss deposit multiplier</td><td style="vertical-align:middle;white-space:nowrap;padding:3px 0;width:1px;"><input id="ug-bot-drug-deposit-multiplier" type="text" inputmode="numeric" class="ug-compact-input ug-compact-input-sm" placeholder="3" /></td><td style="color:#888;font-size:10px;padding-left:3px;vertical-align:middle;white-space:nowrap;">x run cost</td></tr>
+                    <tr><td colspan="4"><div id="ug-bot-drug-deposit-calc" class="ug-drug-calc-info"></div></td></tr>
+                    <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-leave-cash-enabled" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">Leave cash on hand</td><td style="vertical-align:middle;white-space:nowrap;padding:3px 0;width:120px;"><input id="ug-bot-leave-cash-on-hand" type="text" inputmode="numeric" class="ug-compact-input" placeholder="5,000,000,000" style="width:130px !important;max-width:130px !important;" /></td></tr>
+                    <tr><td colspan="4" style="padding:4px 0 2px;">
+                        <button id="ug-bot-sell-all-drugs" class="ug-action-btn">Sell All Drugs</button>
+                        <div id="ug-bot-sell-all-status" class="ug-helptext" style="margin-top:2px;"></div>
+                    </td></tr>
+                    <tr><td colspan="4"><div style="border-top:1px solid #333;margin:4px 0;"></div></td></tr>
+</table></div>
+
+                </div>
+
+                <!-- ==================== KILL TAB ==================== -->
+                <div class="ug-tab-pane" data-tab="kill" style="display:none;">
+
+                    <!-- Kill sub-tabs -->
+                    <div class="ug-sub-tabs">
+                        <button class="ug-sub-btn ug-sub-active" data-sub="killsettings" data-parent="kill">Settings</button>
+                        <button class="ug-sub-btn" data-sub="killlist" data-parent="kill">List</button>
                     </div>
-                    <div class="ug-row">
-                        <div class="ug-section-box">
-                            <div class="ug-section-title">Search Players</div>
-                            <div class="ug-helptext" style="margin-bottom:6px;">Searches all tracked players one by one (24hrs each). Enabling this disables other dedicated modes. Once all players are searched it reverts to the normal script and restarts when new targets appear.</div>
-                            <label class="ug-action-label">
-                                <input id="ug-bot-kill-search" type="checkbox" class="ug-reset-cb" data-reset="killsearch" />
-                                Search players
-                            </label>
-                        </div>
+
+                    <!-- SETTINGS sub-tab -->
+                    <div class="ug-sub-pane" data-sub="killsettings" data-parent="kill" style="display:none;">
+<div style="width:100%;background:#1b1b1b;border:1px solid #444;border-radius:6px;padding:8px;box-sizing:border-box;margin-bottom:4px;overflow:hidden;"><table style="width:auto;border-collapse:collapse;">
+
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-kill-scan-online" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">Scan players online</td><td style="vertical-align:middle;white-space:nowrap;padding:3px 0;width:1px;"><select id="ug-bot-kill-scan-interval" data-role="none" class="ug-compact-select">
+                                <option value="0.5">30s</option>
+                                <option value="1">1 min</option>
+                                <option value="1.5">1m 30s</option>
+                                <option value="2">2 mins</option>
+                                <option value="2.5">2m 30s</option>
+                                <option value="3">3 mins</option>
+                                <option value="3.5">3m 30s</option>
+                                <option value="4">4 mins</option>
+                                <option value="4.5">4m 30s</option>
+                                <option value="5">5 mins</option>
+                            </select></td></tr>
+
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-kill-search" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">Search players</td></tr>
+
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-kill-protected-recheck" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">Search protected</td><td style="vertical-align:middle;white-space:nowrap;padding:3px 0;width:1px;"><select id="ug-bot-kill-protected-recheck-mins" data-role="none" class="ug-compact-select">
+                                <option value="1">1 min</option>
+                                <option value="2">2 mins</option>
+                                <option value="3">3 mins</option>
+                                <option value="4">4 mins</option>
+                                <option value="5">5 mins</option>
+                                <option value="10">10 mins</option>
+                                <option value="15">15 mins</option>
+                                <option value="20">20 mins</option>
+                            </select></td></tr>
+
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-kill-bgcheck" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">BG/Kill loop</td><td style="vertical-align:middle;white-space:nowrap;padding:3px 0;width:1px;"><select id="ug-bot-kill-bgcheck-interval" data-role="none" class="ug-compact-select">
+                                <option value="0.083">5m</option>
+                                <option value="0.167">10m</option>
+                                <option value="0.25">15m</option>
+                                <option value="0.333">20m</option>
+                                <option value="0.5">30m</option>
+                                <option value="0.75">45m</option>
+                                <option value="1">1hr</option>
+                                <option value="1.5">1.5hr</option>
+                                <option value="2">2hr</option>
+                                <option value="3">3hr</option>
+                                <option value="4">4hr</option>
+                                <option value="6">6hr</option>
+                                <option value="8">8hr</option>
+                                <option value="12">12hr</option>
+                                <option value="24">24hr</option>
+                            </select></td></tr>
+                        <tr><td></td><td colspan="2" style="font-size:10px;color:#666;padding:0 0 4px 0;">Applies to BG Check &amp; BG Farm players</td></tr>
+
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-kill-bg-spam" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">BG Spam</td><td style="vertical-align:middle;white-space:nowrap;padding:3px 0;width:1px;"><select id="ug-bot-kill-bg-spam-interval" data-role="none" class="ug-compact-select">
+                                <option value="1">1s</option>
+                                <option value="2" selected="">2s</option>
+                                <option value="3">3s</option>
+                                <option value="5">5s</option>
+                                <option value="10">10s</option>
+                                <option value="15">15s</option>
+                                <option value="30">30s</option>
+                            </select></td></tr>
+                        <tr><td></td><td colspan="2" style="padding:2px 0 4px 0;"><select id="ug-bot-kill-bg-spam-target" data-role="none" class="ug-compact-select" style="width:100%;max-width:220px;"><option value="">— No BG Farm players —</option></select></td></tr>
+                        <tr><td></td><td colspan="2" style="font-size:10px;color:#666;padding:0 0 4px 0;">Suppresses drug run &amp; bullet factory travel</td></tr>
+                        <tr><td></td><td colspan="2" style="padding:2px 0 6px 0;"><button id="ug-bot-bgfarm-set-wait" type="button" style="font-size:10px;padding:2px 6px;background:#2a2a2a;color:#aaa;border:1px solid #555;border-radius:4px;cursor:pointer;">Set 3hr wait for all BG Farm players</button></td></tr>
+
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-kill-anonymous" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">Hide name</td></tr>
+
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-auto-buy-gun" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 4px 3px 0;vertical-align:middle;">Auto buy gun</td><td style="vertical-align:middle;padding:3px 4px 3px 0;white-space:nowrap;font-size:11px;color:#aaa;"><input id="ug-bot-auto-buy-gun-awp" type="checkbox" style="width:11px;height:11px;margin:0 2px 0 4px;padding:0;cursor:pointer;vertical-align:middle;" />AWP <input id="ug-bot-auto-buy-gun-ak47" type="checkbox" style="width:11px;height:11px;margin:0 2px 0 6px;padding:0;cursor:pointer;vertical-align:middle;" />AK47</td><td style="vertical-align:middle;padding:3px 0;white-space:nowrap;"><input id="ug-bot-auto-buy-gun-pts" type="text" inputmode="numeric" placeholder="100" maxlength="6" class="ug-compact-input-sm" /><span style="color:#666;font-size:10px;padding-left:3px;">pt min</span></td></tr>
+
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;"></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">Kill penalty threshold</td><td style="vertical-align:middle;white-space:nowrap;padding:3px 0;width:1px;"><input id="ug-bot-kill-penalty-threshold" data-role="none" type="text" inputmode="decimal" placeholder="e.g. 1.5" class="ug-compact-input" /></td></tr>
+</table></div>
+
+
                     </div>
-                    <div class="ug-row">
-                        <div class="ug-section-box">
-                            <div class="ug-section-title">Protected Player Re-search</div>
-                            <div class="ug-helptext" style="margin-bottom:6px;">Additionally re-searches protected players at a set interval. Only active when Search Players is enabled. Does not replace the existing search cycle.</div>
-                            <label class="ug-action-label">
-                                <input id="ug-bot-kill-protected-recheck" type="checkbox" />
-                                Additionally search protected players
-                            </label>
-                            <div style="margin-top:6px;">
-                                <div class="ug-subtitle" style="margin-bottom:4px;">Re-search interval</div>
-                                <select id="ug-bot-kill-protected-recheck-mins" data-role="none" style="width:100%;box-sizing:border-box;padding:7px 8px;border:1px solid #555;border-radius:6px;background:#111;color:#fff;font-size:12px;">
-                                    <option value="1">Every 1 minute</option>
-                                    <option value="2">Every 2 minutes</option>
-                                    <option value="3">Every 3 minutes</option>
-                                    <option value="4">Every 4 minutes</option>
-                                    <option value="5">Every 5 minutes</option>
-                                    <option value="6">Every 6 minutes</option>
-                                    <option value="7">Every 7 minutes</option>
-                                    <option value="8">Every 8 minutes</option>
-                                    <option value="9">Every 9 minutes</option>
-                                    <option value="10">Every 10 minutes</option>
-                                    <option value="11">Every 11 minutes</option>
-                                    <option value="12">Every 12 minutes</option>
-                                    <option value="13">Every 13 minutes</option>
-                                    <option value="14">Every 14 minutes</option>
-                                    <option value="15">Every 15 minutes</option>
-                                    <option value="16">Every 16 minutes</option>
-                                    <option value="17">Every 17 minutes</option>
-                                    <option value="18">Every 18 minutes</option>
-                                    <option value="19">Every 19 minutes</option>
-                                    <option value="20">Every 20 minutes</option>
-                                </select>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="ug-row">
-                        <div class="ug-section-box">
-                            <div class="ug-section-title">BG Check &amp; Shoot</div>
-                            <div class="ug-helptext" style="margin-bottom:6px;">Travels to found players and shoots 1 bullet to check for bodyguards. Tick BG check per-player in the list below. Drug running pauses during travel.</div>
-                            <label class="ug-action-label">
-                                <input id="ug-bot-kill-bgcheck" type="checkbox" />
-                                Enable BG check loop
-                            </label>
-                            <label class="ug-action-label">
-                                <input id="ug-bot-kill-anonymous" type="checkbox" />
-                                Shoot anonymously (hide your name)
-                            </label>
-                            <div style="margin-top:6px;">
-                                <div class="ug-subtitle" style="margin-bottom:4px;">BG check interval</div>
-                                <select id="ug-bot-kill-bgcheck-interval" data-role="none" style="width:100%;box-sizing:border-box;padding:7px 8px;border:1px solid #555;border-radius:6px;background:#111;color:#fff;font-size:12px;">
-                                    <option value="1">1 hour</option>
-                                    <option value="2">2 hours</option>
-                                    <option value="3">3 hours</option>
-                                    <option value="4">4 hours</option>
-                                    <option value="5">5 hours</option>
-                                    <option value="6">6 hours</option>
-                                    <option value="7">7 hours</option>
-                                    <option value="8">8 hours</option>
-                                    <option value="9">9 hours</option>
-                                    <option value="10">10 hours</option>
-                                    <option value="11">11 hours</option>
-                                    <option value="12">12 hours</option>
-                                    <option value="13">13 hours</option>
-                                    <option value="14">14 hours</option>
-                                    <option value="15">15 hours</option>
-                                    <option value="16">16 hours</option>
-                                    <option value="17">17 hours</option>
-                                    <option value="18">18 hours</option>
-                                    <option value="19">19 hours</option>
-                                    <option value="20">20 hours</option>
-                                    <option value="21">21 hours</option>
-                                    <option value="22">22 hours</option>
-                                    <option value="23">23 hours</option>
-                                    <option value="24">24 hours</option>
-                                </select>
-                            </div>
-                            <div style="margin-top:6px;">
-                                <div class="ug-subtitle" style="margin-bottom:4px;">Kill penalty threshold (0 = disabled)</div>
-                                <input id="ug-bot-kill-penalty-threshold" type="text" inputmode="decimal" placeholder="e.g. 1.5" style="width:100%;box-sizing:border-box;padding:7px 8px;border:1px solid #555;border-radius:6px;background:#111;color:#fff;font-size:12px;" />
-                                <div class="ug-helptext">Pause kill loop if penalty multiplier exceeds this. BG check loop continues regardless.</div>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="ug-row">
-                        <div class="ug-section-box" style="padding:0;border:none;background:none;">
+
+                    <!-- LIST sub-tab -->
+                    <div class="ug-sub-pane" data-sub="killlist" data-parent="kill" style="display:none;">
+                        <div class="ug-row">
                             <div class="ug-subtitle" style="margin-bottom:6px;">Player list <span id="ug-bot-kill-count" style="font-weight:normal;color:#aaa;font-size:11px;"></span></div>
                             <div id="ug-bot-kill-list" class="ug-kill-list"></div>
                             <div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap;">
-                                <button id="ug-bot-kill-clear" type="button" style="font-size:11px;padding:4px 8px;">Clear</button>
-                                <button id="ug-bot-kill-copy" type="button" style="font-size:11px;padding:4px 8px;">Copy</button>
-                                <button id="ug-bot-kill-import" type="button" style="font-size:11px;padding:4px 8px;">Import</button>
-                                <button id="ug-bot-kill-select-all-bg" type="button" style="font-size:11px;padding:4px 8px;">All BG</button>
-                                <button id="ug-bot-kill-select-all-shoot" type="button" style="font-size:11px;padding:4px 8px;">All Kill</button>
+                                <button id="ug-bot-kill-clear" type="button" class="ug-small-btn">Clear</button>
+                                <button id="ug-bot-kill-copy" type="button" class="ug-small-btn">Copy</button>
+                                <button id="ug-bot-kill-import" type="button" class="ug-small-btn">Import</button>
+                                <button id="ug-bot-kill-select-all-bg" type="button" class="ug-small-btn">All BG</button>
+                                <button id="ug-bot-kill-select-all-shoot" type="button" class="ug-small-btn">All Kill</button>
                             </div>
                         </div>
                     </div>
+
                 </div>
 
+                <!-- ==================== QT TAB ==================== -->
+                <div class="ug-tab-pane" data-tab="qt" style="display:none;">
 
-                <!-- ACC TAB -->
-                <div class="ug-tab-pane" data-tab="acc">
-                    <div class="ug-row">
-                        <div class="ug-section-box">
-                            <div class="ug-section-title">Auto Account Creation</div>
-                            <div class="ug-helptext" style="margin-bottom:6px;">When enabled, automatically logs in after death, picks the next available username from the list below, accepts the rules and declines the tutorial, then resumes normal script operation.</div>
-                            <label class="ug-action-label">
-                                <input id="ug-bot-acc-enabled" type="checkbox"> Enable auto account creation
-                            </label>
-                            <div class="ug-helptext" style="margin-top:4px;color:#f8c84a;">Enter your login credentials below to enable fully automatic login after death.</div>
-                            <div style="margin-top:8px;">
-                                <div class="ug-subtitle" style="margin-bottom:4px;">Login email</div>
-                                <input id="ug-bot-acc-email" type="text" placeholder="your@email.com" style="width:100%;box-sizing:border-box;padding:7px 8px;border:1px solid #555;border-radius:6px;background:#1b1b1b;color:#fff;font-size:12px;" />
-                            </div>
-                            <div style="margin-top:6px;">
-                                <div class="ug-subtitle" style="margin-bottom:4px;">Login password</div>
-                                <input id="ug-bot-acc-password" type="password" placeholder="••••••••" style="width:100%;box-sizing:border-box;padding:7px 8px;border:1px solid #555;border-radius:6px;background:#1b1b1b;color:#fff;font-size:12px;" />
-                            </div>
-                            <div class="ug-helptext" style="margin-top:4px;">Stored locally in Tampermonkey — never sent anywhere except the game's own login form.</div>
-                            <label class="ug-action-label" style="margin-top:8px;">
-                                <input id="ug-bot-acc-retrieve" type="checkbox"> Auto-retrieve assets from previous account
-                            </label>
-                            <div class="ug-helptext" style="margin-top:4px;">After creating a new account, automatically retrieves Swiss bank, points and cars from the most recent previous account.</div>
-                            <button id="ug-bot-acc-retrieve-now" type="button" style="margin-top:8px;font-size:11px;padding:4px 10px;">Retrieve now</button>
-                            <div class="ug-helptext" style="margin-top:4px;">Manually trigger a retrieve from your previous account — useful if the bot was updated mid-session.</div>
-                        </div>
-                    </div>
-                    <div class="ug-row">
-                        <div class="ug-section-box">
-                            <div class="ug-section-title">Username List</div>
-                            <div class="ug-helptext" style="margin-bottom:6px;">Usernames are used in order from top to bottom. If a name is taken the script automatically skips to the next. Max 20 chars, a-z 0-9 and spaces only.</div>
-                            <div style="display:flex;gap:6px;margin-bottom:6px;flex-wrap:wrap;">
-                                <button id="ug-bot-acc-generate" type="button" style="font-size:11px;padding:4px 8px;">Generate random names</button>
-                                <button id="ug-bot-acc-clear-names" type="button" style="font-size:11px;padding:4px 8px;">Clear list</button>
-                            </div>
-                            <textarea id="ug-bot-acc-names" placeholder="One username per line&#10;e.g.&#10;Saka7&#10;Gunners 99&#10;North London" style="width:100%;box-sizing:border-box;height:200px;padding:7px 8px;border:1px solid #555;border-radius:6px;background:#1b1b1b;color:#fff;font-size:11px;resize:vertical;font-family:monospace;"></textarea>
-                            <div id="ug-bot-acc-status" style="margin-top:6px;font-size:11px;color:#9fe79f;min-height:14px;"></div>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- STATS/LOG COMBINED TAB -->
-                <!-- QT TAB -->
-                <div class="ug-tab-pane" data-tab="qt">
                     <!-- QT sub-tabs -->
-                    <div style="display:flex;gap:4px;margin-bottom:10px;flex-wrap:wrap;">
-                        <button class="ug-qt-sub-btn ug-qt-sub-active" data-qt-tab="perks" type="button" style="font-size:11px;padding:4px 10px;border-radius:5px;border:1px solid #555;background:#333;color:#fff;cursor:pointer;">Perks</button>
-                        <button class="ug-qt-sub-btn" data-qt-tab="cars" type="button" style="font-size:11px;padding:4px 10px;border-radius:5px;border:1px solid #555;background:#222;color:#aaa;cursor:pointer;">Cars</button>
+                    <div class="ug-sub-tabs">
+                        <button class="ug-sub-btn ug-sub-active" data-sub="qtperks" data-parent="qt">Perks</button>
+                        <button class="ug-sub-btn" data-sub="qtcars" data-parent="qt">Cars</button>
                     </div>
 
-                    <!-- PERKS sub-tab -->
-                    <div class="ug-qt-sub-pane" data-qt-pane="perks">
-                    <div class="ug-row">
-                        <div class="ug-section-box">
-                            <div class="ug-section-title">Bodyguards</div>
-                            <div class="ug-helptext" style="margin-bottom:6px;">Buys Personal and Robot Bodyguard perks below threshold. Price in points.</div>
-                            <label class="ug-action-label">
-                                <input id="ug-bot-qt-bg-enabled" type="checkbox" /> Enable BG sniper
-                            </label>
-                            <div style="margin-top:6px;">
-                                <div class="ug-subtitle" style="margin-bottom:4px;">Max price (points)</div>
-                                <input id="ug-bot-qt-bg-threshold" type="number" min="1" step="1" style="width:100%;box-sizing:border-box;padding:7px 8px;border:1px solid #555;border-radius:6px;background:#111;color:#fff;font-size:12px;" />
-                            </div>
-                        </div>
+                    <!-- QT PERKS sub-tab -->
+                    <div class="ug-sub-pane" data-sub="qtperks" data-parent="qt" style="display:none;">
+<div style="width:100%;background:#1b1b1b;border:1px solid #444;border-radius:6px;padding:8px;box-sizing:border-box;margin-bottom:4px;overflow:hidden;"><table style="width:auto;border-collapse:collapse;">
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-qt-perks-enabled" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;">QT Perks</td><td colspan="2" style="vertical-align:middle;padding:3px 0;"><span style="display:inline-flex;align-items:center;gap:3px;"><input id="ug-bot-qt-poll-min" type="text" inputmode="numeric" min="100" step="100" class="ug-compact-input ug-compact-input-sm" placeholder="300" /><span style="color:#888;font-size:11px;">to</span><input id="ug-bot-qt-poll-max" type="text" inputmode="numeric" min="100" step="100" class="ug-compact-input ug-compact-input-sm" placeholder="500" /><span style="color:#888;font-size:10px;">ms</span></span></td></tr>
+</table></div>
+<div style="width:100%;background:#1b1b1b;border:1px solid #444;border-radius:6px;padding:8px;box-sizing:border-box;margin-bottom:4px;overflow:hidden;"><table style="width:auto;border-collapse:collapse;">
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-qt-points-enabled" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">Points</td><td style="vertical-align:middle;white-space:nowrap;padding:3px 0;width:1px;"><input id="ug-bot-qt-points-threshold" type="text" inputmode="numeric" class="ug-compact-input" placeholder="10000000" /></td><td style="color:#888;font-size:10px;padding-left:3px;vertical-align:middle;white-space:nowrap;">$/pt</td></tr>
+
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-qt-bg-enabled" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">Bot BGs</td><td style="vertical-align:middle;white-space:nowrap;padding:3px 0;width:1px;"><input id="ug-bot-qt-bg-threshold" type="text" inputmode="numeric" class="ug-compact-input ug-compact-input-sm" placeholder="1000" /></td><td style="color:#888;font-size:10px;padding-left:3px;vertical-align:middle;white-space:nowrap;">pts</td></tr>
+
+                        <tr>
+                            <td colspan="2"></td>
+                            <td style="color:#888;font-size:10px;padding:0 2px 3px;text-align:center;white-space:nowrap;">$/bullet</td>
+                            <td style="color:#888;font-size:10px;padding:0 0 3px 4px;white-space:nowrap;">Min count</td>
+                        </tr>
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-qt-bullets-enabled" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">Bullets</td><td style="vertical-align:middle;white-space:nowrap;padding:3px 2px;width:1px;"><input id="ug-bot-qt-bullets-threshold" type="text" inputmode="numeric" class="ug-compact-input ug-compact-input-sm" placeholder="75000" /></td><td style="vertical-align:middle;white-space:nowrap;padding:3px 0 3px 4px;width:1px;"><input id="ug-bot-qt-bullets-min" type="text" inputmode="numeric" class="ug-compact-input ug-compact-input-sm" placeholder="7500" /></td></tr>
+
+                        <tr><td colspan="4"><div style="border-top:1px solid #333;margin:4px 0;"></div></td></tr>
+                        <tr>
+                            <td colspan="2"></td>
+                            <td style="color:#888;font-size:10px;padding:0 2px 3px;text-align:center;white-space:nowrap;">pts/unit</td>
+                            <td style="color:#888;font-size:10px;padding:0 0 3px 4px;white-space:nowrap;">Min amt</td>
+                        </tr>
+
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-qt-bust-enabled" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">Always Bust</td><td style="vertical-align:middle;white-space:nowrap;padding:3px 2px;width:1px;"><input id="ug-bot-qt-bust-maxpts" type="text" inputmode="numeric" class="ug-compact-input ug-compact-input-sm" placeholder="3" /></td><td style="vertical-align:middle;white-space:nowrap;padding:3px 0 3px 4px;width:1px;"><input id="ug-bot-qt-bust-minamt" type="text" inputmode="numeric" class="ug-compact-input ug-compact-input-sm" placeholder="30 mins" /></td></tr>
+
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-qt-always-succ-enabled" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">Always Successful</td><td style="vertical-align:middle;white-space:nowrap;padding:3px 2px;width:1px;"><input id="ug-bot-qt-always-succ-maxpts" type="text" inputmode="numeric" class="ug-compact-input ug-compact-input-sm" placeholder="3" /></td><td style="vertical-align:middle;white-space:nowrap;padding:3px 0 3px 4px;width:1px;"><input id="ug-bot-qt-always-succ-minamt" type="text" inputmode="numeric" class="ug-compact-input ug-compact-input-sm" placeholder="30 mins" /></td></tr>
+
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-qt-double-melts-enabled" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">Double melts</td><td style="vertical-align:middle;white-space:nowrap;padding:3px 2px;width:1px;"><input id="ug-bot-qt-double-melts-maxpts" type="text" inputmode="numeric" class="ug-compact-input ug-compact-input-sm" placeholder="3" /></td><td style="vertical-align:middle;white-space:nowrap;padding:3px 0 3px 4px;width:1px;"><input id="ug-bot-qt-double-melts-minamt" type="text" inputmode="numeric" class="ug-compact-input ug-compact-input-sm" placeholder="50 cars" /></td></tr>
+
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-qt-double-xp-enabled" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">Double XP</td><td style="vertical-align:middle;white-space:nowrap;padding:3px 2px;width:1px;"><input id="ug-bot-qt-double-xp-maxpts" type="text" inputmode="numeric" class="ug-compact-input ug-compact-input-sm" placeholder="3" /></td><td style="vertical-align:middle;white-space:nowrap;padding:3px 0 3px 4px;width:1px;"><input id="ug-bot-qt-double-xp-minamt" type="text" inputmode="numeric" class="ug-compact-input ug-compact-input-sm" placeholder="100 mins" /></td></tr>
+
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-qt-double-cash-enabled" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">Double cash</td><td style="vertical-align:middle;white-space:nowrap;padding:3px 2px;width:1px;"><input id="ug-bot-qt-double-cash-maxpts" type="text" inputmode="numeric" class="ug-compact-input ug-compact-input-sm" placeholder="3" /></td><td style="vertical-align:middle;white-space:nowrap;padding:3px 0 3px 4px;width:1px;"><input id="ug-bot-qt-double-cash-minamt" type="text" inputmode="numeric" class="ug-compact-input ug-compact-input-sm" placeholder="30 mins" /></td></tr>
+
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-qt-rare-enabled" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">Rare cars</td><td style="vertical-align:middle;white-space:nowrap;padding:3px 2px;width:1px;"><input id="ug-bot-qt-rare-maxpts" type="text" inputmode="numeric" class="ug-compact-input ug-compact-input-sm" placeholder="3" /></td><td style="vertical-align:middle;white-space:nowrap;padding:3px 0 3px 4px;width:1px;"><input id="ug-bot-qt-rare-minamt" type="text" inputmode="numeric" class="ug-compact-input ug-compact-input-sm" placeholder="50 cars" /></td></tr>
+
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-qt-bullet-value-enabled" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">Bullet value</td><td style="vertical-align:middle;white-space:nowrap;padding:3px 2px;width:1px;"><input id="ug-bot-qt-bullet-value-maxpts" type="text" inputmode="numeric" class="ug-compact-input ug-compact-input-sm" placeholder="3" /></td><td style="vertical-align:middle;white-space:nowrap;padding:3px 0 3px 4px;width:1px;"><input id="ug-bot-qt-bullet-value-minamt" type="text" inputmode="numeric" class="ug-compact-input ug-compact-input-sm" placeholder="20 cars" /></td></tr>
+</table></div>
+
+
                     </div>
-                    <div class="ug-row">
-                        <div class="ug-section-box">
-                            <div class="ug-section-title">Points</div>
-                            <div class="ug-helptext" style="margin-bottom:6px;">Buys points from the game's Points for Sale listings below your max price per point threshold. Uses Quick Withdraw if needed, deposits back immediately after.</div>
-                            <label class="ug-action-label">
-                                <input id="ug-bot-qt-points-enabled" type="checkbox" /> Enable points sniper
-                            </label>
-                            <div style="margin-top:6px;">
-                                <div class="ug-subtitle" style="margin-bottom:4px;">Max price per point ($)</div>
-                                <input id="ug-bot-qt-points-threshold" type="number" min="1" step="1" style="width:100%;box-sizing:border-box;padding:7px 8px;border:1px solid #555;border-radius:6px;background:#111;color:#fff;font-size:12px;" />
-                            </div>
-                        </div>
+
+                    <!-- QT CARS sub-tab -->
+                    <!-- QT CARS sub-tab -->
+                    <div class="ug-sub-pane" data-sub="qtcars" data-parent="qt" style="display:none;">
+<div style="width:100%;background:#1b1b1b;border:1px solid #444;border-radius:6px;padding:8px;box-sizing:border-box;margin-bottom:4px;overflow:hidden;"><table style="width:auto;border-collapse:collapse;">
+
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-qt-cars-enabled" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">Cars</td><td style="vertical-align:middle;white-space:nowrap;padding:3px 0;width:1px;"><input id="ug-bot-qt-cars-interval" type="text" inputmode="numeric" class="ug-compact-input ug-compact-input-sm" placeholder="300" /></td><td style="color:#888;font-size:10px;padding-left:3px;vertical-align:middle;white-space:nowrap;">secs</td></tr>
+</table>
+                        <div style="border-top:1px solid #333;margin:6px 0 4px;"></div>
+                        <div id="ug-bot-qt-cars-list"></div>
+</div>
+
                     </div>
-                    <div class="ug-row">
-                        <div class="ug-section-box">
-                            <div class="ug-section-title">Poll Interval</div>
-                            <div class="ug-helptext" style="margin-bottom:6px;">How often to check the QT perks page. Lower = faster reaction but more requests.</div>
-                            <div style="display:flex;gap:8px;margin-top:4px;">
-                                <div style="flex:1;">
-                                    <div class="ug-subtitle" style="margin-bottom:4px;">Min (ms)</div>
-                                    <input id="ug-bot-qt-poll-min" type="number" min="2000" step="100" style="width:100%;box-sizing:border-box;padding:7px 8px;border:1px solid #555;border-radius:6px;background:#111;color:#fff;font-size:12px;" />
-                                </div>
-                                <div style="flex:1;">
-                                    <div class="ug-subtitle" style="margin-bottom:4px;">Max (ms)</div>
-                                    <input id="ug-bot-qt-poll-max" type="number" min="2000" step="100" style="width:100%;box-sizing:border-box;padding:7px 8px;border:1px solid #555;border-radius:6px;background:#111;color:#fff;font-size:12px;" />
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="ug-row">
-                        <div class="ug-section-box">
-                            <div class="ug-section-title">Bullets</div>
-                            <div class="ug-helptext" style="margin-bottom:6px;">Buys bullet listings below price-per-bullet threshold. If insufficient cash, Quick Withdraw is used then Quick Deposit immediately after.</div>
-                            <label class="ug-action-label">
-                                <input id="ug-bot-qt-bullets-enabled" type="checkbox" /> Enable bullet sniper
-                            </label>
-                            <div style="margin-top:6px;">
-                                <div class="ug-subtitle" style="margin-bottom:4px;">Max price per bullet ($)</div>
-                                <input id="ug-bot-qt-bullets-threshold" type="number" min="1" step="1" style="width:100%;box-sizing:border-box;padding:7px 8px;border:1px solid #555;border-radius:6px;background:#111;color:#fff;font-size:12px;" />
-                            </div>
-                            <div style="margin-top:6px;">
-                                <div class="ug-subtitle" style="margin-bottom:4px;">Min bullets per listing (0 = any)</div>
-                                <input id="ug-bot-qt-bullets-min" type="number" min="0" step="1" style="width:100%;box-sizing:border-box;padding:7px 8px;border:1px solid #555;border-radius:6px;background:#111;color:#fff;font-size:12px;" />
-                            </div>
-                        </div>
-                    </div>
-                    <div class="ug-row">
-                        <div class="ug-section-box">
-                            <div class="ug-section-title">Auto-Extend Expiring Perks</div>
-                            <div class="ug-helptext" style="margin-bottom:6px;">Periodically checks your perks page and extends any bullet or BG perks with 1 death remaining. Bullet perks must meet your minimum bullets threshold. Useful for catching overnight competition wins.</div>
-                            <label class="ug-action-label">
-                                <input id="ug-bot-qt-perk-extend-enabled" type="checkbox" /> Enable auto-extend
-                            </label>
-                            <div style="margin-top:6px;">
-                                <div class="ug-subtitle" style="margin-bottom:4px;">Check interval (minutes)</div>
-                                <input id="ug-bot-qt-perk-extend-mins" type="number" min="1" step="1" style="width:100%;box-sizing:border-box;padding:7px 8px;border:1px solid #555;border-radius:6px;background:#111;color:#fff;font-size:12px;" />
-                                <div class="ug-helptext">How often to check for expiring perks. Default 5 minutes.</div>
-                            </div>
-                        </div>
-                    </div>
-                    </div>
-                    <div class="ug-qt-sub-pane" data-qt-pane="cars" style="display:none;">
-                    <div class="ug-row">
-                        <div class="ug-section-box">
-                            <div class="ug-section-title">Car Sniper</div>
-                            <div class="ug-helptext" style="margin-bottom:6px;">Scans QT for rare cars below your max price. Uses Quick Withdraw/Deposit automatically. Only enabled car types are scanned.</div>
-                            <label class="ug-action-label">
-                                <input id="ug-bot-qt-cars-enabled" type="checkbox" /> Enable car sniper
-                            </label>
-                            <div style="margin-top:8px;">
-                                <div class="ug-subtitle" style="margin-bottom:4px;">Scan interval (seconds)</div>
-                                <input id="ug-bot-qt-cars-interval" type="number" min="5" step="1" style="width:100%;box-sizing:border-box;padding:7px 8px;border:1px solid #555;border-radius:6px;background:#111;color:#fff;font-size:12px;" />
-                            </div>
-                        </div>
-                    </div>
-                    <div class="ug-row">
-                        <div class="ug-section-box">
-                            <div class="ug-section-title">Car Types</div>
-                            <div class="ug-helptext" style="margin-bottom:8px;">Enable each car type and set the max price you're willing to pay.</div>
-                            <div id="ug-bot-qt-cars-list"></div>
-                        </div>
-                    </div>
-                    </div>
+
                 </div>
 
-                <div class="ug-tab-pane" data-tab="statslog">
+                <!-- ==================== LOG TAB ==================== -->
+                <div class="ug-tab-pane" data-tab="statslog" style="display:none;">
                     <div class="ug-row" style="margin-bottom:6px;display:flex;gap:6px;flex-wrap:wrap;">
-                        <button id="ug-bot-copy-log" type="button" style="font-size:11px;padding:4px 8px;">Copy log</button>
-                        <button id="ug-bot-clear-log" type="button" style="font-size:11px;padding:4px 8px;">Clear log</button>
-                        <button id="ug-bot-personality-reset" type="button" style="font-size:11px;padding:4px 8px;">Reset Personality</button>
+                        <button id="ug-bot-copy-log" type="button" class="ug-small-btn">Copy log</button>
+                        <button id="ug-bot-clear-log" type="button" class="ug-small-btn">Clear log</button>
                     </div>
-                    <div class="ug-row">
-                        <div id="ug-bot-log"></div>
-                    </div>
-
+                    <div id="ug-bot-log" class="ug-log"></div>
                 </div>
 
-                </div>
-            </div>
+                <!-- ==================== ACC TAB ==================== -->
+                <div class="ug-tab-pane" data-tab="acc" style="display:none;">
+
+                    <!-- Acc sub-tabs -->
+                    <div class="ug-sub-tabs">
+                        <button class="ug-sub-btn ug-sub-active" data-sub="account" data-parent="acc">Account</button>
+                        <button class="ug-sub-btn" data-sub="usernames" data-parent="acc">Usernames</button>
+                    </div>
+
+                    <!-- ACCOUNT sub-tab -->
+                    <div class="ug-sub-pane" data-sub="account" data-parent="acc" style="display:none;">
+<div style="width:100%;background:#1b1b1b;border:1px solid #444;border-radius:6px;padding:8px;box-sizing:border-box;margin-bottom:4px;overflow:hidden;">
+                        <div style="display:flex;align-items:center;gap:6px;padding:3px 0;">
+                            <input id="ug-bot-acc-enabled" type="checkbox" style="width:13px;height:13px;min-width:13px;margin:0;padding:0;cursor:pointer;" />
+                            <span style="color:#ddd;font-size:12px;">Auto account creation</span>
+                        </div>
+                        <div style="margin-top:6px;display:flex;gap:6px;">
+                            <input id="ug-bot-acc-email" type="text" placeholder="Login email" class="ug-input" style="flex:1;min-width:0;" />
+                            <input id="ug-bot-acc-password" type="password" placeholder="Password" class="ug-input" style="flex:1;min-width:0;" />
+                        </div>
+                        <div class="ug-helptext" style="margin-top:3px;">Stored locally — never sent anywhere except the game's login form.</div>
+                        <div style="border-top:1px solid #333;margin:6px 0;"></div>
+                        <div style="display:flex;align-items:center;gap:6px;padding:3px 0;">
+                            <input id="ug-bot-acc-retrieve" type="checkbox" style="width:13px;height:13px;min-width:13px;margin:0;padding:0;cursor:pointer;" />
+                            <span style="color:#ddd;font-size:12px;">Auto retrieve assets</span>
+                        </div>
+                        <div style="margin-top:4px;">
+                            <button id="ug-bot-acc-retrieve-now" type="button" class="ug-small-btn">Retrieve now</button>
+                        </div>
+</div>
+
+<div style="width:100%;background:#1b1b1b;border:1px solid #444;border-radius:6px;padding:8px;box-sizing:border-box;margin-bottom:4px;overflow:hidden;">
+                        <div style="color:#aaa;font-size:11px;font-weight:bold;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px;">Personality</div>
+                        <div style="display:flex;align-items:center;gap:6px;padding:3px 0;">
+                            <input id="ug-bot-dupe-mode" type="checkbox" style="width:13px;height:13px;min-width:13px;margin:0;padding:0;cursor:pointer;" />
+                            <span style="color:#ddd;font-size:12px;">Dupe mode — generate a random personality</span>
+                        </div>
+                        <div class="ug-helptext" style="margin-top:3px;">Makes this account behave distinctly from others — unique delays, GTA timing, jail behaviour, and navigation patterns. Ticking this regenerates the personality immediately.</div>
+                        <div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;">
+                            <button id="ug-bot-personality-reset" type="button" class="ug-small-btn">Reset personality</button>
+                        </div>
+                        <div id="ug-bot-personality-info" style="margin-top:5px;font-size:10px;color:#666;min-height:12px;"></div>
+</div>
+
+                    </div>
+
+                    <!-- USERNAMES sub-tab -->
+                    <div class="ug-sub-pane" data-sub="usernames" data-parent="acc" style="display:none;">
+                        <div style="display:flex;gap:6px;margin-bottom:6px;flex-wrap:wrap;">
+                            <button id="ug-bot-acc-generate" type="button" class="ug-small-btn">Generate random names</button>
+                            <button id="ug-bot-acc-clear-names" type="button" class="ug-small-btn">Clear list</button>
+                        </div>
+                        <textarea id="ug-bot-acc-names" placeholder="One username per line&#10;e.g.&#10;Saka7&#10;Gunners 99&#10;North London" class="ug-textarea"></textarea>
+                        <div id="ug-bot-acc-status" style="margin-top:6px;font-size:11px;color:#9fe79f;min-height:14px;"></div>
+                    </div>
+
+            </div><!-- end ug-bot-tab-content -->
+            </div><!-- end ug-bot-extra -->
         `;
 
         const style = document.createElement('style');
         style.textContent = `
+            #ug-bot-panel label {
+                display: inline !important;
+                font-weight: normal !important;
+                margin: 0 !important;
+                padding: 0 !important;
+                width: auto !important;
+                float: none !important;
+            }
+
             #ug-bot-panel {
                 position: fixed;
                 right: 16px;
@@ -10318,7 +12371,8 @@
                 width: 390px;
                 max-height: 82vh;
                 overflow: auto;
-                background: rgba(15, 15, 15, 0.96);
+                overflow-x: hidden;
+                background: rgb(15, 15, 15);
                 color: #fff;
                 border: 1px solid #777;
                 border-radius: 10px;
@@ -10383,10 +12437,245 @@
                 color: #fff !important;
                 border-color: #888 !important;
             }
-            .ug-tab-pane { display: none; }
-            #ug-bot-tab-content { min-height: 560px; }
+            .ug-tab-pane { }
+
+            #ug-bot-extra {
+                height: 460px;
+                overflow-y: auto;
+                overflow-x: hidden;
+            }
+
+            /* Sub-tabs */
+            .ug-sub-tabs {
+                display: flex;
+                gap: 4px;
+                margin-bottom: 10px;
+                flex-wrap: wrap;
+            }
+            .ug-sub-btn {
+                font-size: 11px !important;
+                padding: 4px 10px !important;
+                border-radius: 5px !important;
+                border: 1px solid #555 !important;
+                background: #222 !important;
+                color: #aaa !important;
+                cursor: pointer;
+            }
+            .ug-sub-btn.ug-sub-active {
+                background: #444 !important;
+                color: #fff !important;
+                border-color: #888 !important;
+            }
+            .ug-sub-pane { }
+
+            /* Utility input/select/textarea */
+            .ug-input {
+                width: 100%;
+                box-sizing: border-box;
+                padding: 7px 8px;
+                border: 1px solid #555;
+                border-radius: 6px;
+                background: #111;
+                color: #fff;
+                font-size: 12px;
+            }
+            .ug-select {
+                width: 100%;
+                box-sizing: border-box;
+                padding: 7px 8px;
+                border: 1px solid #555;
+                border-radius: 6px;
+                background: #111;
+                color: #fff;
+                font-size: 12px;
+            }
+            .ug-textarea {
+                width: 100%;
+                box-sizing: border-box;
+                height: 200px;
+                padding: 7px 8px;
+                border: 1px solid #555;
+                border-radius: 6px;
+                background: #1b1b1b;
+                color: #fff;
+                font-size: 11px;
+                resize: vertical;
+                font-family: monospace;
+            }
+            .ug-small-btn {
+                font-size: 11px !important;
+                padding: 4px 8px !important;
+            }
+            .ug-perk-threshold {
+                color: #888;
+                font-size: 10px;
+                margin-left: 4px;
+            }
+
+            /* Bonus points drag list */
+            #ug-bot-bonus-priority-list {
+                width: 100%;
+                border-collapse: collapse;
+                margin-top: 6px;
+            }
+            .ug-bonus-item {
+                cursor: default;
+            }
+            .ug-bonus-item:hover td {
+                background: #1e1e1e;
+            }
+            .ug-bonus-item.ug-drag-over td {
+                background: #2a2a2a;
+            }
+            .ug-bonus-item.ug-dragging {
+                opacity: 0.4;
+            }
+            .ug-drag-handle {
+                color: #555;
+                cursor: grab;
+                font-size: 16px;
+                user-select: none;
+                text-align: center;
+            }
+
+            /* Settings table — force checkbox visibility */
+            #ug-bot-panel table td input[type="checkbox"] {
+                -webkit-appearance: checkbox !important;
+                appearance: checkbox !important;
+                display: inline-block !important;
+                width: 13px !important;
+                height: 13px !important;
+                min-width: 13px !important;
+                min-height: 13px !important;
+                max-width: 13px !important;
+                max-height: 13px !important;
+                margin: 0 !important;
+                padding: 0 !important;
+                border: 1px solid #888 !important;
+                background: #222 !important;
+                flex-shrink: 0 !important;
+                cursor: pointer !important;
+                vertical-align: middle !important;
+                opacity: 1 !important;
+                visibility: visible !important;
+            }
+            /* Hide number input spinners */
+            #ug-bot-panel input[type="number"]::-webkit-inner-spin-button,
+            #ug-bot-panel input[type="number"]::-webkit-outer-spin-button {
+                -webkit-appearance: none !important;
+                margin: 0 !important;
+            }
+            #ug-bot-panel input[type="number"] {
+                -moz-appearance: textfield !important;
+            }
+/* Per-ID overrides for paired inputs */
+            #ug-bot-bust-poll-min, #ug-bot-bust-poll-max,
+            #ug-bot-qt-poll-min, #ug-bot-qt-poll-max {
+                width: 32px !important;
+                max-width: 32px !important;
+            }
+            #ug-bot-deposit-threshold,
+            #ug-bot-leave-cash-on-hand {
+                width: 130px !important;
+                max-width: 130px !important;
+            }
+            /* Small input for intervals/counts */
+            #ug-bot-panel .ug-compact-input-sm {
+                width: 52px !important;
+                max-width: 52px !important;
+                padding: 2px 4px !important;
+                border: 1px solid #444 !important;
+                border-radius: 4px !important;
+                background: #111 !important;
+                color: #fff !important;
+                font-size: 11px !important;
+                text-align: right !important;
+            }
+            /* Extra small input for 1-2 digit values */
+            #ug-bot-panel .ug-compact-input-xs {
+                width: 28px !important;
+                max-width: 28px !important;
+                padding: 2px 3px !important;
+                border: 1px solid #444 !important;
+                border-radius: 4px !important;
+                background: #111 !important;
+                color: #fff !important;
+                font-size: 11px !important;
+                text-align: right !important;
+            }
+            /* Strip game's jQuery Mobile radio label padding */
+            #ug-bot-panel label:has(input[type="radio"]) {
+                padding: 0 !important;
+                margin: 0 !important;
+                display: inline-flex !important;
+                align-items: center !important;
+                background: none !important;
+                border: none !important;
+                box-shadow: none !important;
+                font-size: 11px !important;
+                color: #aaa !important;
+            }
+            #ug-bot-panel input[type="radio"] {
+                width: 11px !important;
+                height: 11px !important;
+                margin: 0 3px 0 0 !important;
+                padding: 0 !important;
+            }
+            /* Settings input/select style */
+            #ug-bot-panel .ug-compact-input {
+                width: 110px !important;
+                box-sizing: border-box !important;
+                padding: 2px 5px !important;
+                border: 1px solid #444 !important;
+                border-radius: 4px !important;
+                background: #111 !important;
+                color: #fff !important;
+                font-size: 11px !important;
+                text-align: right !important;
+            }
+            #ug-bot-panel .ug-compact-select {
+                box-sizing: border-box !important;
+                padding: 2px 4px !important;
+                border: 1px solid #444 !important;
+                border-radius: 4px !important;
+                background: #111 !important;
+                color: #fff !important;
+                font-size: 11px !important;
+                max-width: 120px !important;
+            }
+            /* Settings table rows */
+            #ug-bot-panel table {
+                border-collapse: collapse;
+                table-layout: auto;
+            }
+            #ug-bot-panel table tr td {
+                font-size: 12px;
+                color: #ddd;
+                vertical-align: middle;
+                padding: 3px 4px 3px 0;
+                text-align: left !important;
+                white-space: nowrap;
+            }
+
+            /* Checkbox col — fixed narrow width */
+            #ug-bot-panel table:not(.ug-kill-table) tr td:first-child {
+                width: 18px !important;
+                min-width: 18px !important;
+                max-width: 18px !important;
+            }
+            .ug-kill-table tr td:first-child {
+                width: auto !important;
+                min-width: 0 !important;
+                max-width: none !important;
+            }
+            /* Input col — shrink to content, never overflow */
+            #ug-bot-panel table tr td:last-child:not(:first-child) {
+                width: 1px;
+                white-space: nowrap;
+            }
+            #ug-bot-tab-content { min-height: 0; }
             #ug-bot-panel input[type="number"],
-            #ug-bot-panel input[type="text"] {
+            #ug-bot-panel input[type="text"]:not(#ug-bot-bust-poll-min):not(#ug-bot-bust-poll-max):not(#ug-bot-qt-poll-min):not(#ug-bot-qt-poll-max):not(#ug-bot-deposit-threshold):not(#ug-bot-leave-cash-on-hand):not(#ug-bot-redeem-bullets-cap) {
                 width: 100%;
                 box-sizing: border-box;
                 padding: 7px 8px;
@@ -10396,8 +12685,30 @@
                 color: #fff;
                 font-size: 12px;
             }
+            /* Compact inputs override the full-width rule above */
+            #ug-bot-panel .ug-compact-input {
+                width: 110px !important;
+                max-width: 80px !important;
+                padding: 2px 5px !important;
+                border-radius: 4px !important;
+                background: #111 !important;
+                font-size: 11px !important;
+                text-align: right !important;
+            }
             #ug-bot-panel .ug-check label { display: flex; align-items: center; gap: 8px; font-size: 12px; }
-            .ug-subtitle { font-size: 12px; font-weight: bold; margin-bottom: 6px; color: #d8d8d8; }
+            .ug-subtitle {
+                display: block;
+                font-size: 12px;
+                font-weight: bold;
+                padding: 4px 0 3px 0;
+                color: #d8d8d8;
+            }
+            .ug-helptext {
+                display: block;
+                font-size: 11px;
+                color: #888;
+                padding: 3px 0 2px 0;
+            }
             .ug-helptext { margin-top: 5px; font-size: 11px; color: #aaa; line-height: 1.35; }
             #ug-bot-log {
                 font-size: 11px;
@@ -10411,15 +12722,19 @@
             }
             .ug-log-entry { padding: 2px 0; border-bottom: 1px solid rgba(255,255,255,0.05); }
             #ug-bot-actions,
-            #ug-bot-gta-actions,
-            #ug-bot-drugs {
+            #ug-bot-gta-checkboxes {
+                width: 100%;
                 background: #1b1b1b;
                 border: 1px solid #444;
                 border-radius: 6px;
                 padding: 8px;
-                display: flex;
-                flex-direction: column;
-                gap: 5px;
+                box-sizing: border-box;
+            }
+            #ug-bot-actions table,
+            #ug-bot-gta-checkboxes table {
+                width: 100%;
+                border-collapse: collapse;
+                table-layout: fixed;
             }
             .ug-section-box {
                 background: #1b1b1b;
@@ -10436,15 +12751,7 @@
                 color: #d8d8d8;
                 margin-bottom: 2px;
             }
-            .ug-action-label {
-                display: flex;
-                align-items: center;
-                gap: 8px;
-                font-size: 12px;
-                cursor: pointer;
-                user-select: none;
-            }
-            .ug-action-label input[type="checkbox"] { width: 14px; height: 14px; cursor: pointer; flex-shrink: 0; }
+
             .ug-action-locked { opacity: 0.4; cursor: default; }
             .ug-locked-tag {
                 font-size: 10px;
@@ -10484,6 +12791,12 @@
                 font-size: 11px;
                 text-align: left;
             }
+            .ug-kill-list table { width: 100% !important; border-collapse: collapse !important; table-layout: fixed !important; }
+            .ug-kill-list td { width: auto !important; padding: 0 !important; vertical-align: middle !important; }
+            .ug-kill-list .ug-kname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+            .ug-kill-list .ug-kcountry { width: 52px !important; min-width: 52px !important; max-width: 52px !important; font-size: 9px; color: #888; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding-right: 4px !important; }
+            .ug-kill-list .ug-ktime { width: 34px !important; min-width: 34px !important; max-width: 34px !important; font-size: 9px; color: #ccc; text-align: right; white-space: nowrap; padding-right: 4px !important; }
+            .ug-kill-list .ug-kcol { width: 20px !important; min-width: 20px !important; max-width: 20px !important; text-align: center; }
             /* Fake checkbox divs — avoid jQuery Mobile interference entirely */
             .ug-kcb {
                 width: 13px;
@@ -10580,7 +12893,18 @@
 
         toggleBtn               = document.querySelector('#ug-bot-toggle');
         autoDepositInput        = document.querySelector('#ug-bot-autodeposit');
-        depositThresholdEl      = document.querySelector('#ug-bot-deposit-threshold');
+        depositThresholdEl           = document.querySelector('#ug-bot-deposit-threshold');
+        bustNoReloadInput            = document.querySelector('#ug-bot-bust-noreload');
+        bustPollMinEl                = document.querySelector('#ug-bot-bust-poll-min');
+        bustPollMaxEl                = document.querySelector('#ug-bot-bust-poll-max');
+        extendBulletsThreshEl        = document.querySelector('#ug-bot-extend-bullets-threshold');
+        extendRaresThreshEl          = document.querySelector('#ug-bot-extend-rares-threshold');
+        extendDoubleMeltsThreshEl    = document.querySelector('#ug-bot-extend-double-melts-threshold');
+        extendBulletValueThreshEl    = document.querySelector('#ug-bot-extend-bullet-value-threshold');
+        extendDoubleXpThreshEl       = document.querySelector('#ug-bot-extend-double-xp-threshold');
+        extendAlwaysSuccThreshEl     = document.querySelector('#ug-bot-extend-always-successful-threshold');
+        extendAlwaysBustThreshEl     = document.querySelector('#ug-bot-extend-always-bust-threshold');
+        extendDoubleCashThreshEl     = document.querySelector('#ug-bot-extend-double-cash-threshold');
         autoRepairInput         = document.querySelector('#ug-bot-autorepair');
         repairEveryEl           = document.querySelector('#ug-bot-repair-every');
         autoMissionsInput       = document.querySelector('#ug-bot-automissions');
@@ -10594,16 +12918,24 @@
         resetGTAInput            = document.querySelector('#ug-bot-reset-gta');
         resetMeltInput           = document.querySelector('#ug-bot-reset-melt');
         resetTimerMinPointsEl    = document.querySelector('#ug-bot-reset-minpoints');
-        bustEnabledInput         = document.querySelector('#ug-bot-bust-enabled');
-        bustFastModeInput        = document.querySelector('#ug-bot-bust-fast');
-        bustNoReloadInput           = document.querySelector('#ug-bot-bust-noreload');
-        bustPollMinEl               = document.querySelector('#ug-bot-bust-poll-min');
-        bustPollMaxEl               = document.querySelector('#ug-bot-bust-poll-max');
         bgCrimeEnabledInput         = document.querySelector('#ug-bot-bg-crime');
+        diceJoinEnabledInput        = document.querySelector('#ug-bot-dice-join-enabled');
         bulletFactoryEnabledInput   = document.querySelector('#ug-bot-bullet-factory');
         killProtectedRecheckInput   = document.querySelector('#ug-bot-kill-protected-recheck');
         killProtectedRecheckMinsEl  = document.querySelector('#ug-bot-kill-protected-recheck-mins');
         qtBgEnabledInput         = document.querySelector('#ug-bot-qt-bg-enabled');
+        const qtPerksEnabledEl = document.querySelector('#ug-bot-qt-perks-enabled');
+        if (qtPerksEnabledEl) {
+            qtPerksEnabledEl.checked = state.qtPerksEnabled;
+            qtPerksEnabledEl.addEventListener('change', () => {
+                state.qtPerksEnabled = qtPerksEnabledEl.checked;
+                if (qtPerksEnabledEl.checked) {
+                    startQTSniper();
+                } else {
+                    stopQTSniper();
+                }
+            });
+        }
         qtBgThresholdEl          = document.querySelector('#ug-bot-qt-bg-threshold');
         qtBulletsEnabledInput    = document.querySelector('#ug-bot-qt-bullets-enabled');
         qtBulletsThresholdEl     = document.querySelector('#ug-bot-qt-bullets-threshold');
@@ -10611,37 +12943,149 @@
         qtPollMinEl              = document.querySelector('#ug-bot-qt-poll-min');
         qtPollMaxEl              = document.querySelector('#ug-bot-qt-poll-max');
         qtPointsEnabledInput     = document.querySelector('#ug-bot-qt-points-enabled');
+        qtBustEnabledInput       = document.querySelector('#ug-bot-qt-bust-enabled');
+        qtBustMaxPtsEl           = document.querySelector('#ug-bot-qt-bust-maxpts');
+        qtBustMinAmtEl           = document.querySelector('#ug-bot-qt-bust-minamt');
+        qtAlwaysSuccEnabledInput = document.querySelector('#ug-bot-qt-always-succ-enabled');
+        qtAlwaysSuccMaxPtsEl     = document.querySelector('#ug-bot-qt-always-succ-maxpts');
+        qtAlwaysSuccMinAmtEl     = document.querySelector('#ug-bot-qt-always-succ-minamt');
+        qtDoubleMeltsEnabledInput = document.querySelector('#ug-bot-qt-double-melts-enabled');
+        qtDoubleMeltsMaxPtsEl    = document.querySelector('#ug-bot-qt-double-melts-maxpts');
+        qtDoubleMeltsMinAmtEl    = document.querySelector('#ug-bot-qt-double-melts-minamt');
+        qtDoubleXpEnabledInput   = document.querySelector('#ug-bot-qt-double-xp-enabled');
+        qtDoubleXpMaxPtsEl       = document.querySelector('#ug-bot-qt-double-xp-maxpts');
+        qtDoubleXpMinAmtEl       = document.querySelector('#ug-bot-qt-double-xp-minamt');
+        qtDoubleCashEnabledInput = document.querySelector('#ug-bot-qt-double-cash-enabled');
+        qtDoubleCashMaxPtsEl     = document.querySelector('#ug-bot-qt-double-cash-maxpts');
+        qtDoubleCashMinAmtEl     = document.querySelector('#ug-bot-qt-double-cash-minamt');
+        qtRareEnabledInput       = document.querySelector('#ug-bot-qt-rare-enabled');
+        qtRareMaxPtsEl           = document.querySelector('#ug-bot-qt-rare-maxpts');
+        qtRareMinAmtEl           = document.querySelector('#ug-bot-qt-rare-minamt');
+        qtBulletValueEnabledInput = document.querySelector('#ug-bot-qt-bullet-value-enabled');
+        qtBulletValueMaxPtsEl    = document.querySelector('#ug-bot-qt-bullet-value-maxpts');
+        qtBulletValueMinAmtEl    = document.querySelector('#ug-bot-qt-bullet-value-minamt');
         qtCarsEnabledInput       = document.querySelector('#ug-bot-qt-cars-enabled');
         qtCarsIntervalEl         = document.querySelector('#ug-bot-qt-cars-interval');
         qtPerkExtendEnabledInput = document.querySelector('#ug-bot-qt-perk-extend-enabled');
         qtPerkExtendMinsEl       = document.querySelector('#ug-bot-qt-perk-extend-mins');
-
-        // QT sub-tab switching
-        document.querySelectorAll('.ug-qt-sub-btn').forEach(btn => {
-            if (btn.dataset.qtTabListenerAttached) return;
-            btn.dataset.qtTabListenerAttached = '1';
-            btn.addEventListener('click', () => {
-                const target = btn.dataset.qtTab;
-                document.querySelectorAll('.ug-qt-sub-btn').forEach(b => {
-                    b.style.background = '#222';
-                    b.style.color = '#aaa';
-                    b.classList.remove('ug-qt-sub-active');
-                });
-                document.querySelectorAll('.ug-qt-sub-pane').forEach(p => p.style.display = 'none');
-                btn.style.background = '#333';
-                btn.style.color = '#fff';
-                btn.classList.add('ug-qt-sub-active');
-                const pane = document.querySelector(`.ug-qt-sub-pane[data-qt-pane="${target}"]`);
-                if (pane) pane.style.display = '';
+        qtPerkRedeemEnabledInput = document.querySelector('#ug-bot-qt-perk-redeem-enabled');
+        qtPerkRedeemMinsEl       = document.querySelector('#ug-bot-qt-perk-redeem-mins');
+        disableCrimesRankEl      = document.querySelector('#ug-bot-disable-crimes-rank');
+        disableGtaRankEl         = document.querySelector('#ug-bot-disable-gta-rank');
+        leaveCashEnabledInput    = document.querySelector('#ug-bot-leave-cash-enabled');
+        leaveCashOnHandEl        = document.querySelector('#ug-bot-leave-cash-on-hand');
+        bonusPointsEnabledInput  = document.querySelector('#ug-bot-bonus-points-enabled');
+        autoBuyBgEnabledInput    = document.querySelector('#ug-bot-auto-buy-bg');
+        autoBuyBgMinPtsEl        = document.querySelector('#ug-bot-auto-buy-bg-minpts');
+        autoBuyBgMinsEl          = document.querySelector('#ug-bot-auto-buy-bg-mins');
+        extendBgsInput           = document.querySelector('#ug-bot-extend-bgs');
+        extendCarsInput          = document.querySelector('#ug-bot-extend-cars');
+        extendBulletsInput       = document.querySelector('#ug-bot-extend-bullets');
+        extendRaresInput         = document.querySelector('#ug-bot-extend-rares');
+        extendDoubleMeltsInput   = document.querySelector('#ug-bot-extend-double-melts');
+        extendBulletValueInput   = document.querySelector('#ug-bot-extend-bullet-value');
+        extendDoubleXpInput      = document.querySelector('#ug-bot-extend-double-xp');
+        extendAlwaysSuccInput    = document.querySelector('#ug-bot-extend-always-successful');
+        extendAlwaysBustInput    = document.querySelector('#ug-bot-extend-always-bust');
+        extendDoubleCashInput    = document.querySelector('#ug-bot-extend-double-cash');
+        redeemBulletValueInput  = document.querySelector('#ug-bot-redeem-bullet-value');
+        redeemCashInput         = document.querySelector('#ug-bot-redeem-cash');
+        redeemCarsInput         = document.querySelector('#ug-bot-redeem-cars');
+        redeemPairFloorEl       = document.querySelector('#ug-bot-redeem-pair-floor');
+        redeemBgInput            = document.querySelector('#ug-bot-redeem-bg');
+        redeemBulletsInput       = document.querySelector('#ug-bot-redeem-bullets');
+        const redeemBulletsCapInput = document.querySelector('#ug-bot-redeem-bullets-cap');
+        if (redeemBulletsCapInput) {
+            redeemBulletsCapInput.value = state.redeemBulletsCap;
+            // Force size via JS — overrides any CSS specificity issues
+            redeemBulletsCapInput.setAttribute('style', 'width:28px!important;max-width:28px!important;min-width:0!important;padding:2px 3px!important;border:1px solid #444!important;border-radius:4px!important;background:#111!important;color:#fff!important;font-size:11px!important;text-align:right!important;box-sizing:border-box!important;');
+            redeemBulletsCapInput.addEventListener('change', () => {
+                const v = parseFloat(redeemBulletsCapInput.value);
+                if (v >= 1.0) state.redeemBulletsCap = v;
             });
+        }
+        redeemDoubleXpInput      = document.querySelector('#ug-bot-redeem-double-xp');
+        redeemAlwaysSuccInput    = document.querySelector('#ug-bot-redeem-always-successful');
+        redeemDoubleCashInput    = document.querySelector('#ug-bot-redeem-double-cash');
+        redeemRareInput          = document.querySelector('#ug-bot-redeem-rare');
+        redeemDoubleMeltInput    = document.querySelector('#ug-bot-redeem-double-melt');
+        redeemAlwaysBustInput    = document.querySelector('#ug-bot-redeem-always-bust');
+
+        // Initialise sub-panes — show first pane per group, hide the rest
+        const subParents = [...new Set([...document.querySelectorAll('.ug-sub-pane')].map(p => p.dataset.parent))];
+        subParents.forEach(parent => {
+            const panes = [...document.querySelectorAll(`.ug-sub-pane[data-parent="${parent}"]`)];
+            panes.forEach((pane, i) => { pane.style.display = i === 0 ? '' : 'none'; });
+        });
+
+        // Universal sub-tab switching
+        document.querySelectorAll('.ug-sub-btn').forEach(btn => {
+            if (btn.dataset.subListenerAttached) return;
+            btn.dataset.subListenerAttached = '1';
+            btn.addEventListener('click', () => {
+                const target = btn.dataset.sub;
+                const parent = btn.dataset.parent;
+                document.querySelectorAll(`.ug-sub-btn[data-parent="${parent}"]`).forEach(b => {
+                    b.classList.remove('ug-sub-active');
+                });
+                document.querySelectorAll(`.ug-sub-pane[data-parent="${parent}"]`).forEach(p => p.style.setProperty('display', 'none', 'important'));
+                btn.classList.add('ug-sub-active');
+                const pane = document.querySelector(`.ug-sub-pane[data-sub="${target}"][data-parent="${parent}"]`);
+                if (pane) pane.style.setProperty('display', 'block', 'important');
+                // Persist active sub-tab per parent
+                setSetting(`activeSubTab_${parent}`, target);
+            });
+        });
+
+        // Restore saved sub-tabs
+        const allParents = [...new Set([...document.querySelectorAll('.ug-sub-btn')].map(b => b.dataset.parent))];
+        allParents.forEach(parent => {
+            const saved = getSetting(`activeSubTab_${parent}`, null);
+            if (!saved) return;
+            const btn = document.querySelector(`.ug-sub-btn[data-sub="${saved}"][data-parent="${parent}"]`);
+            const pane = document.querySelector(`.ug-sub-pane[data-sub="${saved}"][data-parent="${parent}"]`);
+            if (!btn || !pane) return;
+            document.querySelectorAll(`.ug-sub-btn[data-parent="${parent}"]`).forEach(b => b.classList.remove('ug-sub-active'));
+            document.querySelectorAll(`.ug-sub-pane[data-parent="${parent}"]`).forEach(p => p.style.setProperty('display', 'none', 'important'));
+            btn.classList.add('ug-sub-active');
+            pane.style.setProperty('display', 'block', 'important');
         });
         qtPointsThresholdEl      = document.querySelector('#ug-bot-qt-points-threshold');
         killScanOnlineInput      = document.querySelector('#ug-bot-kill-scan-online');
         killScanIntervalEl       = document.querySelector('#ug-bot-kill-scan-interval');
         killSearchInput          = document.querySelector('#ug-bot-kill-search');
         killBgCheckInput         = document.querySelector('#ug-bot-kill-bgcheck');
-
-        // Immediately update scan/search disabled state when BG loop checkbox changes
+        killBgSpamInput          = document.querySelector('#ug-bot-kill-bg-spam');
+        killBgSpamIntervalEl     = document.querySelector('#ug-bot-kill-bg-spam-interval');
+        killBgSpamTargetEl       = document.querySelector('#ug-bot-kill-bg-spam-target');
+        const bgFarmSetWaitBtn = document.querySelector('#ug-bot-bgfarm-set-wait');
+        if (bgFarmSetWaitBtn) {
+            bgFarmSetWaitBtn.addEventListener('click', () => {
+                const players = getSetting('killPlayers', []);
+                const threeHrs = Date.now() + (3 * 60 * 60 * 1000);
+                const updated = players.map(p => {
+                    if (!p.bgFarmEnabled) return p;
+                    const np = { ...p };
+                    delete np.bodyguard;
+                    delete np.expectedFoundAt;
+                    delete np.searchExpiresAt;
+                    np.bgFarmWaitUntil = threeHrs;
+                    return np;
+                });
+                setSetting('killPlayers', updated);
+                setSetting('killBgWaitUntil', threeHrs);
+                setSetting('killLoopCooldownUntil', 0);
+                const count = players.filter(p => p.bgFarmEnabled).length;
+                addLiveLog(`BG Farm: set 3hr wait for ${count} player(s) — stale BG state cleared`);
+                renderKillList();
+                bgFarmSetWaitBtn.textContent = '✓ Done';
+                bgFarmSetWaitBtn.style.color = '#4a4';
+                setTimeout(() => {
+                    bgFarmSetWaitBtn.textContent = 'Set 3hr wait for all BG Farm players';
+                    bgFarmSetWaitBtn.style.color = '#aaa';
+                }, 3000);
+            });
+        }
         if (killBgCheckInput) {
             killBgCheckInput.addEventListener('change', () => {
                 const on = killBgCheckInput.checked;
@@ -10658,8 +13102,53 @@
             });
         }
 
+        if (killBgSpamInput) {
+            killBgSpamInput.addEventListener('change', () => {
+                saveSettings();
+                syncBgSpamState();
+            });
+        }
+        if (killBgSpamIntervalEl) {
+            killBgSpamIntervalEl.addEventListener('change', () => { saveSettings(); });
+        }
+        if (killBgSpamTargetEl) {
+            killBgSpamTargetEl.addEventListener('change', () => {
+                state.killBgSpamTarget = killBgSpamTargetEl.value;
+                saveSettings();
+            });
+        }
+
         killShootInput           = document.querySelector('#ug-bot-kill-shoot');
         killAnonymousInput       = document.querySelector('#ug-bot-kill-anonymous');
+        const autoBuyGunEl    = document.querySelector('#ug-bot-auto-buy-gun');
+        const autoBuyGunAwpEl = document.querySelector('#ug-bot-auto-buy-gun-awp');
+        const autoBuyGunAk47El= document.querySelector('#ug-bot-auto-buy-gun-ak47');
+        const autoBuyGunPtsEl = document.querySelector('#ug-bot-auto-buy-gun-pts');
+        if (autoBuyGunEl) {
+            autoBuyGunEl.checked = state.autoBuyGun;
+        }
+        // Delegated — survives updatePanel() re-renders
+        if (!document._ugAutoBuyGunListenerAdded) {
+            document._ugAutoBuyGunListenerAdded = true;
+            document.addEventListener('change', e => {
+                if (e.target.matches('#ug-bot-auto-buy-gun') && e.target.checked) {
+                    state.autoBuyGun = true;
+                    autoBuyGun();
+                }
+            });
+        }
+        if (autoBuyGunAwpEl)  {
+            autoBuyGunAwpEl.checked = state.autoBuyGunType === 'awp';
+            autoBuyGunAwpEl.addEventListener('change', () => { if (autoBuyGunAwpEl.checked && autoBuyGunAk47El) autoBuyGunAk47El.checked = false; });
+        }
+        if (autoBuyGunAk47El) {
+            autoBuyGunAk47El.checked = state.autoBuyGunType === 'ak47';
+            autoBuyGunAk47El.addEventListener('change', () => { if (autoBuyGunAk47El.checked && autoBuyGunAwpEl) autoBuyGunAwpEl.checked = false; });
+        }
+        if (autoBuyGunPtsEl) {
+            autoBuyGunPtsEl.value = state.autoBuyGunPtThreshold;
+            autoBuyGunPtsEl.setAttribute('style', 'width:52px!important;max-width:52px!important;min-width:0!important;padding:2px 3px!important;border:1px solid #444!important;border-radius:4px!important;background:#111!important;color:#fff!important;font-size:11px!important;text-align:right!important;box-sizing:border-box!important;');
+        }
         killBgCheckIntervalEl    = document.querySelector('#ug-bot-kill-bgcheck-interval');
         killPenaltyThresholdEl   = document.querySelector('#ug-bot-kill-penalty-threshold');
         logEl                   = document.querySelector('#ug-bot-log');
@@ -10667,20 +13156,132 @@
         hideBtn                 = document.querySelector('#ug-bot-hide-btn');
         closeBtn                = document.querySelector('#ug-bot-close-btn');
 
-        autoDepositInput.checked        = state.autoDepositEnabled;
-        depositThresholdEl.value        = formatNumberWithCommas(state.autoDepositThreshold);
-        autoRepairInput.checked         = state.autoRepairEnabled;
-        repairEveryEl.value             = String(state.repairEveryMelts);
-        autoMissionsInput.checked       = state.autoMissionsEnabled;
-        autoGiveCarsInput.checked       = state.autoGiveCarMissionsEnabled;
-        autoDrugsInput.checked          = state.autoDrugsEnabled;
-        const drugCompCb = document.querySelector('#ug-bot-drug-comp');
-        if (drugCompCb && !drugCompCb.dataset.listenerAttached) {
-            drugCompCb.dataset.listenerAttached = '1';
-            drugCompCb.checked = state.drugCompEnabled;
-            drugCompCb.addEventListener('change', () => {
-                state.drugCompEnabled = drugCompCb.checked;
-            });
+        // Load all settings into UI
+        if (autoDepositInput)            autoDepositInput.checked           = state.autoDepositEnabled;
+        if (depositThresholdEl)          depositThresholdEl.value           = formatNumberWithCommas(state.autoDepositThreshold);
+        if (bulletFactoryEnabledInput)   bulletFactoryEnabledInput.checked  = state.bulletFactoryEnabled;
+        if (diceJoinEnabledInput)        diceJoinEnabledInput.checked       = state.diceJoinEnabled;
+        if (autoRepairInput)             autoRepairInput.checked            = state.autoRepairEnabled;
+        if (repairEveryEl)               repairEveryEl.value                = String(state.repairEveryMelts);
+        if (autoMissionsInput)           autoMissionsInput.checked          = state.autoMissionsEnabled;
+        if (autoGiveCarsInput)           autoGiveCarsInput.checked          = state.autoGiveCarMissionsEnabled;
+        if (autoDrugsInput)              autoDrugsInput.checked             = state.autoDrugsEnabled;
+        if (drugDepositMultiplierEl)     drugDepositMultiplierEl.value      = String(state.drugDepositMultiplier);
+        if (bustNoReloadInput)           bustNoReloadInput.checked          = state.bustNoReload;
+        if (bustPollMinEl)               bustPollMinEl.value                = state.bustPollMin;
+        if (bustPollMaxEl)               bustPollMaxEl.value                = state.bustPollMax;
+        if (extendBulletsThreshEl)       extendBulletsThreshEl.value        = formatNumberWithCommas(state.extendBulletsThreshold);
+        if (extendRaresThreshEl)         extendRaresThreshEl.value          = formatNumberWithCommas(state.extendRaresThreshold);
+        if (extendDoubleMeltsThreshEl)   extendDoubleMeltsThreshEl.value    = formatNumberWithCommas(state.extendDoubleMeltsThreshold);
+        if (extendBulletValueThreshEl)   extendBulletValueThreshEl.value    = formatNumberWithCommas(state.extendBulletValueThreshold);
+        if (extendDoubleXpThreshEl)      extendDoubleXpThreshEl.value       = formatNumberWithCommas(state.extendDoubleXpThreshold);
+        if (extendAlwaysSuccThreshEl)    extendAlwaysSuccThreshEl.value     = formatNumberWithCommas(state.extendAlwaysSuccThreshold);
+        if (extendAlwaysBustThreshEl)    extendAlwaysBustThreshEl.value     = formatNumberWithCommas(state.extendAlwaysBustThreshold);
+        if (extendDoubleCashThreshEl)    extendDoubleCashThreshEl.value     = formatNumberWithCommas(state.extendDoubleCashThreshold);
+
+        // Leave jail
+        if (leaveJailInput)              leaveJailInput.checked             = state.leaveJailEnabled;
+        if (leaveJailMinPointsEl)        leaveJailMinPointsEl.value         = formatNumberWithCommas(state.leaveJailMinPoints);
+
+        // Resets
+        if (resetCrimesInput)            resetCrimesInput.checked           = state.resetCrimesEnabled;
+        if (resetCrimesFastModeInput) {
+            resetCrimesFastModeInput.checked  = state.resetCrimesFastMode;
+            resetCrimesFastModeInput.disabled = !state.resetCrimesEnabled;
+            if (!state.resetCrimesEnabled) resetCrimesFastModeInput.closest('.ug-fast-mode-label')?.classList.add('ug-disabled-sub');
+        }
+        if (resetGTAInput)               resetGTAInput.checked              = state.resetGTAEnabled;
+        if (resetMeltInput)              resetMeltInput.checked             = state.resetMeltEnabled;
+        if (resetTimerMinPointsEl)       resetTimerMinPointsEl.value        = formatNumberWithCommas(state.resetTimerMinPoints);
+
+        // Disable at rank (checkboxes loaded by their own listener block below; dropdowns here)
+        if (disableCrimesRankEl)         disableCrimesRankEl.value          = state.disableCrimesRank;
+        if (disableGtaRankEl)            disableGtaRankEl.value             = state.disableGtaRank;
+
+        // Auto-buy BG
+        if (autoBuyBgEnabledInput)       autoBuyBgEnabledInput.checked      = state.autoBuyBgEnabled;
+        if (autoBuyBgMinPtsEl)           autoBuyBgMinPtsEl.value            = String(state.autoBuyBgMinPts);
+        if (autoBuyBgMinsEl)             autoBuyBgMinsEl.value              = String(state.autoBuyBgMins);
+
+        // Extend perks
+        if (qtPerkExtendEnabledInput)    qtPerkExtendEnabledInput.checked   = state.qtPerkExtendEnabled;
+        if (qtPerkExtendMinsEl)          qtPerkExtendMinsEl.value           = String(state.qtPerkExtendMins);
+        if (extendBgsInput)              extendBgsInput.checked             = state.extendBgs;
+        if (extendCarsInput)             extendCarsInput.checked            = state.extendCars;
+        if (extendBulletsInput)          extendBulletsInput.checked         = state.extendBullets;
+        if (extendRaresInput)            extendRaresInput.checked           = state.extendRares;
+        if (extendDoubleMeltsInput)      extendDoubleMeltsInput.checked     = state.extendDoubleMelts;
+        if (extendBulletValueInput)      extendBulletValueInput.checked     = state.extendBulletValue;
+        if (extendDoubleXpInput)         extendDoubleXpInput.checked        = state.extendDoubleXp;
+        if (extendAlwaysSuccInput)       extendAlwaysSuccInput.checked      = state.extendAlwaysSucc;
+        if (extendAlwaysBustInput)       extendAlwaysBustInput.checked      = state.extendAlwaysBust;
+        if (extendDoubleCashInput)       extendDoubleCashInput.checked      = state.extendDoubleCash;
+
+        // Redeem perks
+        if (qtPerkRedeemEnabledInput)    qtPerkRedeemEnabledInput.checked   = state.qtPerkRedeemEnabled;
+        if (qtPerkRedeemMinsEl)          qtPerkRedeemMinsEl.value           = String(state.qtPerkRedeemMins);
+        if (redeemBulletValueInput) redeemBulletValueInput.checked = state.redeemBulletValue;
+        if (redeemCashInput)        redeemCashInput.checked        = state.redeemCash;
+        if (redeemCarsInput)        redeemCarsInput.checked        = state.redeemCars;
+        if (redeemPairFloorEl)      redeemPairFloorEl.value        = String(state.redeemPairFloor);
+        if (redeemBgInput)               redeemBgInput.checked              = state.redeemBg;
+        if (redeemBulletsInput)          redeemBulletsInput.checked         = state.redeemBullets;
+        if (redeemDoubleXpInput)         redeemDoubleXpInput.checked        = state.redeemDoubleXp;
+        if (redeemAlwaysSuccInput)       redeemAlwaysSuccInput.checked      = state.redeemAlwaysSucc;
+        if (redeemDoubleCashInput)       redeemDoubleCashInput.checked      = state.redeemDoubleCash;
+        if (redeemRareInput)             redeemRareInput.checked            = state.redeemRare;
+        if (redeemDoubleMeltInput)       redeemDoubleMeltInput.checked      = state.redeemDoubleMelt;
+        if (redeemAlwaysBustInput)       redeemAlwaysBustInput.checked      = state.redeemAlwaysBust;
+
+        // Bonus points
+        if (bonusPointsEnabledInput)     bonusPointsEnabledInput.checked    = state.bonusPointsEnabled;
+
+        // Leave cash on hand
+        if (leaveCashEnabledInput)       leaveCashEnabledInput.checked      = state.leaveCashEnabled;
+        if (leaveCashOnHandEl)           leaveCashOnHandEl.value            = state.leaveCashOnHand > 0 ? formatNumberWithCommas(state.leaveCashOnHand) : '';
+
+        // Kill — full load handled below in the BG-loop greying block
+        if (bgCrimeEnabledInput)        bgCrimeEnabledInput.checked        = state.bgCrimeEnabled;
+        if (killProtectedRecheckInput)  killProtectedRecheckInput.checked  = state.killProtectedRecheckEnabled;
+        if (killProtectedRecheckMinsEl) killProtectedRecheckMinsEl.value   = String(state.killProtectedRecheckMins);
+
+        // QT
+        if (qtPollMinEl)                 qtPollMinEl.value                  = String(state.qtPollMin);
+        if (qtPollMaxEl)                 qtPollMaxEl.value                  = String(state.qtPollMax);
+        if (qtPointsEnabledInput)        qtPointsEnabledInput.checked       = state.qtPointsEnabled;
+        if (qtPointsThresholdEl)         qtPointsThresholdEl.value          = formatNumberWithCommas(state.qtPointsThreshold);
+        if (qtBgEnabledInput)            qtBgEnabledInput.checked           = state.qtBgEnabled;
+        if (qtBgThresholdEl)             qtBgThresholdEl.value              = formatNumberWithCommas(state.qtBgThreshold);
+        if (qtBulletsEnabledInput)       qtBulletsEnabledInput.checked      = state.qtBulletsEnabled;
+        if (qtBulletsThresholdEl)        qtBulletsThresholdEl.value         = formatNumberWithCommas(state.qtBulletsThreshold);
+        if (qtBulletsMinEl)              qtBulletsMinEl.value               = formatNumberWithCommas(state.qtBulletsMin);
+        if (qtBustEnabledInput)          qtBustEnabledInput.checked         = state.qtBustEnabled;
+        if (qtBustMaxPtsEl)              qtBustMaxPtsEl.value               = String(state.qtBustMaxPts);
+        if (qtBustMinAmtEl)              qtBustMinAmtEl.value               = String(state.qtBustMinMins);
+        if (qtAlwaysSuccEnabledInput)    qtAlwaysSuccEnabledInput.checked   = state.qtAlwaysSuccEnabled;
+        if (qtAlwaysSuccMaxPtsEl)        qtAlwaysSuccMaxPtsEl.value         = String(state.qtAlwaysSuccMaxPts);
+        if (qtAlwaysSuccMinAmtEl)        qtAlwaysSuccMinAmtEl.value         = String(state.qtAlwaysSuccMinMins);
+        if (qtDoubleMeltsEnabledInput)   qtDoubleMeltsEnabledInput.checked  = state.qtDoubleMeltsEnabled;
+        if (qtDoubleMeltsMaxPtsEl)       qtDoubleMeltsMaxPtsEl.value        = String(state.qtDoubleMeltsMaxPts);
+        if (qtDoubleMeltsMinAmtEl)       qtDoubleMeltsMinAmtEl.value        = String(state.qtDoubleMeltsMinCars);
+        if (qtDoubleXpEnabledInput)      qtDoubleXpEnabledInput.checked     = state.qtDoubleXpEnabled;
+        if (qtDoubleXpMaxPtsEl)          qtDoubleXpMaxPtsEl.value           = String(state.qtDoubleXpMaxPts);
+        if (qtDoubleXpMinAmtEl)          qtDoubleXpMinAmtEl.value           = String(state.qtDoubleXpMinMins);
+        if (qtDoubleCashEnabledInput)    qtDoubleCashEnabledInput.checked   = state.qtDoubleCashEnabled;
+        if (qtDoubleCashMaxPtsEl)        qtDoubleCashMaxPtsEl.value         = String(state.qtDoubleCashMaxPts);
+        if (qtDoubleCashMinAmtEl)        qtDoubleCashMinAmtEl.value         = String(state.qtDoubleCashMinMins);
+        if (qtRareEnabledInput)          qtRareEnabledInput.checked         = state.qtRareEnabled;
+        if (qtRareMaxPtsEl)              qtRareMaxPtsEl.value               = String(state.qtRareMaxPts);
+        if (qtRareMinAmtEl)              qtRareMinAmtEl.value               = String(state.qtRareMinCars);
+        if (qtBulletValueEnabledInput)   qtBulletValueEnabledInput.checked  = state.qtBulletValueEnabled;
+        if (qtBulletValueMaxPtsEl)       qtBulletValueMaxPtsEl.value        = String(state.qtBulletValueMaxPts);
+        if (qtBulletValueMinAmtEl)       qtBulletValueMinAmtEl.value        = String(state.qtBulletValueMinCars);
+        if (qtCarsEnabledInput)          qtCarsEnabledInput.checked         = state.qtCarsEnabled;
+        if (qtCarsIntervalEl)            qtCarsIntervalEl.value             = String(state.qtCarsScanInterval);
+
+        drugCompModeInput = document.querySelector('#ug-bot-drug-comp');
+        if (drugCompModeInput) {
+            drugCompModeInput.checked = state.drugCompEnabled;
         }
 
         // Sell All Drugs button
@@ -10737,62 +13338,30 @@
             });
         }
 
-        drugDepositMultiplierEl.value   = String(state.drugDepositMultiplier);
-        leaveJailInput.checked          = state.leaveJailEnabled;
-        leaveJailMinPointsEl.value      = String(state.leaveJailMinPoints);
-        resetCrimesInput.checked             = state.resetCrimesEnabled;
-        resetCrimesFastModeInput.checked     = state.resetCrimesFastMode;
-        resetCrimesFastModeInput.disabled    = !state.resetCrimesEnabled;
-        if (!state.resetCrimesEnabled) {
-            resetCrimesFastModeInput.closest('.ug-fast-mode-label')?.classList.add('ug-disabled-sub');
-        }
-        resetGTAInput.checked                = state.resetGTAEnabled;
-        resetMeltInput.checked               = state.resetMeltEnabled;
-        resetTimerMinPointsEl.value          = String(state.resetTimerMinPoints);
-        bustEnabledInput.checked             = state.bustEnabled;
-        bustFastModeInput.checked            = state.bustFastMode;
-        bustFastModeInput.disabled           = !state.bustEnabled;
-        if (!state.bustEnabled) {
-            bustFastModeInput.closest('.ug-fast-mode-label')?.classList.add('ug-disabled-sub');
-        }
-        if (bustNoReloadInput) {
-            bustNoReloadInput.checked = state.bustNoReload;
-        }
-        if (bustPollMinEl) bustPollMinEl.value = state.bustPollMin;
-        if (bustPollMaxEl) bustPollMaxEl.value = state.bustPollMax;
-        if (bgCrimeEnabledInput)      bgCrimeEnabledInput.checked      = state.bgCrimeEnabled;
-        if (bulletFactoryEnabledInput) bulletFactoryEnabledInput.checked = state.bulletFactoryEnabled;
-        if (killProtectedRecheckInput)  killProtectedRecheckInput.checked = state.killProtectedRecheckEnabled;
-        if (killProtectedRecheckMinsEl) {
-            killProtectedRecheckMinsEl.value = String(state.killProtectedRecheckMins);
-        }
-        if (qtBgEnabledInput)      qtBgEnabledInput.checked      = state.qtBgEnabled;
-        if (qtBgThresholdEl)       qtBgThresholdEl.value         = String(state.qtBgThreshold);
-        if (qtBulletsEnabledInput) qtBulletsEnabledInput.checked = state.qtBulletsEnabled;
-        if (qtBulletsThresholdEl)  qtBulletsThresholdEl.value    = String(state.qtBulletsThreshold);
-        if (qtBulletsMinEl)        qtBulletsMinEl.value           = String(state.qtBulletsMin);
-        if (qtPollMinEl)           qtPollMinEl.value              = String(state.qtPollMin);
-        if (qtPollMaxEl)           qtPollMaxEl.value              = String(state.qtPollMax);
-        if (qtPointsEnabledInput)  qtPointsEnabledInput.checked   = state.qtPointsEnabled;
-        if (qtPointsThresholdEl)   qtPointsThresholdEl.value      = String(state.qtPointsThreshold);
-        if (qtCarsEnabledInput)    qtCarsEnabledInput.checked     = state.qtCarsEnabled;
-        if (qtCarsIntervalEl)      qtCarsIntervalEl.value         = String(state.qtCarsScanInterval);
-        if (qtPerkExtendEnabledInput) qtPerkExtendEnabledInput.checked = state.qtPerkExtendEnabled;
-        if (qtPerkExtendMinsEl)    qtPerkExtendMinsEl.value       = String(state.qtPerkExtendMins);
         // Render per-car-type rows
         const qtCarsList = document.querySelector('#ug-bot-qt-cars-list');
         if (qtCarsList) {
             const carTypes = state.qtCarsTypes || DEFAULTS.qtCarsTypes;
-            qtCarsList.innerHTML = carTypes.map(t => `
-                <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;">
-                    <input id="ug-bot-qt-car-enabled-${t.b}" type="checkbox" ${t.enabled ? 'checked' : ''} style="flex-shrink:0;" />
-                    <label for="ug-bot-qt-car-enabled-${t.b}" style="font-size:11px;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${t.name}</label>
-                    <input id="ug-bot-qt-car-price-${t.b}" type="number" value="${t.maxPrice}" min="1" step="1000000"
-                        style="width:110px;flex-shrink:0;padding:4px 6px;border:1px solid #555;border-radius:5px;background:#111;color:#fff;font-size:11px;" />
-                </div>
+            const rows = carTypes.map(t => `
+                <tr>
+                    <td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;">
+                        <input id="ug-bot-qt-car-enabled-${t.b}" type="checkbox" ${t.enabled ? 'checked' : ''}
+                            style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" />
+                    </td>
+                    <td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">${t.name}</td>
+                    <td style="vertical-align:middle;white-space:nowrap;padding:3px 0;width:1px;">
+                        <input id="ug-bot-qt-car-price-${t.b}" type="text" inputmode="numeric" value="${t.maxPrice > 0 ? formatNumberWithCommas(t.maxPrice) : ''}"
+                            class="ug-compact-input" style="width:110px;max-width:110px;" />
+                    </td>
+                </tr>
             `).join('');
+            qtCarsList.innerHTML = `<table style="width:100%;border-collapse:collapse;">${rows}</table>`;
             // Auto-save on any change
-            qtCarsList.querySelectorAll('input').forEach(el => {
+            qtCarsList.querySelectorAll('input[type="text"]').forEach(el => {
+                attachNumberFormatting(el);
+                el.addEventListener('change', () => saveSettings());
+            });
+            qtCarsList.querySelectorAll('input[type="checkbox"]').forEach(el => {
                 el.addEventListener('change', () => saveSettings());
             });
         }
@@ -10802,6 +13371,9 @@
         // then read it back — this way unticking immediately re-enables them
         // AND the persisted on state greys them out on page load.
         if (killBgCheckInput) killBgCheckInput.checked = state.killBgCheckEnabled;
+        if (killBgSpamInput)      killBgSpamInput.checked         = state.killBgSpamEnabled;
+        if (killBgSpamIntervalEl) killBgSpamIntervalEl.value      = String(state.killBgSpamIntervalSecs);
+        updateBgSpamDropdown();
         const bgLoopCurrentlyOn = killBgCheckInput ? killBgCheckInput.checked : state.killBgCheckEnabled;
 
         if (killScanOnlineInput) {
@@ -10820,12 +13392,31 @@
             if (searchLabel) searchLabel.style.cursor  = bgLoopCurrentlyOn ? 'default' : '';
         }
         if (killBgCheckInput)     killBgCheckInput.checked    = state.killBgCheckEnabled;
+        if (killBgSpamInput)      killBgSpamInput.checked         = state.killBgSpamEnabled;
+        if (killBgSpamIntervalEl) killBgSpamIntervalEl.value      = String(state.killBgSpamIntervalSecs);
+        updateBgSpamDropdown();
         if (killShootInput)       killShootInput.checked      = state.killShootEnabled;
         if (killAnonymousInput)   killAnonymousInput.checked  = state.killAnonymousShooting;
         if (killBgCheckIntervalEl) killBgCheckIntervalEl.value = String(state.killBgCheckIntervalHrs);
         if (killPenaltyThresholdEl) killPenaltyThresholdEl.value = state.killPenaltyThreshold > 0 ? String(state.killPenaltyThreshold) : '';
-
         attachNumberFormatting(depositThresholdEl);
+        attachNumberFormatting(leaveJailMinPointsEl);
+        attachNumberFormatting(resetTimerMinPointsEl);
+        attachNumberFormatting(autoBuyBgMinPtsEl);
+        attachNumberFormatting(qtPointsThresholdEl);
+        attachNumberFormatting(qtBgThresholdEl);
+        attachNumberFormatting(qtBulletsThresholdEl);
+        attachNumberFormatting(qtBulletsMinEl);
+        attachNumberFormatting(extendBulletsThreshEl);
+        attachNumberFormatting(extendRaresThreshEl);
+        attachNumberFormatting(extendDoubleMeltsThreshEl);
+        attachNumberFormatting(extendBulletValueThreshEl);
+        attachNumberFormatting(extendDoubleXpThreshEl);
+        attachNumberFormatting(extendAlwaysSuccThreshEl);
+        attachNumberFormatting(extendAlwaysBustThreshEl);
+        attachNumberFormatting(extendDoubleCashThreshEl);
+        // killPenaltyThresholdEl uses decimal values — no number formatting applied
+        attachNumberFormatting(leaveCashOnHandEl);
 
         buildActionCheckboxes();
 
@@ -10851,21 +13442,6 @@
                     const label = resetCrimesFastModeInput.closest('.ug-fast-mode-label');
                     if (label) label.classList.toggle('ug-disabled-sub', !resetCrimesInput.checked);
                 }
-                if (bustFastModeInput) {
-                    const label = bustFastModeInput.closest('.ug-fast-mode-label');
-                    if (label) label.classList.toggle('ug-disabled-sub', !bustEnabledInput.checked);
-                }
-            } else if (e.target === bustNoReloadInput && bustNoReloadInput.checked) {
-                // No reload bust enabled — uncheck enable bust and fast bust
-                if (bustEnabledInput)  { bustEnabledInput.checked  = false; }
-                if (bustFastModeInput) { bustFastModeInput.checked = false; }
-                const label = bustFastModeInput ? bustFastModeInput.closest('.ug-fast-mode-label') : null;
-                if (label) label.classList.add('ug-disabled-sub');
-                saveSettings();
-            } else if (e.target === bustEnabledInput && bustEnabledInput.checked) {
-                // Enable bust enabled — uncheck no reload bust
-                if (bustNoReloadInput) { bustNoReloadInput.checked = false; }
-                saveSettings();
             } else if (e.target.matches('input[type="checkbox"], input[type="number"], select')) {
                 saveSettings();
             }
@@ -10996,6 +13572,32 @@
                     buildActionCheckboxes();
                     saveSettings();
                     addLiveLog('Disable ranking: crimes re-enabled');
+                } else {
+                    // Ticked on — apply immediately if already at/above selected rank
+                    const _targetRank = disableCrimesRankEl ? disableCrimesRankEl.value : state.disableCrimesRank;
+                    const _gbIdx  = RANKS.indexOf(_targetRank);
+                    const _curIdx = getPlayerRankIndex();
+                    const _atGb   = _gbIdx >= 0 && _curIdx >= 0 && _curIdx === _gbIdx;
+                    // If already above target rank, mark as fired so tick loop doesn't trigger
+                    if (_gbIdx >= 0 && _curIdx > _gbIdx) {
+                        setSetting('gbDisableFired', true);
+                        addLiveLog(`Disable ranking: already past ${_targetRank} — will apply on next account`);
+                    }
+                    if (_atGb) {
+                        const crimeIds = ['gang', '1', '2', 'drug', '3', '4', '5', '6', '7'];
+                        const cur = state.enabledActions;
+                        const filtered = cur.filter(id => !crimeIds.includes(id));
+                        if (filtered.length !== cur.length) {
+                            state.enabledActions = filtered;
+                            state.bgCrimeEnabled = false;
+                            stopBgCrime();
+                            if (bgCrimeEnabledInput) bgCrimeEnabledInput.checked = false;
+                            setSetting('gbDisableFired', true);
+                            buildActionCheckboxes();
+                            saveSettings();
+                            addLiveLog(`Disable ranking: crimes disabled (already at ${_targetRank})`);
+                        }
+                    }
                 }
             });
         }
@@ -11014,6 +13616,26 @@
                         buildActionCheckboxes();
                         saveSettings();
                         addLiveLog('Disable ranking: GTA re-enabled');
+                    }
+                } else {
+                    // Ticked on — apply immediately if already at/above selected rank
+                    const _targetRankGta = disableGtaRankEl ? disableGtaRankEl.value : state.disableGtaRank;
+                    const _gbIdx  = RANKS.indexOf(_targetRankGta);
+                    const _curIdx = getPlayerRankIndex();
+                    const _atGb   = _gbIdx >= 0 && _curIdx >= 0 && _curIdx === _gbIdx;
+                    if (_gbIdx >= 0 && _curIdx > _gbIdx) {
+                        setSetting('gbDisableFired', true);
+                        addLiveLog(`Disable ranking: already past ${_targetRankGta} — will apply on next account`);
+                    }
+                    if (_atGb) {
+                        const cur = state.enabledActions;
+                        if (cur.includes('gta')) {
+                            state.enabledActions = cur.filter(id => id !== 'gta');
+                            setSetting('gbDisableFired', true);
+                            buildActionCheckboxes();
+                            saveSettings();
+                            addLiveLog(`Disable ranking: GTA disabled (already at ${_targetRankGta})`);
+                        }
                     }
                 }
             });
@@ -11081,12 +13703,36 @@
         if (personalityResetBtn && !personalityResetBtn.dataset.listenerAttached) {
             personalityResetBtn.dataset.listenerAttached = '1';
             personalityResetBtn.addEventListener('click', () => {
-                if (!confirm('Reset personality? New values will be generated and applied on next page load.')) return;
-                GM_setValue('ugbot_personality', null);
-                addLiveLog('Personality reset — reload the page to generate a new one');
+                if (!confirm('Reset personality? A new one will be generated and applied on next page load.')) return;
+                const dupeMode = document.querySelector('#ug-bot-dupe-mode')?.checked ?? PERSONALITY.dupeMode;
+                generatePersonality(dupeMode);
+                addLiveLog(`Personality reset (dupe=${dupeMode}) — reload the page to apply`);
                 personalityResetBtn.textContent = 'Reset — reload page!';
                 personalityResetBtn.style.color = '#f8c84a';
             });
+        }
+
+        const dupeModeInput = document.querySelector('#ug-bot-dupe-mode');
+        const personalityInfoEl = document.querySelector('#ug-bot-personality-info');
+        if (dupeModeInput) {
+            dupeModeInput.checked = !!PERSONALITY.dupeMode;
+            if (!dupeModeInput.dataset.listenerAttached) {
+                dupeModeInput.dataset.listenerAttached = '1';
+                dupeModeInput.addEventListener('change', () => {
+                    const dupeMode = dupeModeInput.checked;
+                    generatePersonality(dupeMode);
+                    addLiveLog(`Dupe mode ${dupeMode ? 'enabled' : 'disabled'} — reload the page to apply`);
+                    if (personalityResetBtn) {
+                        personalityResetBtn.textContent = 'Dupe mode changed — reload!';
+                        personalityResetBtn.style.color = '#f8c84a';
+                    }
+                });
+            }
+        }
+        if (personalityInfoEl) {
+            const p = PERSONALITY;
+            const mode = p.dupeMode ? 'Dupe' : 'Normal';
+            personalityInfoEl.textContent = `${mode} mode · nav ${p.navDelayMin}–${p.navDelayMax}ms · heartbeat ${p.heartbeatMs}ms · idle ${p.idleVisitChancePct}% · human pages: ${p.humanPages.length}`;
         }
 
         const accGenerateBtn = document.querySelector('#ug-bot-acc-generate');
@@ -11293,7 +13939,8 @@
             if (_donIdx >= 0 && _curRankIdx >= 0 && _curRankIdx >= _donIdx) {
                 const _labels = {
                     autoDrugs: 'Drug run', killSearch: 'Search players',
-                    killProtectedRecheck: 'Protected re-search', killBgCheck: 'BG check loop'
+                    killProtectedRecheck: 'Protected re-search', killBgCheck: 'BG check loop',
+                    killBgSpam: 'BG Spam', autoBuyGun: 'Auto buy gun'
                 };
                 const _reenabled = [];
                 for (const key of _autoDisabled) {
@@ -11318,19 +13965,62 @@
                         state.killBgCheckEnabled = true;
                         if (killBgCheckInput) killBgCheckInput.checked = true;
                         _reenabled.push(_labels[key]);
+                    } else if (key === 'killBgSpam' && !state.killBgSpamEnabled) {
+                        state.killBgSpamEnabled = true;
+                        if (killBgSpamInput) killBgSpamInput.checked = true;
+                        syncBgSpamState();
+                        _reenabled.push('BG Spam');
+                    } else if (key === 'autoBuyGun' && !state.autoBuyGun) {
+                        state.autoBuyGun = true;
+                        const _autoBuyGunEl = document.querySelector('#ug-bot-auto-buy-gun');
+                        if (_autoBuyGunEl) _autoBuyGunEl.checked = true;
+                        _reenabled.push('Auto buy gun');
                     }
                 }
                 if (_reenabled.length > 0) {
                     addLiveLog('Reached Don — re-enabled: ' + _reenabled.join(', '));
+                    updatePanel();
                 }
                 GM_setValue('accAutoDisabled', '[]');
+
+                // Buy a gun if we don't have one
+                if (getPlayerGunValue() === 0) {
+                    autoBuyGun();
+                }
+
+                // Clear stale BG state for BG Farm players — searches were lost on death
+                // Set bgFarmWaitUntil to 3hrs so the kill loop and BG Spam don't act until they can be found
+                const _bgFarmPlayers = getSetting('killPlayers', []);
+                const _threeHrs = Date.now() + (3 * 60 * 60 * 1000);
+                const _bgFarmReset = _bgFarmPlayers.map(p => {
+                    if (!p.bgFarmEnabled) return p;
+                    const np = { ...p };
+                    delete np.bodyguard;
+                    delete np.expectedFoundAt;
+                    delete np.searchExpiresAt;
+                    np.bgFarmWaitUntil = _threeHrs;
+                    return np;
+                });
+                setSetting('killPlayers', _bgFarmReset);
+                setSetting('killBgWaitUntil', _threeHrs);
+                setSetting('killLoopCooldownUntil', 0);
+                const _bgFarmCount = _bgFarmPlayers.filter(p => p.bgFarmEnabled).length;
+                if (_bgFarmCount > 0) {
+                    addLiveLog(`BG Farm: cleared stale BG state for ${_bgFarmCount} player(s) — waiting 3hrs for searches to complete`);
+                }
             }
         }
 
-        // Disable crimes/GTA at Global Boss if toggles are on
+        // Disable crimes/GTA at selected rank if toggles are on
         if (state.disableCrimesAtGb || state.disableGtaAtGb) {
-            const _gbIdx  = RANKS.indexOf('Global Boss');
             const _curIdx = getPlayerRankIndex();
+            // Use each dropdown's rank separately
+            const _crimesRank = state.disableCrimesRank || 'Global Boss';
+            const _gtaRank    = state.disableGtaRank    || 'Global Boss';
+            const _gbIdx = Math.min(
+                state.disableCrimesAtGb ? RANKS.indexOf(_crimesRank) : 999,
+                state.disableGtaAtGb    ? RANKS.indexOf(_gtaRank)    : 999
+            );
             const _atGb   = _gbIdx >= 0 && _curIdx >= 0 && _curIdx >= _gbIdx;
             // Only fire the disable once per GB stint — tracked by gbDisableFired flag
             // Reset the flag when rank drops below Global Boss (new account after death)
@@ -11340,14 +14030,19 @@
                 const _actions = [...state.enabledActions];
                 let _changed = false;
                 const _crimeIds = ['gang', '1', '2', 'drug', '3', '4', '5', '6', '7'];
-                if (state.disableCrimesAtGb) {
+                if (state.disableCrimesAtGb && _curIdx >= RANKS.indexOf(_crimesRank)) {
                     const _filtered = _actions.filter(id => !_crimeIds.includes(id));
                     if (_filtered.length !== _actions.length) { state.enabledActions = _filtered; _changed = true; }
                     if (state.bgCrimeEnabled) { state.bgCrimeEnabled = false; stopBgCrime(); if (bgCrimeEnabledInput) bgCrimeEnabledInput.checked = false; _changed = true; }
                 }
-                if (state.disableGtaAtGb) {
+                if (state.disableGtaAtGb && _curIdx >= RANKS.indexOf(_gtaRank)) {
                     const _cur = state.enabledActions;
-                    if (_cur.includes('gta')) { state.enabledActions = _cur.filter(id => id !== 'gta'); _changed = true; }
+                    if (_cur.includes('gta')) {
+                        state.enabledActions = _cur.filter(id => id !== 'gta');
+                        const gtaCb = document.querySelector('.ug-action-cb[data-id="gta"]');
+                        if (gtaCb) gtaCb.checked = false;
+                        _changed = true;
+                    }
                 }
                 if (_changed) {
                     setSetting('gbDisableFired', true);
@@ -11398,9 +14093,6 @@
             state.resetGTAEnabled    ? `GTA (3pts, min ${state.resetTimerMinPoints}pts)` :
             state.resetMeltEnabled   ? `melt loop (4pts, min ${state.resetTimerMinPoints}pts)` :
             'off';
-        const bustStatus = state.bustEnabled
-            ? `on${state.bustFastMode ? ' (fast)' : ''}`
-            : 'off';
 
         // Compact view — shown when panel is collapsed, renders into collapsed-controls
         if (state.panelCollapsed && state.panelCompact) {
@@ -11417,7 +14109,6 @@
                     <div class="ug-status-line"><b>Missions:</b> ${escapeHtml(missionStatus)}</div>
                     <div class="ug-status-line"><b>Leave Jail:</b> ${escapeHtml(jailStatus)}</div>
                     <div class="ug-status-line"><b>Timer reset:</b> ${escapeHtml(resetStatus)}</div>
-                    <div class="ug-status-line"><b>Bust:</b> ${escapeHtml(bustStatus)}</div>
                     <div class="ug-status-line"><b>Kill scan:</b> ${(() => {
                         if (!state.killScanOnlineEnabled) return 'off';
                         const msUntil = (state.killScanOnlineInterval * 60 * 1000) - (now() - state.killLastOnlineScan);
@@ -11447,6 +14138,7 @@
 
         const toggleText = state.enabled ? 'Pause' : 'Start';
         toggleBtn.textContent = toggleText;
+
 
         compactBtn.textContent = state.panelCollapsed ? 'Expand' : 'Compact';
 
@@ -11580,13 +14272,8 @@
         // if the toggle is off (including after a natural loop exit), it is not.
         state.gtaResetLoopActive   = state.resetGTAEnabled;
         state.meltResetLoopActive  = state.resetMeltEnabled;
-        state.bustLoopActive       = state.bustEnabled;
-        // Start or stop no reload bust background loop
-        if (state.bustNoReload) {
-            startNoReloadBust();
-        } else {
-            stopNoReloadBust();
-        }
+        if (state.bustNoReload) { startNoReloadBust(); } else { stopNoReloadBust(); }
+
         // Start QT sniper on every page load if any QT option is enabled
         if (state.qtBgEnabled || state.qtBulletsEnabled || state.qtPointsEnabled) {
             startQTSniper();
@@ -11595,12 +14282,21 @@
         if (state.qtPerkExtendEnabled) {
             startQTPerkExtender();
         }
+        if (state.qtPerkRedeemEnabled) {
+            startQTPerkRedeemer();
+        }
+        if (state.autoBuyBgEnabled) {
+            startAutoBuyBg();
+        }
+        if (state.bonusPointsEnabled) {
+            startBonusPointsSpender();
+        }
         // Start QT car scanner on every page load if enabled
         if (state.qtCarsEnabled) {
             startQTCarScanner();
         }
-        // Start free entry dice joiner on every page load
-        startDiceJoiner();
+        // Start free entry dice joiner on every page load if enabled
+        if (state.diceJoinEnabled) startDiceJoiner();
         // Start background crime loop on every page load if enabled
         if (state.bgCrimeEnabled) {
             startBgCrime();
@@ -11621,7 +14317,7 @@
                 if (p.searchExpiresAt) return (p.searchExpiresAt - nowMs) < RESCAN_BUFFER_MS;
                 return (nowMs - p.lastChecked) >= KILL_SCANNER_RESCAN_MS;
             });
-            const protectedIntervalMs = state.killProtectedRecheckMs || KILL_SCANNER_PROTECTED_RESCAN_MS;
+            const protectedIntervalMs = state.killProtectedRecheckEnabled ? state.killProtectedRecheckMins * 60 * 1000 : KILL_SCANNER_PROTECTED_RESCAN_MS;
             const hasProtectedDue = players.some(p =>
                 p.status === KILL_STATUS.PROTECTED &&
                 (nowMs - p.lastChecked) >= protectedIntervalMs
@@ -11650,7 +14346,7 @@
                 : null;
 
             const hasDueBgCheck = alivePlayers.some(p => {
-                if (!isPlayerBgCheckEnabled(p.name)) return false;
+                if (!isBgCheckable(p.name)) return false;
                 if (getBgCheckDueMs(p) > 0) return false;
                 // On kill page: verify player is actually in Players Found right now
                 if (canCheckFound) return foundNames && foundNames.has(p.name.toLowerCase());
@@ -11661,7 +14357,7 @@
                 if (!isPlayerShootEnabled(p.name)) return false;
                 if (p.lastKillAttempt && (now() - p.lastKillAttempt) < 30000) return false;
                 if (p.requiredBullets && getPlayerBullets() < p.requiredBullets) return false;
-                if (isPlayerBgCheckEnabled(p.name) && getBgCheckDueMs(p) <= 0) return false;
+                if (isBgCheckable(p.name) && getBgCheckDueMs(p) <= 0) return false;
                 // Skip if player has a pending bodyguard being searched
                 if (p.bodyguard) return false;
                 // If on kill page, only activate if player is actually in Players Found
@@ -11693,13 +14389,111 @@
         }
 
         createPanel();
+        switchTab(activeTab);
+
+        // ── Bonus points drag-to-reorder ──────────────────────────────────
+        (function initBonusDrag() {
+            const tbody = document.querySelector('#ug-bot-bonus-priority-list tbody');
+            if (!tbody) return;
+
+            let dragSrc = null;
+
+            tbody.addEventListener('dragstart', e => {
+                dragSrc = e.target.closest('tr.ug-bonus-item');
+                if (!dragSrc) return;
+                e.dataTransfer.effectAllowed = 'move';
+                e.dataTransfer.setData('text/plain', '');
+                setTimeout(() => dragSrc && dragSrc.classList.add('ug-dragging'), 0);
+            });
+
+            tbody.addEventListener('dragover', e => {
+                e.preventDefault();
+                e.dataTransfer.dropEffect = 'move';
+                const target = e.target.closest('tr.ug-bonus-item');
+                tbody.querySelectorAll('tr.ug-bonus-item').forEach(r => r.classList.remove('ug-drag-over'));
+                if (target && target !== dragSrc) target.classList.add('ug-drag-over');
+            });
+
+            tbody.addEventListener('dragleave', () => {
+                tbody.querySelectorAll('tr.ug-bonus-item').forEach(r => r.classList.remove('ug-drag-over'));
+            });
+
+            tbody.addEventListener('drop', e => {
+                e.preventDefault();
+                const target = e.target.closest('tr.ug-bonus-item');
+                tbody.querySelectorAll('tr.ug-bonus-item').forEach(r => r.classList.remove('ug-drag-over'));
+                if (!target || target === dragSrc) return;
+
+                // Insert before or after based on mouse Y position
+                const rect = target.getBoundingClientRect();
+                const after = e.clientY > rect.top + rect.height / 2;
+                if (after) {
+                    target.after(dragSrc);
+                } else {
+                    target.before(dragSrc);
+                }
+
+                // Persist new order
+                const order = [...tbody.querySelectorAll('tr.ug-bonus-item')].map(r => r.dataset.bp);
+                setSetting('bonusPerkOrder', JSON.stringify(order));
+            });
+
+            tbody.addEventListener('dragend', () => {
+                tbody.querySelectorAll('tr.ug-bonus-item').forEach(r => {
+                    r.classList.remove('ug-drag-over');
+                    r.classList.remove('ug-dragging');
+                });
+                dragSrc = null;
+            });
+
+            // Save enabled perk checkboxes whenever one changes
+            tbody.addEventListener('change', e => {
+                if (!e.target.matches('.ug-bonus-cb')) return;
+                const enabled = [...tbody.querySelectorAll('tr.ug-bonus-item')]
+                    .filter(r => r.querySelector('.ug-bonus-cb')?.checked)
+                    .map(r => r.dataset.bp);
+                setSetting('bonusEnabledPerks', JSON.stringify(enabled));
+            });
+
+            // Restore saved order
+            try {
+                const saved = JSON.parse(getSetting('bonusPerkOrder') || '[]');
+                if (saved.length) {
+                    saved.forEach(bp => {
+                        const row = tbody.querySelector(`tr[data-bp="${bp}"]`);
+                        if (row) tbody.appendChild(row);
+                    });
+                }
+            } catch(e) {}
+
+            // Restore saved checked state
+            try {
+                const enabled = JSON.parse(getSetting('bonusEnabledPerks') || '[]');
+                tbody.querySelectorAll('tr.ug-bonus-item').forEach(r => {
+                    const cb = r.querySelector('.ug-bonus-cb');
+                    if (cb) cb.checked = enabled.includes(r.dataset.bp);
+                });
+            } catch(e) {}
+        })();
+        // ─────────────────────────────────────────────────────────────────
         // Re-query element refs — createPanel() may have returned early if panel already existed
         toggleBtn               = document.querySelector('#ug-bot-toggle');
         compactBtn              = document.querySelector('#ug-bot-compact-btn');
         hideBtn                 = document.querySelector('#ug-bot-hide-btn');
         closeBtn                = document.querySelector('#ug-bot-close-btn');
         autoDepositInput        = document.querySelector('#ug-bot-autodeposit');
-        depositThresholdEl      = document.querySelector('#ug-bot-deposit-threshold');
+        depositThresholdEl           = document.querySelector('#ug-bot-deposit-threshold');
+        bustNoReloadInput            = document.querySelector('#ug-bot-bust-noreload');
+        bustPollMinEl                = document.querySelector('#ug-bot-bust-poll-min');
+        bustPollMaxEl                = document.querySelector('#ug-bot-bust-poll-max');
+        extendBulletsThreshEl        = document.querySelector('#ug-bot-extend-bullets-threshold');
+        extendRaresThreshEl          = document.querySelector('#ug-bot-extend-rares-threshold');
+        extendDoubleMeltsThreshEl    = document.querySelector('#ug-bot-extend-double-melts-threshold');
+        extendBulletValueThreshEl    = document.querySelector('#ug-bot-extend-bullet-value-threshold');
+        extendDoubleXpThreshEl       = document.querySelector('#ug-bot-extend-double-xp-threshold');
+        extendAlwaysSuccThreshEl     = document.querySelector('#ug-bot-extend-always-successful-threshold');
+        extendAlwaysBustThreshEl     = document.querySelector('#ug-bot-extend-always-bust-threshold');
+        extendDoubleCashThreshEl     = document.querySelector('#ug-bot-extend-double-cash-threshold');
         autoRepairInput         = document.querySelector('#ug-bot-autorepair');
         repairEveryEl           = document.querySelector('#ug-bot-repair-every');
         autoMissionsInput       = document.querySelector('#ug-bot-automissions');
@@ -11713,15 +14507,16 @@
         resetGTAInput           = document.querySelector('#ug-bot-reset-gta');
         resetMeltInput          = document.querySelector('#ug-bot-reset-melt');
         resetTimerMinPointsEl   = document.querySelector('#ug-bot-reset-minpoints');
-        bustEnabledInput        = document.querySelector('#ug-bot-bust-enabled');
-        bustFastModeInput       = document.querySelector('#ug-bot-bust-fast');
-        bustNoReloadInput       = document.querySelector('#ug-bot-bust-noreload');
         bgCrimeEnabledInput     = document.querySelector('#ug-bot-bg-crime');
+        diceJoinEnabledInput    = document.querySelector('#ug-bot-dice-join-enabled');
         bulletFactoryEnabledInput= document.querySelector('#ug-bot-bullet-factory');
         killScanOnlineInput     = document.querySelector('#ug-bot-kill-scan-online');
         killScanIntervalEl      = document.querySelector('#ug-bot-kill-scan-interval');
         killSearchInput         = document.querySelector('#ug-bot-kill-search');
         killBgCheckInput        = document.querySelector('#ug-bot-kill-bgcheck');
+        killBgSpamInput          = document.querySelector('#ug-bot-kill-bg-spam');
+        killBgSpamIntervalEl     = document.querySelector('#ug-bot-kill-bg-spam-interval');
+        killBgSpamTargetEl       = document.querySelector('#ug-bot-kill-bg-spam-target');
         killShootInput          = document.querySelector('#ug-bot-kill-shoot');
         killAnonymousInput      = document.querySelector('#ug-bot-kill-anonymous');
         killBgCheckIntervalEl   = document.querySelector('#ug-bot-kill-bgcheck-interval');
@@ -11738,6 +14533,27 @@
         qtPointsEnabledInput    = document.querySelector('#ug-bot-qt-points-enabled');
         qtPointsThresholdEl     = document.querySelector('#ug-bot-qt-points-threshold');
         qtCarsEnabledInput      = document.querySelector('#ug-bot-qt-cars-enabled');
+        qtBustEnabledInput      = document.querySelector('#ug-bot-qt-bust-enabled');
+        qtBustMaxPtsEl          = document.querySelector('#ug-bot-qt-bust-maxpts');
+        qtBustMinAmtEl          = document.querySelector('#ug-bot-qt-bust-minamt');
+        qtAlwaysSuccEnabledInput = document.querySelector('#ug-bot-qt-always-succ-enabled');
+        qtAlwaysSuccMaxPtsEl    = document.querySelector('#ug-bot-qt-always-succ-maxpts');
+        qtAlwaysSuccMinAmtEl    = document.querySelector('#ug-bot-qt-always-succ-minamt');
+        qtDoubleMeltsEnabledInput = document.querySelector('#ug-bot-qt-double-melts-enabled');
+        qtDoubleMeltsMaxPtsEl   = document.querySelector('#ug-bot-qt-double-melts-maxpts');
+        qtDoubleMeltsMinAmtEl   = document.querySelector('#ug-bot-qt-double-melts-minamt');
+        qtDoubleXpEnabledInput  = document.querySelector('#ug-bot-qt-double-xp-enabled');
+        qtDoubleXpMaxPtsEl      = document.querySelector('#ug-bot-qt-double-xp-maxpts');
+        qtDoubleXpMinAmtEl      = document.querySelector('#ug-bot-qt-double-xp-minamt');
+        qtDoubleCashEnabledInput = document.querySelector('#ug-bot-qt-double-cash-enabled');
+        qtDoubleCashMaxPtsEl    = document.querySelector('#ug-bot-qt-double-cash-maxpts');
+        qtDoubleCashMinAmtEl    = document.querySelector('#ug-bot-qt-double-cash-minamt');
+        qtRareEnabledInput      = document.querySelector('#ug-bot-qt-rare-enabled');
+        qtRareMaxPtsEl          = document.querySelector('#ug-bot-qt-rare-maxpts');
+        qtRareMinAmtEl          = document.querySelector('#ug-bot-qt-rare-minamt');
+        qtBulletValueEnabledInput = document.querySelector('#ug-bot-qt-bullet-value-enabled');
+        qtBulletValueMaxPtsEl   = document.querySelector('#ug-bot-qt-bullet-value-maxpts');
+        qtBulletValueMinAmtEl   = document.querySelector('#ug-bot-qt-bullet-value-minamt');
         qtCarsIntervalEl        = document.querySelector('#ug-bot-qt-cars-interval');
         qtPerkExtendEnabledInput = document.querySelector('#ug-bot-qt-perk-extend-enabled');
         qtPerkExtendMinsEl      = document.querySelector('#ug-bot-qt-perk-extend-mins');
@@ -11838,9 +14654,89 @@
 
         applyPersonalityDefaults();
         if (state.enabled) startHeartbeat();
+        setSetting('autoBuyGunPending', false); // clear any stale lock from previous session
+
+        // Initialise lastBgCheck for BG Farm players that have never been checked
+        // so the interval fires after the configured time, not immediately on startup
+        if (state.killBgCheckEnabled) {
+            const _players = state.killPlayers || [];
+            let _changed = false;
+            for (const _p of _players) {
+                if (isPlayerBgFarmEnabled(_p.name) && !_p.lastBgCheck) {
+                    _p.lastBgCheck = now();
+                    _changed = true;
+                }
+            }
+            if (_changed) saveKillPlayers(_players);
+        }
 
         addLiveLog('Script loaded');
         if (personalityJustGenerated) addLiveLog(`[Personality] Deposit: $${PERSONALITY.depositThreshold.toLocaleString()} | Drug mult: ${PERSONALITY.drugDepositMult}x | Scan: ${PERSONALITY.scanIntervalMins}min | Visit: ${PERSONALITY.idleVisitChancePct}%`);
+
+        // Inject "Repair All" button on the cars page — sits after the Sell button
+        if (isCarsPage() || hasCarsPageMarkers()) {
+            const repairBtn = document.querySelector('form input[type="submit"][name="repair"][value="Repair"]');
+            if (repairBtn && !document.querySelector('#ug-bot-repair-all-btn')) {
+                const repairAllBtn = document.createElement('input');
+                repairAllBtn.type  = 'button';
+                repairAllBtn.value = 'Repair All';
+                repairAllBtn.id    = 'ug-bot-repair-all-btn';
+                repairAllBtn.setAttribute('data-role', 'none');
+                repairAllBtn.style.cssText = 'margin-left:4px;cursor:pointer;';
+
+                repairAllBtn.addEventListener('click', async () => {
+                    if (repairAllBtn.disabled) return;
+                    repairAllBtn.disabled = true;
+                    repairAllBtn.value    = 'Repairing...';
+
+                    const delay = ms => new Promise(r => setTimeout(r, ms));
+                    let totalRepaired = 0;
+
+                    try {
+                        // Read total pages from current page DOM first
+                        const pageMatch = document.body.innerHTML.match(/Page <u>1<\/u> of <u>([\d,]+)<\/u>/);
+                        const totalPages = pageMatch ? parseInt(pageMatch[1].replace(/,/g, '')) : 1;
+                        addLiveLog(`Repair All: ${totalPages} page(s) to process`);
+
+                        for (let page = 1; page <= totalPages; page++) {
+                            repairAllBtn.value = `Repairing... (${page}/${totalPages})`;
+
+                            const resp = await fetch(`/?p=cars&page=${page}`, { credentials: 'include' });
+                            const text = await resp.text();
+                            const doc  = new DOMParser().parseFromString(text, 'text/html');
+
+                            const checkboxes = [...doc.querySelectorAll('input[type="checkbox"][name="id[]"]')];
+                            if (!checkboxes.length) continue;
+
+                            const body = checkboxes.map(cb => `id[]=${cb.value}`).join('&') + '&repair=Repair';
+                            await fetch(`/?p=cars&page=${page}`, {
+                                method: 'POST',
+                                credentials: 'include',
+                                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                                body
+                            });
+
+                            totalRepaired += checkboxes.length;
+                            if (page < totalPages) await delay(300);
+                        }
+
+                        addLiveLog(`Repair All: done — repaired ${totalRepaired} car(s)`);
+                    } catch (e) {
+                        addLiveLog(`Repair All: error — ${e.message}`);
+                    }
+
+                    repairAllBtn.value    = 'Repair All';
+                    repairAllBtn.disabled = false;
+                });
+
+                // Find the tac mb container and append a new inline button div to it
+                const wrapper = document.createElement('div');
+                wrapper.className = 'i in';
+                wrapper.appendChild(repairAllBtn);
+                const container = repairBtn.closest('.tac.mb');
+                if (container) container.appendChild(wrapper);
+            }
+        }
 
         // Inject per-table Select All buttons on the perks page
         if (document.querySelectorAll('.sortable-table').length > 0) {
