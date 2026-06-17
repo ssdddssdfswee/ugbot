@@ -15,6 +15,27 @@
 (function () {
     'use strict';
 
+    // ── Checkbox/radio zoom fix ──────────────────────────────────────────────
+    // Chromium browsers apply a pop/zoom animation to checkbox/radio inputs.
+    // Injected at document-start (before the load watchdog) so the style is
+    // present before any checkboxes/radios are painted.
+    try {
+        const ugCheckboxFixStyle = document.createElement('style');
+        ugCheckboxFixStyle.textContent = `
+            input[type="checkbox"],
+            input[type="radio"] {
+                transition: none !important;
+                animation: none !important;
+                transform: none !important;
+                scale: 1 !important;
+                zoom: 1 !important;
+            }
+        `;
+        document.documentElement.appendChild(ugCheckboxFixStyle);
+    } catch (e) {
+        console.warn('[UG-BOT] Could not inject checkbox/radio zoom fix:', e);
+    }
+
     // ── Page load watchdog ────────────────────────────────────────────────────
     // If the page never fires the load event (stuck mid-load due to lag),
     // navigate to the same URL as a fresh GET after 60 seconds.
