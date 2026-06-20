@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Full UG Bot
 // @namespace    ug-bot
-// @version      2.6.0
+// @version      2.6.1
 // @description  Auto-runs crimes, GTA, melting, repair, missions, drug running with Swiss Bank management, live log, session stats, action checkboxes, jail handling, runtime tracking, melt pagination, repair cycles, automatic CTC solving, and point-spending features.
 // @match        *://www.underworldgangsters.com/*
 // @match        *://underworldgangsters.com/*
@@ -594,7 +594,7 @@
     // BOT CONFIG
     // =========================================================================
 
-    const SCRIPT_VERSION = '2.6.0';
+    const SCRIPT_VERSION = '2.6.1';
 
     const CRIME_DEFS = [
         { id: 'gang', name: 'Gang Activities' },
@@ -1145,6 +1145,8 @@
         set penaltyDropsAt(v)         { setSetting('penaltyDropsAt', Number(v) || 0); },
         get pendingPenaltyPage()      { return !!getSetting('pendingPenaltyPage', false); },
         set pendingPenaltyPage(v)     { setSetting('pendingPenaltyPage', !!v); },
+        get killPenaltyPendingAction(){ return getSetting('killPenaltyPendingAction', null); },
+        set killPenaltyPendingAction(v){ setSetting('killPenaltyPendingAction', v); },
 
         // Kill BG check / shoot loop settings
         get killBgCheckEnabled()       { return !!getSetting('killBgCheckEnabled', false); },
@@ -3139,6 +3141,71 @@
         if (!threshold || threshold <= 0) return false;
         const penalty = getKillPenaltyMultiplier();
         return penalty >= threshold;
+    }
+
+    function formatPenaltyWait(ts) {
+        const ms = Math.max(0, Number(ts || 0) - now());
+        const mins = Math.ceil(ms / 60000);
+        const hrs = Math.floor(mins / 60);
+        const rem = mins % 60;
+        if (hrs > 0) return `${hrs}h ${rem}m`;
+        return `${Math.max(1, mins)}m`;
+    }
+
+    function buildPenaltyDeferredAction(action) {
+        if (!action) return null;
+        const a = { ...action, penaltyDeferred: true, penaltyDeferredAt: now() };
+
+        // If a bodyguard kill is delayed by penalty, do not shoot the BG hours
+        // later on stale verification. Re-check the original target first; if
+        // they swapped/dropped BG, the normal BG Farm/BG Check result path will
+        // adapt safely.
+        if (a.stage === 'bg_shoot' && a.bgFor) {
+            return {
+                stage: 'bgcheck',
+                targetName: a.bgFor,
+                shootAfterBg: !!a.shootAfterBg || isPlayerShootEnabled(a.bgFor),
+                force: true,
+                penaltyDeferred: true,
+                penaltyDeferredAt: now(),
+                waitingBg: a.targetName
+            };
+        }
+
+        // Clean BG-check targets should also be re-checked after a long penalty
+        // wait, because they may have hired/swapped a BG in the meantime.
+        if ((a.stage === 'fetch_profile' || a.stage === 'shoot_result') && a.targetName && isBgCheckable(a.targetName)) {
+            return {
+                stage: 'bgcheck',
+                targetName: a.targetName,
+                shootAfterBg: true,
+                force: true,
+                penaltyDeferred: true,
+                penaltyDeferredAt: now()
+            };
+        }
+
+        return a;
+    }
+
+    function deferKillForPenalty(action, label) {
+        const deferred = buildPenaltyDeferredAction(action);
+        if (deferred) state.killPenaltyPendingAction = deferred;
+
+        state.pendingKillAction = null;
+        state.killLoopActive = false;
+        state.killBgSpamPaused = false;
+        state.killBgWaitUntil = 0;
+
+        const dropAt = state.penaltyDropsAt;
+        if (dropAt && dropAt > now()) {
+            addLiveLog(`Kill loop: penalty too high — waiting ${formatPenaltyWait(dropAt)} before ${label}`);
+            return false;
+        }
+
+        addLiveLog(`Kill loop: penalty too high — calculating when to resume ${label}`);
+        if (!state.pendingPenaltyPage) state.pendingPenaltyPage = true;
+        return true;
     }
 
     // -------------------------------------------------------------------------
@@ -6229,6 +6296,29 @@ async function doQTPerkRedeem() {
             lastBulletFactoryPauseLogAt  = t;
             addLiveLog(message);
         }
+    }
+
+    const BULLET_FACTORY_NAV_RETRY_MS = 8000;
+
+    function isBulletFactoryNavRecentlyIssued(run, navKey) {
+        const issuedAt = Number(run?.navIssuedAt || 0);
+        return run?.navKey === navKey && issuedAt > 0 && (now() - issuedAt) < BULLET_FACTORY_NAV_RETRY_MS;
+    }
+
+    function markBulletFactoryNavIssued(run, navKey) {
+        state.pendingBulletRun = {
+            ...run,
+            navKey,
+            navIssuedAt: now()
+        };
+    }
+
+    function clearBulletFactoryNavMarker(run) {
+        if (!run || (!run.navKey && !run.navIssuedAt)) return run;
+        const cleaned = { ...run };
+        delete cleaned.navKey;
+        delete cleaned.navIssuedAt;
+        return cleaned;
     }
 
     // Fetches the Global Owners page and returns countries with 300+ bullet stock
@@ -9698,15 +9788,19 @@ async function doQTPerkRedeem() {
             const bgName = pendingNow.targetName;
             const bgFor  = pendingNow.bgFor;
 
-            // If penalty too high, skip the bodyguard shoot — BG check only, no kills
+            // If penalty is too high, defer the BG kill until the penalty drops.
+            // Keep BG Farm/BG Spam checks alive; only the real kill shot is paused.
             if (isKillPenaltyTooHigh()) {
-                addLiveLog(`Kill loop: penalty too high — skipping bodyguard shoot for ${bgName}`);
-                state.pendingKillAction = null;
-                // Clear bgShootQueued so it can be re-queued when penalty drops
-                const plsBg = state.killPlayers || [];
-                const bgIdx = plsBg.findIndex(p => p.name.toLowerCase() === bgName.toLowerCase());
-                if (bgIdx !== -1) { delete plsBg[bgIdx].bgShootQueued; saveKillPlayers(plsBg); }
-                // Don't navigate — let loop continue to next BG-due player
+                const needPenaltyPage = deferKillForPenalty(
+                    { stage: 'bg_shoot', targetName: bgName, bgFor, shootAfterBg: pendingNow.shootAfterBg },
+                    `shooting bodyguard ${bgName}`
+                );
+                if (needPenaltyPage) {
+                    await wait(navRand());
+                    gotoPage('kill-penalty');
+                    return;
+                }
+                await resumeBgSpamAfterCheck();
                 return;
             }
 
@@ -10090,6 +10184,38 @@ async function doQTPerkRedeem() {
                         .map(a => { try { return new URL(a.getAttribute('href'), window.location.href).searchParams.get('u').toLowerCase(); } catch(_){ return ''; } })
                         .filter(Boolean)
                 );
+
+                // If every actionable target is blocked by a found BG but the penalty
+                // is too high, this is a penalty wait — not a 3-hour BG search wait.
+                // Release the active bgcheck state so Bullet Factory/crimes can continue,
+                // while BG Farm/BG Spam interval checks remain free to run.
+                const foundBgBlockedByPenalty = players.find(p => {
+                    if (p.status !== KILL_STATUS.ALIVE || !p.bodyguard) return false;
+                    if (!isPlayerBgFarmEnabled(p.name) && !isPlayerBgCheckEnabled(p.name) && !isPlayerShootEnabled(p.name)) return false;
+                    return foundNamesOnPage.has(p.bodyguard.toLowerCase());
+                });
+                if (foundBgBlockedByPenalty && isKillPenaltyTooHigh()) {
+                    let needPenaltyPage = false;
+                    if (!state.killPenaltyPendingAction) {
+                        needPenaltyPage = deferKillForPenalty(
+                            { stage: 'bgcheck', targetName: foundBgBlockedByPenalty.name, shootAfterBg: isPlayerShootEnabled(foundBgBlockedByPenalty.name), force: true, waitingBg: foundBgBlockedByPenalty.bodyguard },
+                            `re-checking ${foundBgBlockedByPenalty.name} before shooting ${foundBgBlockedByPenalty.bodyguard}`
+                        );
+                    } else {
+                        state.pendingKillAction = null;
+                        state.killLoopActive = false;
+                        state.killBgSpamPaused = false;
+                        state.killBgWaitUntil = 0;
+                    }
+                    if (needPenaltyPage) {
+                        await wait(navRand());
+                        gotoPage('kill-penalty');
+                        return;
+                    }
+                    await resumeBgSpamAfterCheck();
+                    return;
+                }
+
                 let earliestExpiry = 0;
                 const pendingSearchRows = [...document.querySelectorAll('.bgl.i.wb .bgm.chs.pd')];
                 for (const p of players) {
@@ -10349,11 +10475,22 @@ async function doQTPerkRedeem() {
 
     // Handles the full shoot flow — shoots targetName, then BG checks bgFor if set
     async function doKillShootFlow(targetName, bgFor = null) {
-        // Block all kills when penalty too high — only BG check shots (1 bullet) are allowed
+        // Block all real kills when penalty is too high — 1-bullet BG checks remain allowed.
+        // Store a safe resume action instead of clearing the kill entirely. For BG-checkable
+        // targets, resume with another 1-bullet check so we do not kill on stale no-BG data.
         if (isKillPenaltyTooHigh()) {
-            addLiveLog(`Kill loop: penalty too high — skipping kill of ${targetName}`);
-            state.pendingKillAction = null;
-            // Don't navigate away — let handleKillLoopPage continue to next BG-due player
+            const resumeAction = bgFor
+                ? { stage: 'bgcheck', targetName: bgFor, shootAfterBg: isPlayerShootEnabled(bgFor), force: true, waitingBg: targetName }
+                : (isBgCheckable(targetName)
+                    ? { stage: 'bgcheck', targetName, shootAfterBg: true, force: true }
+                    : { stage: 'fetch_profile', targetName, bgFor });
+            const needPenaltyPage = deferKillForPenalty(resumeAction, `killing ${targetName}`);
+            if (needPenaltyPage) {
+                await wait(navRand());
+                gotoPage('kill-penalty');
+                return;
+            }
+            await resumeBgSpamAfterCheck();
             return;
         }
 
@@ -10672,6 +10809,48 @@ async function doQTPerkRedeem() {
             return;
         }
 
+        // Resume any kill/BG kill action that was deferred only because the
+        // kill penalty was above the user's threshold. While still above threshold,
+        // this deliberately does not activate the kill loop, so crimes/Bullet Factory
+        // and 1-bullet BG Farm/BG Spam checks can continue.
+        const penaltyPendingAction = state.killPenaltyPendingAction;
+        if (penaltyPendingAction && !state.pendingKillAction && !state.killLoopActive) {
+            if (state.killPenaltyThreshold <= 0 || !isKillPenaltyTooHigh()) {
+                addLiveLog('Kill loop: penalty is below threshold — resuming deferred kill/BG action');
+                const restoredPenaltyAction = { ...penaltyPendingAction };
+                delete restoredPenaltyAction.penaltyDeferred;
+                state.pendingKillAction = restoredPenaltyAction;
+                state.killPenaltyPendingAction = null;
+                state.killBgWaitUntil = 0;
+                state.killLoopActive = true;
+            } else if (state.penaltyDropsAt && now() >= state.penaltyDropsAt && !isKillPage() && !isKillPenaltyPage()) {
+                addLiveLog('Kill loop: penalty drop timer elapsed — checking kill page');
+                state.penaltyDropsAt = 0;
+                gotoPage('kill');
+                return;
+            } else if (!state.penaltyDropsAt && !state.pendingPenaltyPage && !isKillPenaltyPage()) {
+                addLiveLog('Kill loop: deferred kill/BG action waiting on penalty — calculating drop time');
+                state.pendingPenaltyPage = true;
+                await wait(navRand());
+                gotoPage('kill-penalty');
+                return;
+            }
+        }
+
+        // v19: a deferred penalty wait must not leave the kill loop marked
+        // active with no concrete pending action. That stale state causes the
+        // crimes ↔ kill bounce and keeps Bullet Factory paused even though the
+        // bot is only waiting for penalty to drop. The scheduler below will
+        // re-arm the loop when a real BG check / legal kill is due.
+        if (state.killLoopActive && !state.pendingKillAction && !state.killBgShootPending) {
+            const penaltyBlockedWait = !!state.killPenaltyPendingAction && isKillPenaltyTooHigh();
+            const bgSearchWait       = state.killBgWaitUntil > Date.now();
+            if (penaltyBlockedWait || bgSearchWait) {
+                state.killLoopActive   = false;
+                state.killBgSpamPaused = false;
+            }
+        }
+
         // ── Dedicated loop intercepts ─────────────────────────────────────────
         // When a reset loop is active the bot ignores all other page logic and
         // routes exclusively to the relevant page. Jail handling is still active
@@ -10883,6 +11062,10 @@ async function doQTPerkRedeem() {
                     const isSearchReady = (bgPlayer.expectedFoundAt !== undefined && bgPlayer.expectedFoundAt <= nowMs) ||
                                           (bgPlayer.expectedFoundAt === undefined && bgPlayer.searchExpiresAt && bgPlayer.searchExpiresAt > nowMs);
                     if (!isSearchReady) return false;
+                    // A found BG is only immediate work if we are allowed to kill them.
+                    // If penalty is too high, the interval check above may still fire,
+                    // but do not keep re-arming the loop just to attempt the blocked BG kill.
+                    if (isKillPenaltyTooHigh()) return false;
                     return true;
                 }
                 return false;
@@ -11234,14 +11417,25 @@ async function doQTPerkRedeem() {
                 }
 
                 if (run.stage === 'buy') {
-                    // On weaponry page — buy bullets
+                    // On weaponry page — buy bullets.
+                    // v20: when the game/browser lags after navigation, do not issue
+                    // the same factory navigation multiple times per second. Retry
+                    // occasionally, but otherwise wait for the page response to settle.
                     const target = run.targets[0];
                     const onBuyPage = url.includes('p=weaponry') && url.includes('show=bullet');
                     if (target && !onBuyPage) {
+                        const navKey = `buy:${target.countryId}:${target.country}`;
+                        if (isBulletFactoryNavRecentlyIssued(run, navKey)) {
+                            return;
+                        }
                         addLiveLog(`Bullet factory: navigating to bullet factory in ${target?.country}`);
+                        markBulletFactoryNavIssued(run, navKey);
                         await wait(navRand());
                         navigateToUrl(getBulletFactoryUrl(target.countryId));
                         return;
+                    }
+                    if (onBuyPage && (run.navKey || run.navIssuedAt)) {
+                        state.pendingBulletRun = clearBulletFactoryNavMarker(run);
                     }
                     await handleBulletFactoryPage();
                     return;
@@ -11277,7 +11471,7 @@ async function doQTPerkRedeem() {
                 const playerReady = getKillPlayers().some(p =>
                     p.expectedFoundAt && now() >= p.expectedFoundAt
                 );
-                if (playerReady && !isKillPenaltyTooHigh()) {
+                if (playerReady) {
                     addLiveLog('Kill loop: player search timer elapsed — navigating to kill page');
                     gotoPage('kill');
                     return;
@@ -14884,9 +15078,12 @@ async function doQTPerkRedeem() {
                 const bgPlayer = getKillPlayers().find(b => b.name && b.name.toLowerCase() === p.bodyguard.toLowerCase());
                 return bgPlayer && (bgPlayer.status === KILL_STATUS.ALIVE || bgPlayer.status === KILL_STATUS.UNKNOWN);
             });
-            // Allow kill loop for BG checks even when penalty too high
-            // Kill-only players are blocked by doKillShootFlow when penalty exceeded
-            state.killLoopActive = hasDueBgCheck || hasPendingBg || (!isKillPenaltyTooHigh() && hasKillOnly);
+            // Allow 1-bullet BG checks even when penalty is high, but do not
+            // activate the kill loop merely because a found BG is waiting to be shot.
+            // Actual BG/original kill shots resume only after the penalty is below
+            // the user's threshold.
+            const penaltyTooHighNow = isKillPenaltyTooHigh();
+            state.killLoopActive = hasDueBgCheck || (!penaltyTooHighNow && (hasPendingBg || hasKillOnly));
         }
 
         // Penalty page navigation is handled within handleKillPage / handleKillLoopPage
