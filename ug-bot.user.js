@@ -1,12 +1,14 @@
 // ==UserScript==
 // @name         Full UG Bot
 // @namespace    ug-bot
-// @version      2.3.4
+// @version      2.6.0
 // @description  Auto-runs crimes, GTA, melting, repair, missions, drug running with Swiss Bank management, live log, session stats, action checkboxes, jail handling, runtime tracking, melt pagination, repair cycles, automatic CTC solving, and point-spending features.
 // @match        *://www.underworldgangsters.com/*
 // @match        *://underworldgangsters.com/*
 // @grant        GM_getValue
 // @grant        GM_setValue
+// @grant        GM_getTab
+// @grant        GM_saveTab
 // @run-at       document-start
 // @updateURL    https://raw.githubusercontent.com/ssdddssdfswee/ugbot/main/ug-bot.user.js
 // @downloadURL  https://raw.githubusercontent.com/ssdddssdfswee/ugbot/main/ug-bot.user.js
@@ -45,7 +47,25 @@
             window.location.href = window.location.href;
         }
     }, 60000);
-    window.addEventListener('load', () => clearTimeout(_ugLoadWatchdog));
+    window.addEventListener('load', () => {
+        clearTimeout(_ugLoadWatchdog);
+        try {
+            const _ugErrorTitles = [
+                'err_', 'problem loading', 'server not found',
+                'site can\'t be reached', 'unable to connect',
+                'connection timed out', 'connection refused',
+                'this page isn\'t working', 'hmm. we\'re having trouble'
+            ];
+            const _ugTitle = (document.title || '').toLowerCase();
+            const _ugIsErrorPage = _ugErrorTitles.some(e => _ugTitle.includes(e))
+                || (!document.querySelector('#nav') && document.body && document.body.childElementCount < 5);
+            if (_ugIsErrorPage) {
+                setTimeout(() => { window.location.href = window.location.href; }, 15000);
+            }
+        } catch (e) {
+            console.warn('[UG-BOT] Connection error watchdog failed:', e);
+        }
+    });
 
     // Suppress native alert() dialogs from the game's own scripts.
     // Tampermonkey sandboxes the userscript window from the page window, so
@@ -574,7 +594,7 @@
     // BOT CONFIG
     // =========================================================================
 
-    const SCRIPT_VERSION = '2.3.0';
+    const SCRIPT_VERSION = '2.6.0';
 
     const CRIME_DEFS = [
         { id: 'gang', name: 'Gang Activities' },
@@ -629,7 +649,7 @@
 
     const KILL_SCANNER_SEARCH_HOURS  = 24;   // Always search for 24 hours
     const KILL_SCANNER_RESCAN_MS     = 23 * 60 * 60 * 1000; // Re-search alive players after 23hrs (1hr buffer before 24hr expiry)
-    const KILL_SCANNER_PROTECTED_RESCAN_MS = 60 * 60 * 1000; // Re-check protected players every 1hr (failsafe)
+    const KILL_SCANNER_PROTECTED_RESCAN_MS = 60 * 60 * 1000; // Re-check original targets every 1hr (failsafe)
 
     // Player statuses
     const KILL_STATUS = {
@@ -1128,6 +1148,8 @@
 
         // Kill BG check / shoot loop settings
         get killBgCheckEnabled()       { return !!getSetting('killBgCheckEnabled', false); },
+        get killDebugEnabled()         { return !!getSetting('killDebugEnabled', true); },
+        set killDebugEnabled(v)        { setSetting('killDebugEnabled', !!v); },
         get killSearchFormRetries()    { return getSetting('killSearchFormRetries', 0); },
         set killSearchFormRetries(v)   { setSetting('killSearchFormRetries', Number(v)); },
         get killBgSearchWaits()        { return getSetting('killBgSearchWaits', 0); },
@@ -1196,6 +1218,12 @@
 
         get jailReleasesAt()       { return Number(getSetting('jailReleasesAt', 0)); },
         set jailReleasesAt(v)      { setSetting('jailReleasesAt', Number(v)); },
+
+        get jailLastTimerMs()      { return Number(getSetting('jailLastTimerMs', 0)); },
+        set jailLastTimerMs(v)     { setSetting('jailLastTimerMs', Number(v)); },
+
+        get jailLastTimerSeenAt()  { return Number(getSetting('jailLastTimerSeenAt', 0)); },
+        set jailLastTimerSeenAt(v) { setSetting('jailLastTimerSeenAt', Number(v)); },
 
         get pendingMissionCheck()  { return getSetting('pendingMissionCheck', null); },
         set pendingMissionCheck(v) { setSetting('pendingMissionCheck', v); },
@@ -1754,6 +1782,13 @@
     }
     window.addEventListener('beforeunload', saveScrollPositions);
 
+    function navigateToUrl(rawUrl) {
+        // Do not attach bot identity to the URL. The active bot window is tracked
+        // with Tampermonkey per-tab storage instead, so normal navigation and
+        // copied links stay clean.
+        window.location.href = String(rawUrl);
+    }
+
     function gotoPage(pageName, extraParams = {}) {
 
         saveScrollPositions();
@@ -1779,7 +1814,7 @@
         }
 
         addLiveLog(`Navigating to ${pageName}${extraParams.page ? ' page ' + extraParams.page : ''}`);
-        window.location.href = url.toString();
+        navigateToUrl(url.toString());
     }
 
     function gotoCleanMeltPage(pageNum = 1) {
@@ -2008,7 +2043,10 @@
         if (!gtaInfo.exists) return false;
 
         if (gtaInfo.available) {
-            if (!isInternalGTAReady()) state.nextGTAReadyAt = now();
+            // Only clear the cooldown if there isn't one already active.
+            // If nextGTAReadyAt is in the future, a steal just happened and the
+            // quick link hasn't updated yet — don't wipe the cooldown.
+            if (isInternalGTAReady()) state.nextGTAReadyAt = now();
             return true;
         }
 
@@ -2514,7 +2552,7 @@
                 const target = run?.targets?.[0];
                 if (target) {
                     state.pendingBulletRun = { ...run, stage: 'buy' };
-                    window.location.href = getBulletFactoryUrl(target.countryId);
+                    navigateToUrl(getBulletFactoryUrl(target.countryId));
                 } else {
                     state.pendingBulletRun = null;
                     gotoPage('crimes');
@@ -2542,7 +2580,7 @@
                 const target = run?.targets?.[0];
                 if (target) {
                     state.pendingBulletRun = { ...run, stage: 'buy' };
-                    window.location.href = getBulletFactoryUrl(target.countryId);
+                    navigateToUrl(getBulletFactoryUrl(target.countryId));
                 } else {
                     state.pendingBulletRun = null;
                     gotoPage('crimes');
@@ -2843,7 +2881,7 @@
             }
             addLiveLog('Drug run: car too damaged — navigating to car page to repair');
             await wait(navRand());
-            window.location.href = new URL(carLink.getAttribute('href'), window.location.href).toString();
+            navigateToUrl(new URL(carLink.getAttribute('href'), window.location.href).toString());
             return;
         }
 
@@ -3123,6 +3161,7 @@
             list = list.filter(n => n.toLowerCase() !== lower);
         }
         state.killBgCheckPlayers = list;
+        if (enabled) clearKillWakeBlockersForPlayer(name, { clearBgCheck: true, clearFarmWait: true });
     }
 
     // Returns true if a player has shoot enabled (per-player toggle)
@@ -3141,6 +3180,7 @@
             list = list.filter(n => n.toLowerCase() !== lower);
         }
         state.killShootPlayers = list;
+        if (enabled) clearKillWakeBlockersForPlayer(name, { clearBgCheck: isBgCheckable(name), clearFarmWait: true, clearKillAttempt: true });
     }
 
     // Returns true if a player has BG farm enabled (per-player toggle)
@@ -3154,9 +3194,46 @@
     }
 
     // Returns true if a player should receive periodic BG checks —
-    // either via BG Check toggle or BG Farm toggle
+    // either via BG Check toggle or BG Farm toggle.
+    // Bodyguards themselves are not BG-checkable: in UG a BG cannot have their own BG.
     function isBgCheckable(name) {
         return isPlayerBgCheckEnabled(name) || isPlayerBgFarmEnabled(name);
+    }
+
+    // After a fresh 1-bullet check returns no BG, only kill if Kill is ticked.
+    // BG Farm auto-ticks Kill on the original player, so BG Farm+Kill still kills clean targets.
+    function shouldKillAfterCleanBgCheck(name) {
+        return !!name && isPlayerShootEnabled(name);
+    }
+
+    function clearKillWakeBlockersForPlayer(name, opts = {}) {
+        const players = state.killPlayers || [];
+        const lower = String(name || '').toLowerCase();
+        const idx = players.findIndex(p => p.name && p.name.toLowerCase() === lower);
+        if (idx !== -1) {
+            if (opts.clearBgCheck) players[idx].lastBgCheck = 0;
+            if (opts.clearFarmWait) delete players[idx].bgFarmWaitUntil;
+            if (opts.clearBodyguard) delete players[idx].bodyguard;
+            if (opts.clearKillAttempt) delete players[idx].lastKillAttempt;
+            delete players[idx].bgVerifyInFlight;
+            saveKillPlayers(players);
+        }
+        state.killBgWaitUntil       = 0;
+        state.killLoopCooldownUntil = 0;
+        if (state.killBgCheckEnabled) state.killLoopActive = true;
+    }
+
+    function queueBgFarmCheck(targetName, shootAfterBg = false, extra = {}) {
+        state.pendingKillAction = {
+            stage: 'bg_farm_check',
+            targetName,
+            shootAfterBg: !!shootAfterBg,
+            ...extra
+        };
+        state.killBgWaitUntil       = 0;
+        state.killLoopCooldownUntil = 0;
+        state.killLoopActive        = true;
+        state.killBgSpamPaused      = true;
     }
 
     // Sets per-player BG farm toggle
@@ -3181,6 +3258,12 @@
             }
         }
         state.killBgFarmPlayers = list;
+        if (enabled) {
+            // BG Farm is intentionally BG Farm + Kill in practice:
+            // keep the per-player Kill toggle enabled so a clean target is killed after BGs are gone.
+            if (!isPlayerShootEnabled(name)) setPlayerShootEnabled(name, true);
+            clearKillWakeBlockersForPlayer(name, { clearBgCheck: true, clearFarmWait: true, clearKillAttempt: true });
+        }
         updateBgSpamDropdown();
         syncBgSpamState();
     }
@@ -3447,7 +3530,7 @@
         addLiveLog(`Kill travel: navigating to car detail page for ${targetCountry}`);
         // Store travelCarUrl and move stage to 'travel_car' — we're now on the car detail page
         state.pendingKillAction = { ...state.pendingKillAction, travelTo: targetCountry, travelCarUrl, stage: 'travel_car' };
-        window.location.href = travelCarUrl;
+        navigateToUrl(travelCarUrl);
         return true;
     }
 
@@ -3495,7 +3578,7 @@
     // 2. Protected — always search whenever the loop runs for any reason
     // 3. Alive with 3hrs or less remaining — re-search to keep active
     // 4. Protected standalone 1hr failsafe — handled by #2 above since
-    //    protected players are always priority when the loop activates
+    //    original targets are always priority when the loop activates
     // 5. Unkillable — never search
     // Pending players (searchExpiresAt > now+2.5hrs) are skipped — they're already
     // in the game's search queue and just need time to complete.
@@ -3567,9 +3650,14 @@
                 // has a chance to read the accurate timer from the page.
                 // syncKillExpiryFromPage will overwrite this with the real value.
                 players[idx].searchExpiresAt = now() + (KILL_SCANNER_SEARCH_HOURS * 60 * 60 * 1000);
+                // Search was just submitted/confirmed. Until the player appears
+                // in Players Found, treat them as pending so BG Farm cannot
+                // monopolise the kill page and starve the normal search loop.
+                players[idx].pendingSearch = true;
             } else {
                 // Clear stored expiry when status changes to non-alive
                 delete players[idx].searchExpiresAt;
+                delete players[idx].pendingSearch;
             }
         }
 
@@ -3686,6 +3774,48 @@
         return matched ? totalMs : null;
     }
 
+
+    // Returns the real completion deadline for a player that is still in the
+    // game's pending "Your men are out searching for" queue. Do not use
+    // searchExpiresAt for this: immediately after submitting a search the bot
+    // stores a 24h placeholder there until the player is actually found, so it
+    // can look like "found in ~1320m" even when the visible pending timer is
+    // only ~45m. expectedFoundAt and the visible pending row are the true source
+    // for pending-search completion.
+    function getPendingSearchExpectedAt(name, fallbackMs = 3 * 60 * 60 * 1000) {
+        const nameLower = String(name || '').toLowerCase();
+        const nowMs = now();
+        const players = state.killPlayers || [];
+        const p = players.find(pl => pl.name && pl.name.toLowerCase() === nameLower);
+
+        if (p && p.expectedFoundAt && p.expectedFoundAt > nowMs) {
+            return p.expectedFoundAt;
+        }
+
+        const pendingRow = [...document.querySelectorAll('.bgl.i.wb .bgm.chs.pd')].find(row => {
+            const b = row.querySelector('b');
+            return b && textOf(b).toLowerCase() === nameLower;
+        });
+
+        if (pendingRow) {
+            const timerSpan = pendingRow.querySelector('.chd');
+            const foundInMs = timerSpan ? parseLostInMs(textOf(timerSpan)) : null;
+            if (foundInMs != null) {
+                const expectedAt = nowMs + foundInMs;
+                const idx = players.findIndex(pl => pl.name && pl.name.toLowerCase() === nameLower);
+                if (idx !== -1) {
+                    players[idx].pendingSearch = true;
+                    players[idx].expectedFoundAt = expectedAt;
+                    saveKillPlayers(players);
+                }
+                return expectedAt;
+            }
+        }
+
+        if (p && p.pendingSearch) return nowMs + fallbackMs;
+        return nowMs + fallbackMs;
+    }
+
     // Reads the "Players found" and "Searching for" sections on the kill page and:
     // 1. Updates each known player's stored expiry time with the accurate "Lost in X" value
     // 2. Adds any unknown players found there to the list as "alive" — cross-device sync
@@ -3755,7 +3885,7 @@
                             const targetPlayer = players.find(t =>
                                 t.name && p.bgFor && t.name.toLowerCase() === p.bgFor.toLowerCase()
                             );
-                            if (targetPlayer && isPlayerShootEnabled(targetPlayer.name)) {
+                            if (targetPlayer && isPlayerShootEnabled(targetPlayer.name) && !isPlayerBgFarmEnabled(targetPlayer.name)) {
                                 const waitUntil = now() + foundInMs + (5 * 60 * 1000);
                                 if (state.killBgWaitUntil < waitUntil) {
                                     state.killBgWaitUntil = waitUntil;
@@ -3778,8 +3908,9 @@
                 const pending3hr = now() + (3 * 60 * 60 * 1000);
                 if (!players[idx].searchExpiresAt || players[idx].searchExpiresAt < pending3hr) {
                     players[idx].searchExpiresAt = pending3hr;
-                    players[idx].status = KILL_STATUS.ALIVE;
                 }
+                players[idx].status = KILL_STATUS.ALIVE;
+                players[idx].pendingSearch = true;
             }
         }
 
@@ -3795,6 +3926,10 @@
             .filter(Boolean));
         for (const p of players) {
             if (!p.bodyguard || !isPlayerShootEnabled(p.name)) continue;
+            // BG Farm must keep checking the original target on its interval even while
+            // the current BG is being searched, so never use the global BG wait to
+            // suppress BG Farm interval checks.
+            if (isPlayerBgFarmEnabled(p.name)) continue;
             const bgNameLower = p.bodyguard.toLowerCase();
             if (pendingNames.has(bgNameLower) && !alreadyFoundNames.has(bgNameLower)) {
                 // Find the pending row to get the timer
@@ -3869,7 +4004,8 @@
                     firstSeen:       now(),
                     searchCount:     1,
                     searchExpiresAt: expiresAt,
-                    country:         rowCountry
+                    country:         rowCountry,
+                    pendingSearch:   false
                 });
                 added++;
             } else {
@@ -3877,6 +4013,7 @@
                 if (players[idx].status !== KILL_STATUS.DEAD) {
                     players[idx].searchExpiresAt = expiresAt;
                     players[idx].status          = KILL_STATUS.ALIVE;
+                    players[idx].pendingSearch   = false;
                     if (rowCountry) players[idx].country = rowCountry;
                     // Clear expectedFoundAt — player is now in Players Found
                     if (players[idx].expectedFoundAt) {
@@ -3924,10 +4061,23 @@
             }
             const pa = state.pendingKillAction;
             if (pa && (pa.stage === 'bg_shoot' || pa.targetName === p.name)) continue;
-            // Don't re-queue if kill loop is already travelling to or handling this BG
-            if (pa && ['travel','travel_car','bg_farm_check','bg_farm_shoot','bg_farm_result'].includes(pa.stage) &&
-                (pa.targetName?.toLowerCase() === p.name.toLowerCase() ||
-                 pa.bgFor?.toLowerCase() === p.bgFor?.toLowerCase())) continue;
+            // Don't re-queue if kill loop is already travelling to or handling this BG —
+            // check by stage AND by whether bgFor/targetName match inside nested pending states
+            // (including afterTravel/afterVerify), not just a fixed stage list.
+            const paChainMatches = (obj) => {
+                if (!obj) return false;
+                if (obj.targetName?.toLowerCase() === p.name.toLowerCase()) return true;
+                if (obj.bgFor?.toLowerCase() === p.bgFor?.toLowerCase() && obj.bgFor) return true;
+                return paChainMatches(obj.afterTravel) || paChainMatches(obj.afterVerify);
+            };
+            if (pa && paChainMatches(pa)) continue;
+            if (paChainMatches(state.killBgShootPending)) continue;
+            // If a verify cycle was explicitly started for this target, don't clobber it —
+            // this flag persists across generic pendingKillAction states (e.g. 'bgcheck')
+            // and travel/drive cooldowns, and is only cleared when the verify chain
+            // actually completes (shoot fires) or genuinely aborts.
+            const bgForPlayerFlag = players.find(pl => pl.name.toLowerCase() === p.bgFor?.toLowerCase());
+            if (bgForPlayerFlag?.bgVerifyInFlight) continue;
             // Verify bodyguard is actually in Players Found right now before queuing shoot
             const inFoundNow = [...document.querySelectorAll('.bgl.i.wb .bgm.chs:not(.pd) a[href*="?p=profile&u="]')]
                 .some(a => { try { return new URL(a.getAttribute('href'), window.location.href).searchParams.get('u').toLowerCase() === p.name.toLowerCase(); } catch(_){ return false; } });
@@ -3943,7 +4093,8 @@
             }
             // Respect lastKillAttempt cooldown — don't re-queue if recently failed
             if (p.lastKillAttempt && (now() - p.lastKillAttempt) < 30000) continue;
-            addLiveLog(`Kill loop: bodyguard ${p.name} is now found — queuing shoot for ${p.bgFor}`);
+            const isFarmTarget = isPlayerBgFarmEnabled(p.bgFor);
+            addLiveLog(`Kill loop: bodyguard ${p.name} is now found — queuing shoot for ${p.bgFor}${isFarmTarget ? ' (BG Farm)' : ''}`);
             // Mark as queued so syncKillExpiryFromPage doesn't re-queue on every visit
             const bgQIdx = players.findIndex(pl => pl.name.toLowerCase() === p.name.toLowerCase());
             if (bgQIdx !== -1) { players[bgQIdx].bgShootQueued = true; saveKillPlayers(players); }
@@ -3953,10 +4104,10 @@
                 delete players[bgForIdx].bgFarmWaitUntil;
                 saveKillPlayers(players);
             }
-            state.pendingKillAction = { stage: 'bg_shoot', targetName: p.name, bgFor: p.bgFor, shootAfterBg: true };
+            state.pendingKillAction = { stage: 'bg_shoot', targetName: p.name, bgFor: p.bgFor, shootAfterBg: isPlayerShootEnabled(p.bgFor) };
             state.killLoopActive   = true;
             state.killBgWaitUntil  = 0;
-            if (isPlayerBgFarmEnabled(p.bgFor)) state.killBgSpamPaused = true;
+            if (isFarmTarget) state.killBgSpamPaused = true;
             break;
         }
 
@@ -4570,10 +4721,8 @@
                 setPlayerShootEnabled(name, isChecked);
             } else if (cb.classList.contains('ug-kill-bgfarm-cb')) {
                 setPlayerBgFarmEnabled(name, isChecked);
-                // Auto-tick Kill when BG Farm is enabled
-                if (isChecked && !isPlayerShootEnabled(name)) {
-                    setPlayerShootEnabled(name, true);
-                    // Visually tick the Kill checkbox for this player
+                // Auto-tick Kill visually as well as in storage.
+                if (isChecked) {
                     const killCb = cb.closest('tr')?.querySelector('.ug-kill-shoot-cb');
                     if (killCb) killCb.classList.add('checked');
                 }
@@ -5003,7 +5152,7 @@ async function doQTPerkRedeem() {
                     stage:    'travel',
                     travelTo: spamCountry,
                     targetName: spamTarget,
-                    afterTravel: { stage: 'bgcheck' }
+                    afterTravel: { stage: 'bg_farm_check', targetName: spamTarget, shootAfterBg: isPlayerShootEnabled(spamTarget) }
                 };
                 state.killLoopActive = true;
                 await wait(navRand());
@@ -5034,7 +5183,7 @@ async function doQTPerkRedeem() {
                     stage:    'travel',
                     travelTo: spamCountry,
                     targetName: spamTarget,
-                    afterTravel: { stage: 'bgcheck' }
+                    afterTravel: { stage: 'bg_farm_check', targetName: spamTarget, shootAfterBg: isPlayerShootEnabled(spamTarget) }
                 };
                 state.killLoopActive   = true;
                 state.killBgSpamPaused = true;
@@ -5328,8 +5477,18 @@ async function doQTPerkRedeem() {
                                     state.pendingKillAction = null;
                                     state.killLoopActive    = false;
                                 }
+                                const oldBgIdx = players.findIndex(p => p.name.toLowerCase() === oldBg.toLowerCase());
+                                if (oldBgIdx !== -1) {
+                                    delete players[oldBgIdx].bgShootQueued;
+                                    delete players[oldBgIdx].isBg;
+                                    delete players[oldBgIdx].bgFor;
+                                }
+                                delete players[tIdx].bgFarmWaitUntil;
+                                state.killBgWaitUntil = 0;
                             }
-                            players[tIdx].bodyguard = bgName; saveKillPlayers(players); renderKillList();
+                            players[tIdx].bodyguard = bgName;
+                            players[tIdx].lastBgCheck = now();
+                            saveKillPlayers(players); renderKillList();
                         }
                     }
 
@@ -5340,19 +5499,24 @@ async function doQTPerkRedeem() {
                         if (bIdx === -1) {
                             pl.push({ name: bgName, status: KILL_STATUS.UNKNOWN, isBg: true, bgFor: target });
                             saveKillPlayers(pl);
+                            state.killSearchLoopActive = true;
+                            state.killBgWaitUntil = 0;
                             addLiveLog(`BG Spam: added ${bgName} as unknown — kill scanner will search them`);
                         } else if (pl[bIdx].status !== KILL_STATUS.ALIVE) {
                             pl[bIdx].isBg  = true;
                             pl[bIdx].bgFor = target;
                             pl[bIdx].status = KILL_STATUS.UNKNOWN;
                             saveKillPlayers(pl);
+                            state.killSearchLoopActive = true;
+                            state.killBgWaitUntil = 0;
                             addLiveLog(`BG Spam: reset ${bgName} to unknown — kill scanner will search them`);
                         }
                     }
-                    // Don't trigger at all while bgFarmWaitUntil is active — searches not done yet
-                    if (farmWaitActive) {
+                    // If the same BG is still being searched, keep waiting. If the BG changed,
+                    // ignore the old wait and hand off so the stale BG kill/search is replaced.
+                    if (sameBgWaiting) {
                         // silently wait
-                    } else if ((bgName.toLowerCase() !== knownBg || !alreadyHandling) && !killLoopBusyWithOther && !sameBgWaiting) {
+                    } else if ((bgName.toLowerCase() !== knownBg || !alreadyHandling) && !killLoopBusyWithOther) {
                         // New or different BG — hand off to kill loop
                         addLiveLog(`BG Spam: ${target} has ${knownBg && bgName.toLowerCase() !== knownBg ? 'new ' : ''}BG ${bgName} — triggering kill loop`);
                         // Don't override the kill loop cooldown — it means the loop just determined there's nothing to do
@@ -6023,13 +6187,48 @@ async function doQTPerkRedeem() {
         return (now - boundary >= gracePeriod) ? boundary : boundary - interval;
     }
 
+    function isBgSpamBlockingBulletFactory() {
+        // BG Spam should pause Bullet Factory, not permanently consume the half-hour check.
+        // If spam is only paused while waiting for a BG search result, allow Bullet Factory to run.
+        const bgSpamPausedUntil = getSetting('killBgSpamPausedUntil', 0);
+        const bgSpamPausedByTimer = bgSpamPausedUntil > Date.now();
+        return state.killBgSpamEnabled && state.killBgSpamTarget && state.killBgCheckEnabled && !bgSpamPausedByTimer;
+    }
+
     function isBulletFactoryCheckDue() {
         if (!state.bulletFactoryEnabled) return false;
         if (state.pendingBulletRun) return false;
+        // BG Spam pauses Bullet Factory without marking the current half-hour as checked.
+        // This means if BG Spam is unticked, Bullet Factory can immediately catch up.
+        if (isBgSpamBlockingBulletFactory()) return false;
         // Fire if we haven't run since the most recent half-hour boundary
         // This means: fire immediately on enable, fire again whenever a new
         // boundary passes (1:00, 1:30, 2:00 etc.), and catch up if missed
         return state.lastBulletFactoryCheck < lastHalfHourBoundary();
+    }
+
+    function killLoopHasImmediateWorkForBulletFactory() {
+        // A pending kill/BG action means the kill loop is actively doing work
+        // rather than merely waiting on a long BG search timer. Pause Bullet
+        // Factory routing so it cannot steal the page flow or shared drive.
+        if (!state.killLoopActive) return false;
+        if (state.pendingKillAction) return true;
+        // If we are already on a kill/penalty page while the kill loop is active,
+        // let that page finish deciding before Bullet Factory takes over.
+        if (isKillPage() || isKillPenaltyPage()) return true;
+        return false;
+    }
+
+    let lastBulletFactoryPauseLogKey = '';
+    let lastBulletFactoryPauseLogAt  = 0;
+
+    function addBulletFactoryPauseLog(key, message) {
+        const t = Date.now();
+        if (key !== lastBulletFactoryPauseLogKey || t - lastBulletFactoryPauseLogAt > 30000) {
+            lastBulletFactoryPauseLogKey = key;
+            lastBulletFactoryPauseLogAt  = t;
+            addLiveLog(message);
+        }
     }
 
     // Fetches the Global Owners page and returns countries with 300+ bullet stock
@@ -6081,13 +6280,9 @@ async function doQTPerkRedeem() {
 
     // Starts a bullet factory run — checks stock and sets up pending run state
     async function startBulletFactoryRun() {
-        // BG Spam takes priority only when actively firing (target found) — not when paused
-        const bgSpamPaused = getSetting('killBgSpamPausedUntil', 0) > Date.now();
-        if (state.killBgSpamEnabled && state.killBgSpamTarget && state.killBgCheckEnabled && !bgSpamPaused) {
-            // Still mark as checked so we don't spin on this every tick
-            state.lastBulletFactoryCheck = lastHalfHourBoundary();
-            return;
-        }
+        // Defensive guard: BG Spam pauses Bullet Factory, but does not mark the
+        // current half-hour boundary as checked. When spam is unticked, BF catches up.
+        if (isBgSpamBlockingBulletFactory()) return;
         addLiveLog('Bullet factory: checking Global Owners page for stock...');
         // Record the current boundary as checked — next trigger will be the NEXT boundary
         state.lastBulletFactoryCheck = lastHalfHourBoundary();
@@ -6393,13 +6588,8 @@ async function doQTPerkRedeem() {
         if (!btn || btn.disabled) return false;
 
         state.lastActionAt = now();
-        await wait(rand(DEFAULTS.actionDelayMin, DEFAULTS.actionDelayMax));
-
-        const freshBtn = getGTAStealButton();
-        if (!freshBtn || freshBtn.disabled) return false;
-
-        humanClick(freshBtn);
         markGTACooldownStarted();
+        humanClick(btn);
         addLiveLog('GTA attempted');
 
         return true;
@@ -6750,11 +6940,13 @@ async function doQTPerkRedeem() {
 
             if (ownRow) {
                 jailHadOwnRow = true;
+                if (await maybeLeaveJailAfterReleaseFallback('Jail timer elapsed/frozen while observer was active')) return;
+                updateJailReleaseEstimate(jailMs, 'observer');
                 return;
             }
 
             if (jailHadOwnRow || /the jail is empty!/i.test(jailText)) {
-                state.jailReleasesAt = 0;
+                clearJailReleaseTracking();
                 stopJailObserver();
                 clearScheduledReload();
                 await wait(rand(500, 1200));
@@ -6776,6 +6968,61 @@ async function doQTPerkRedeem() {
         addLiveLog('Jail observer started');
     }
 
+    function clearJailReleaseTracking() {
+        state.jailReleasesAt = 0;
+        state.jailLastTimerMs = 0;
+        state.jailLastTimerSeenAt = 0;
+    }
+
+    function updateJailReleaseEstimate(jailMs, reason = 'jail') {
+        if (jailMs == null || !Number.isFinite(jailMs) || jailMs <= 0) return;
+
+        const t = now();
+        const proposed = t + jailMs + 65000; // 65s buffer covers minute-rounded jail timers
+        const prevRelease = state.jailReleasesAt;
+        const prevTimerMs = state.jailLastTimerMs;
+
+        const noPreviousDeadline = !prevRelease || prevRelease <= 0;
+        const timerMovedEarlier = prevRelease > 0 && proposed < prevRelease - 5000;
+        const timerActuallyIncreased = prevTimerMs > 0 && jailMs > prevTimerMs + 15000;
+
+        // Important: never keep pushing the release deadline forward just because
+        // a stale/frozen jail timer still says the same value. That was the
+        // multi-hour jail stall: now()+staleTimer kept becoming a later deadline.
+        if (noPreviousDeadline || timerMovedEarlier || timerActuallyIncreased) {
+            state.jailReleasesAt = proposed;
+            if (!noPreviousDeadline && timerActuallyIncreased) {
+                addLiveLog(`Jail timer extended — updated release fallback (${Math.ceil(jailMs / 60000)}m)`);
+            }
+        }
+
+        state.jailLastTimerMs = jailMs;
+        state.jailLastTimerSeenAt = t;
+    }
+
+    async function leaveJailAfterReleaseFallback(reason) {
+        addLiveLog(`${reason} — leaving jail page`);
+        clearJailReleaseTracking();
+        stopJailObserver();
+        clearScheduledReload();
+        await wait(rand(500, 1200));
+        if (state.gtaResetLoopActive) {
+            gotoPage('gta');
+        } else if (state.meltResetLoopActive) {
+            gotoCleanMeltPage(1);
+        } else {
+            gotoPage('crimes');
+        }
+    }
+
+    async function maybeLeaveJailAfterReleaseFallback(reason) {
+        if (state.jailReleasesAt > 0 && now() >= state.jailReleasesAt) {
+            await leaveJailAfterReleaseFallback(reason);
+            return true;
+        }
+        return false;
+    }
+
     async function handleJailState() {
         clearScheduledReload();
         jailPassiveMode = true;
@@ -6789,20 +7036,21 @@ async function doQTPerkRedeem() {
             if (!jailHadOwnRow) addLiveLog('Confirmed own jail row');
             jailHadOwnRow = true;
 
-            // Store when jail timer expires — used as fallback if DOM stops updating (e.g. death in jail)
+            // If the fallback deadline is already past, do this BEFORE reading
+            // the current timer text. A Cloudflare/stale DOM can show the same
+            // old timer forever; reading it first would move the deadline again.
+            if (await maybeLeaveJailAfterReleaseFallback('Jail timer elapsed/frozen during jail check')) return;
+
+            // Store a stable release deadline. Do not extend it unless the timer
+            // genuinely increases, otherwise a frozen timer creates a moving goalpost.
             const jailMs = getOwnJailTimerMs();
-            if (jailMs != null && jailMs > 0) {
-                const releasesAt = now() + jailMs + 2000; // 2s buffer
-                if (releasesAt > state.jailReleasesAt) {
-                    state.jailReleasesAt = releasesAt;
-                }
-            }
+            updateJailReleaseEstimate(jailMs, 'handle');
 
             // If Leave Jail toggle is on and we have enough points, use it immediately
             if (state.leaveJailEnabled) {
                 const didLeave = await tryLeaveJail();
                 if (didLeave) {
-                    state.jailReleasesAt = 0;
+                    clearJailReleaseTracking();
                     stopJailObserver();
                     clearScheduledReload();
                     await wait(rand(800, 1500));
@@ -6824,7 +7072,7 @@ async function doQTPerkRedeem() {
             return;
         }
 
-        state.jailReleasesAt = 0;
+        clearJailReleaseTracking();
         stopJailObserver();
         clearScheduledReload();
         await wait(rand(500, 1200));
@@ -7501,7 +7749,7 @@ async function doQTPerkRedeem() {
                     startedAt:       now()
                 };
                 await wait(navRand());
-                window.location.href = new URL(hereLink.getAttribute('href'), window.location.href).toString();
+                navigateToUrl(new URL(hereLink.getAttribute('href'), window.location.href).toString());
                 return true;
             }
 
@@ -7524,7 +7772,7 @@ async function doQTPerkRedeem() {
                 startedAt:  now()
             };
             await wait(navRand());
-            window.location.href = new URL(hereLink.getAttribute('href'), window.location.href).toString();
+            navigateToUrl(new URL(hereLink.getAttribute('href'), window.location.href).toString());
             return true;
         }
 
@@ -7662,6 +7910,7 @@ async function doQTPerkRedeem() {
             delete np.expectedFoundAt;
             delete np.bgFarmWaitUntil;
             delete np.searchExpiresAt;
+            delete np.pendingSearch;
             if (np.status === 'alive' || np.status === 'protected') np.status = 'unknown';
             return np;
         });
@@ -7891,7 +8140,7 @@ async function doQTPerkRedeem() {
             const prevName = prevLink.textContent.trim();
             addLiveLog(`Auto retrieve: found previous account "${prevName}" — retrieving assets`);
             await wait(rand(500, 900));
-            window.location.href = prevLink.getAttribute('href');
+            navigateToUrl(prevLink.getAttribute('href'));
             return true;
         }
 
@@ -8494,6 +8743,9 @@ async function doQTPerkRedeem() {
     //   3. If not enough bullets for a kill shot, pause kill loop (not BG check)
     async function handleKillLoopPage() {
         const pending = state.pendingKillAction;
+        if (state.killDebugEnabled) {
+            addLiveLog(`[DEBUG] handleKillLoopPage: pending=${JSON.stringify(pending)} | bulletRun=${JSON.stringify(state.pendingBulletRun)} | driveReady=${isInternalDriveReady()} | killLoopActive=${state.killLoopActive}`);
+        }
 
         // Handle pending travel — we've just arrived on a car page to drive somewhere
         // ── Stage: travel — on cars LIST page, find and navigate to best car ──
@@ -8537,7 +8789,7 @@ async function doQTPerkRedeem() {
             }
             addLiveLog(`Kill loop: navigating to car detail page for ${pending.travelTo}`);
             state.pendingKillAction = { ...pending, stage: 'travel_car', travelCarUrl };
-            window.location.href = travelCarUrl;
+            navigateToUrl(travelCarUrl);
             return;
         }
 
@@ -8634,19 +8886,23 @@ async function doQTPerkRedeem() {
                 gotoPage('kill');
                 return;
             }
-            state.pendingKillAction = { ...pending, driveAttempts: attempts };
-
             freshRadio.checked = true;
             freshRadio.dispatchEvent(new Event('change', { bubbles: true }));
             state.nextDriveReadyAt = now() + 60000;
-            humanClick(freshGo);
-            addLiveLog(`Kill loop: driving to ${pending.travelTo} (attempt ${attempts})`);
-            // After driving, use afterTravel action if set, otherwise fall back to bgcheck
+            // Set the post-travel action BEFORE clicking — humanClick may trigger an
+            // immediate form submit/navigation, and GM_setValue must land first or
+            // the continuation (e.g. bg_shoot with bgVerified) gets lost.
             if (pending.afterTravel) {
                 state.pendingKillAction = { ...pending.afterTravel };
+            } else if (pending.killOnly) {
+                // We travelled for a kill-only target; continue with the full kill shot,
+                // not a 1-bullet BG check. BG-checkable targets use explicit afterTravel stages.
+                state.pendingKillAction = { stage: 'fetch_profile', targetName: pending.targetName, bgFor: pending.bgFor || null };
             } else {
                 state.pendingKillAction = { stage: 'bgcheck', targetName: pending.targetName, shootAfterBg: pending.shootAfterBg, deferred: pending.deferred };
             }
+            humanClick(freshGo);
+            addLiveLog(`Kill loop: driving to ${pending.travelTo} (attempt ${attempts})`);
             return;
         }
 
@@ -8669,9 +8925,16 @@ async function doQTPerkRedeem() {
                 renderKillList();
             } else if (hasKillDeadMessage()) {
                 killSearchResultHandledThisLoad = true;
+                const _deadPlayers = state.killPlayers || [];
+                const _deadEntry = _deadPlayers.find(p => p.name.toLowerCase() === cur.toLowerCase());
+                const _deadBgFor = _deadEntry?.bgFor || null;
                 updateKillPlayerStatus(cur, KILL_STATUS.DEAD);
                 state.killCurrentSearch = '';
                 renderKillList();
+                if (_deadBgFor && isPlayerBgFarmEnabled(_deadBgFor)) {
+                    addLiveLog(`Kill scanner: ${cur} was BG for ${_deadBgFor} — BG Farm checking ${_deadBgFor}`);
+                    queueBgFarmCheck(_deadBgFor, isPlayerShootEnabled(_deadBgFor));
+                }
             } else if (hasKillSearchStartedMessage()) {
                 killSearchResultHandledThisLoad = true;
                 updateKillPlayerStatus(cur, KILL_STATUS.ALIVE);
@@ -8695,11 +8958,15 @@ async function doQTPerkRedeem() {
                     state.killCurrentSearch = '';
                 }
             }
-            // After processing any search result, return to crimes — don't fall through
+            // After processing any search result, return to crimes — don't fall through.
+            // Do not cancel an already queued kill/BG state; the next tick will resume it.
             if (killSearchResultHandledThisLoad) {
-                // Only set killLoopActive false if there's no active BG shoot pending
                 const pa = state.pendingKillAction;
-                if (!pa || pa.stage !== 'bg_shoot') {
+                const keepStages = ['bg_shoot','bg_farm_check','bg_farm_shoot','bg_farm_result','bgcheck','bgcheck_deferred','fetch_profile','travel','travel_car','shoot_result'];
+                if (pa && keepStages.includes(pa.stage)) {
+                    state.killLoopActive = true;
+                    state.killBgWaitUntil = 0;
+                } else {
                     state.killLoopActive = false;
                 }
                 await wait(navRand());
@@ -8764,19 +9031,18 @@ async function doQTPerkRedeem() {
         }
 
 
-        // Handle BG Farm 1-bullet check on original target after killing their BG
+        // Resume a profile-fetch kill stage if the page reloaded after it was queued.
+        if (pending && pending.stage === 'fetch_profile') {
+            await doKillShootFlow(pending.targetName, pending.bgFor || null);
+            return;
+        }
+
+        // Handle forced 1-bullet BG checks used by BG Farm.
         if (pending && pending.stage === 'bg_farm_check') {
             const target = pending.targetName;
 
-            // Respect kill penalty threshold — pause BG farming if too high
-            if (isKillPenaltyTooHigh()) {
-                addLiveLog(`Kill loop: BG Farm — penalty too high, pausing BG farm for ${target}`);
-                state.pendingKillAction = null;
-                await wait(navRand());
-                gotoPage('crimes');
-                return;
-            }
-
+            // BG checks are 1-bullet probes and are allowed even if the kill penalty is too high.
+            // Full kill shots are blocked later by doKillShootFlow/bg_shoot.
             addLiveLog(`Kill loop: BG Farm — checking ${target} for next BG`);
 
             // Check if target is already in Players Found on this page
@@ -8788,6 +9054,9 @@ async function doQTPerkRedeem() {
                 const targetPlayer = (state.killPlayers || []).find(p => p.name.toLowerCase() === target.toLowerCase());
                 const targetCountry = targetPlayer?.country;
                 const myCountry = document.querySelector('#player-location')?.textContent.trim();
+                if (state.killDebugEnabled) {
+                    addLiveLog(`[DEBUG] bg_farm_check: target=${target} targetCountry=${targetCountry} myCountry=${myCountry} afterVerify=${JSON.stringify(pending.afterVerify)}`);
+                }
 
                 if (targetCountry && targetCountry !== myCountry) {
                     // Need to travel first
@@ -8797,10 +9066,10 @@ async function doQTPerkRedeem() {
                         travelTo:    targetCountry,
                         targetName:  target,
                         shootAfterBg: pending.shootAfterBg,
-                        afterTravel: { stage: 'bg_farm_shoot', targetName: target, shootAfterBg: pending.shootAfterBg }
+                        afterTravel: { stage: 'bg_farm_shoot', targetName: target, shootAfterBg: pending.shootAfterBg, afterVerify: pending.afterVerify, bgFor: pending.bgFor || null }
                     };
                 } else {
-                    state.pendingKillAction = { stage: 'bg_farm_shoot', targetName: target, shootAfterBg: pending.shootAfterBg };
+                    state.pendingKillAction = { stage: 'bg_farm_shoot', targetName: target, shootAfterBg: pending.shootAfterBg, afterVerify: pending.afterVerify, bgFor: pending.bgFor || null };
                 }
             } else {
                 // Check if already being searched
@@ -8816,7 +9085,11 @@ async function doQTPerkRedeem() {
                     const pl  = state.killPlayers || [];
                     const idx = pl.findIndex(p => p.name.toLowerCase() === target.toLowerCase());
                     if (idx !== -1) {
-                        if (foundInMs != null) pl[idx].bgFarmWaitUntil = now() + foundInMs + (5 * 60 * 1000);
+                        if (foundInMs != null) {
+                            pl[idx].pendingSearch = true;
+                            pl[idx].expectedFoundAt = now() + foundInMs;
+                            pl[idx].bgFarmWaitUntil = now() + foundInMs + (5 * 60 * 1000);
+                        }
                         pl[idx].lastBgCheck = now(); // mark as checked so interval resets
                         saveKillPlayers(pl);
                     }
@@ -8833,9 +9106,11 @@ async function doQTPerkRedeem() {
                         if (nameInput && hoursInput) {
                             nameInput.value  = target;
                             hoursInput.value = '24';
-                            form.querySelector('input[type="submit"]')?.click();
+                            state.killCurrentSearch    = target;
                             state.killSearchLoopActive = true;
                             state.killLoopActive       = false;
+                            state.lastActionAt         = now();
+                            form.querySelector('input[type="submit"]')?.click();
                         }
                     }
                 }
@@ -8849,15 +9124,7 @@ async function doQTPerkRedeem() {
         if (pending && pending.stage === 'bg_farm_shoot') {
             const target = pending.targetName;
 
-            // Respect kill penalty threshold
-            if (isKillPenaltyTooHigh()) {
-                addLiveLog(`Kill loop: BG Farm — penalty too high, pausing BG farm for ${target}`);
-                state.pendingKillAction = null;
-                await wait(navRand());
-                gotoPage('crimes');
-                return;
-            }
-
+            // BG checks are 1-bullet probes and are allowed even if the kill penalty is too high.
             addLiveLog(`Kill loop: BG Farm — shooting ${target} with 1 bullet to check for BG`);
 
             // Need at least 1 bullet
@@ -8889,7 +9156,7 @@ async function doQTPerkRedeem() {
                     usernameSelect.value = target;
                     bulletsInput.value   = '1';
                     if (showCheckbox) showCheckbox.checked = !state.killAnonymousShooting;
-                    state.pendingKillAction = { stage: 'bg_farm_result', targetName: target, shootAfterBg: pending.shootAfterBg, afterVerify: pending.afterVerify };
+                    state.pendingKillAction = { stage: 'bg_farm_result', targetName: target, shootAfterBg: pending.shootAfterBg, afterVerify: pending.afterVerify, bgFor: pending.bgFor || null };
                     state.lastActionAt = now();
                     humanClick(submitBtn);
                     return;
@@ -8960,30 +9227,17 @@ async function doQTPerkRedeem() {
                         .find(row => { const b = row.querySelector('b'); return b && textOf(b).toLowerCase() === bgName.toLowerCase(); });
 
                     if (alreadyFound) {
-                        // Already found — check bullets before queuing shoot
-                        addLiveLog(`Kill loop: BG Farm — ${bgName} already found, proceeding to kill immediately`);
-                        const _bgPlayers = state.killPlayers || [];
-                        const _bgP = _bgPlayers.find(p => p.name.toLowerCase() === bgName.toLowerCase());
-                        const _bgBullets = _bgP?.requiredBullets || 0;
-                        const _shootAction = (pending.afterVerify && pending.afterVerify.targetName?.toLowerCase() === bgName.toLowerCase())
-                            ? pending.afterVerify
-                            : { stage: 'bg_shoot', targetName: bgName, bgFor: target, shootAfterBg: pending.shootAfterBg };
-                        if (_bgBullets && getPlayerBullets() < _bgBullets) {
-                            addLiveLog(`Kill loop: BG Farm — not enough bullets for ${bgName} (need ${_bgBullets.toLocaleString()}, have ${getPlayerBullets().toLocaleString()}) — deferring shoot`);
-                            state.killBgShootPending  = _shootAction;
-                            state.pendingKillAction   = null;
-                            state.killLoopActive      = false;
-                            state.killBgSpamPaused    = false;
-                        } else {
-                            // If this was a verify check and BG matches, restore the original shoot action
-                            if (pending.afterVerify && pending.afterVerify.targetName?.toLowerCase() === bgName.toLowerCase()) {
-                                addLiveLog(`Kill loop: BG Farm — verified ${target} still has BG ${bgName} — proceeding to shoot`);
-                            }
-                            state.pendingKillAction = _shootAction;
-                            state.killSearchLoopActive = false;
-                            state.killLoopActive       = true;
-                            state.killBgWaitUntil      = 0;
-                        }
+                        // This 1-bullet BG Farm check just verified that target currently has this BG.
+                        // Carry bgVerified through so bg_shoot does not re-run the same verify loop.
+                        const verifiedAction = pending.afterVerify &&
+                            pending.afterVerify.targetName &&
+                            pending.afterVerify.targetName.toLowerCase() === bgName.toLowerCase()
+                            ? { ...pending.afterVerify, shootAfterBg: isPlayerShootEnabled(target), bgVerified: true }
+                            : { stage: 'bg_shoot', targetName: bgName, bgFor: target, shootAfterBg: isPlayerShootEnabled(target), bgVerified: true };
+                        addLiveLog(`Kill loop: BG Farm — ${bgName} already found and verified as ${target}'s BG — queuing immediate BG kill`);
+                        state.pendingKillAction = verifiedAction;
+                        state.killLoopActive    = true;
+                        state.killSearchLoopActive = false;
                     } else if (searchingRow) {
                         // Already being searched — store wait per-player, not globally
                         const timerSpan = searchingRow.querySelector('.chd');
@@ -8992,11 +9246,18 @@ async function doQTPerkRedeem() {
                         addLiveLog(`Kill loop: BG Farm — ${bgName} already being searched, found in ~${waitMins}m — waiting`);
                         const pl  = state.killPlayers || [];
                         const idx = pl.findIndex(p => p.name.toLowerCase() === target.toLowerCase());
+                        const bgIdxWait = pl.findIndex(p => p.name.toLowerCase() === bgName.toLowerCase());
                         if (idx !== -1) {
+                            // Keep the BG Farm interval alive while this BG is being searched.
+                            // The interval should re-check the original target in case they swap BG.
+                            pl[idx].lastBgCheck = now();
                             if (foundInMs != null) pl[idx].bgFarmWaitUntil = now() + foundInMs + (5 * 60 * 1000);
-                            pl[idx].lastBgCheck = now(); // reset interval so we don't immediately re-trigger
-                            saveKillPlayers(pl);
                         }
+                        if (bgIdxWait !== -1 && foundInMs != null) {
+                            pl[bgIdxWait].pendingSearch = true;
+                            pl[bgIdxWait].expectedFoundAt = now() + foundInMs;
+                        }
+                        if (idx !== -1 || bgIdxWait !== -1) saveKillPlayers(pl);
                         state.pendingKillAction    = null;
                         state.killSearchLoopActive = true;
                         state.killLoopActive       = false;
@@ -9014,13 +9275,16 @@ async function doQTPerkRedeem() {
                         }
                         const tIdx2 = pl2.findIndex(p => p.name.toLowerCase() === target.toLowerCase());
                         if (tIdx2 !== -1) {
-                            pl2[tIdx2].lastBgCheck     = now();
-                            pl2[tIdx2].bgFarmWaitUntil = now() + (24 * 60 * 60 * 1000);
+                            // Reset the normal BG Farm interval from this confirmed check,
+                            // but do not suppress future interval checks for the full BG search time.
+                            pl2[tIdx2].lastBgCheck = now();
+                            delete pl2[tIdx2].bgFarmWaitUntil;
                         }
                         saveKillPlayers(pl2);
                         state.pendingKillAction    = null;
                         state.killSearchLoopActive = true;
                         state.killLoopActive       = false;
+                        state.killBgWaitUntil      = 0;
                     }
                 }
             } else if (credEl) {
@@ -9030,21 +9294,21 @@ async function doQTPerkRedeem() {
                     const pl  = state.killPlayers || [];
                     const idx = pl.findIndex(p => p.name.toLowerCase() === target.toLowerCase());
                     if (idx !== -1) { delete pl[idx].bodyguard; pl[idx].lastBgCheck = now(); saveKillPlayers(pl); }
-                    if (pending.afterVerify.shootAfterBg && isPlayerShootEnabled(target)) {
-                        addLiveLog(`Kill loop: BG Farm — Kill enabled, proceeding to kill unprotected ${target}`);
-                        state.pendingKillAction = { stage: 'fetch_profile', targetName: target };
-                        await doKillShootFlow(target);
+                    if (shouldKillAfterCleanBgCheck(target)) {
+                        addLiveLog(`Kill loop: BG Farm — clean check, Kill is still enabled — proceeding to kill ${target}`);
+                        state.pendingKillAction = { stage: 'fetch_profile', targetName: target, bgFor: pending.bgFor || null };
+                        await doKillShootFlow(target, pending.bgFor || null);
                         return;
                     } else {
                         addLiveLog(`Kill loop: BG Farm — waiting for ${target} to get a new BG`);
                         state.pendingKillAction = null;
                     }
-                } else if (pending.shootAfterBg && isPlayerShootEnabled(target)) {
-                    // Kill toggle on — proceed to kill
+                } else if (shouldKillAfterCleanBgCheck(target)) {
+                    // Clean target: kill only if Kill is currently ticked for this player.
                     addLiveLog(`Kill loop: BG Farm — ${target} has no BG`);
-                    addLiveLog(`Kill loop: BG Farm — Kill enabled, proceeding to kill ${target}`);
-                    state.pendingKillAction = { stage: 'fetch_profile', targetName: target };
-                    await doKillShootFlow(target);
+                    addLiveLog(`Kill loop: BG Farm — Kill is enabled, proceeding to kill clean target ${target}`);
+                    state.pendingKillAction = { stage: 'fetch_profile', targetName: target, bgFor: pending.bgFor || null };
+                    await doKillShootFlow(target, pending.bgFor || null);
                     return;
                 } else {
                     // BG Farm only — log and wait for them to get a new BG
@@ -9056,18 +9320,33 @@ async function doQTPerkRedeem() {
                     state.pendingKillAction = null;
                 }
             } else {
-                addLiveLog(`Kill loop: BG Farm — unexpected result for ${target}, retrying`);
+                const retries = (pending.unexpectedRetries || 0) + 1;
+                if (retries <= 3) {
+                    addLiveLog(`Kill loop: BG Farm — unexpected result for ${target}, retrying (${retries}/3)`);
+                    // Re-stay on kill page and re-check the result rather than discarding
+                    // the chain — the result message may just not have rendered yet.
+                    state.pendingKillAction = { ...pending, unexpectedRetries: retries };
+                    await wait(rand(800, 1500));
+                    return;
+                }
+                addLiveLog(`Kill loop: BG Farm — unexpected result for ${target} after ${retries} attempts, giving up`);
                 state.pendingKillAction = null;
             }
             // Check if there are more BG Farm players due for a check — if so keep kill loop active
             if (!state.killLoopActive && !state.pendingKillAction) {
                 const _allPlayers = state.killPlayers || [];
                 const _nowMs = now();
-                const _moreDue = _allPlayers.some(p =>
-                    p.status === KILL_STATUS.ALIVE &&
-                    isPlayerBgFarmEnabled(p.name) &&
-                    getBgCheckDueMs(p) <= 0
-                );
+                const _moreDue = _allPlayers.some(p => {
+                    if (p.status !== KILL_STATUS.ALIVE) return false;
+                    if (!isPlayerBgFarmEnabled(p.name)) return false;
+                    if (getBgCheckDueMs(p) > 0) return false;
+                    // If the original BG Farm target itself is still in the
+                    // game's pending search queue, there is no 1-bullet BG
+                    // check to perform yet. Do not immediately re-arm the
+                    // generic bgcheck state and starve the normal search loop.
+                    if (!p.bodyguard && (p.pendingSearch || (p.expectedFoundAt && p.expectedFoundAt > _nowMs))) return false;
+                    return true;
+                });
                 if (_moreDue) {
                     state.killLoopActive   = true;
                     state.killBgSpamPaused = true;
@@ -9139,7 +9418,9 @@ async function doQTPerkRedeem() {
                                     state.killCurrentSearch = bgName;
                                     state.pendingKillAction = null;
                                     state.killLoopActive    = false;
-                                    state.killBgWaitUntil   = now() + (3 * 60 * 60 * 1000); // max search time ~3hrs
+                                    // Non-BG-Farm targets can wait for the BG search to resolve.
+                                    // BG Farm targets must keep re-checking on their interval in case the BG changes.
+                                    state.killBgWaitUntil   = isPlayerBgFarmEnabled(target) ? 0 : now() + (3 * 60 * 60 * 1000); // max search time ~3hrs
                                     state.lastActionAt = now();
                                     await wait(rand(DEFAULTS.actionDelayMin, DEFAULTS.actionDelayMax));
                                     humanClick(submitBtn);
@@ -9172,22 +9453,24 @@ async function doQTPerkRedeem() {
                                     stage:       'bg_shoot',
                                     targetName:  bgName,
                                     bgFor:       target,
-                                    shootAfterBg: isPlayerShootEnabled(target)
+                                    shootAfterBg: isPlayerShootEnabled(target),
+                                    // The 1-bullet check that produced this result has just verified
+                                    // that target currently has this BG, so do not verify-loop.
+                                    bgVerified:  true
                                 };
                                 await wait(navRand());
                                 gotoPage('kill');
                                 return;
                             } else {
-                                // Still searching (pending) — let search loop find them, then shoot
-                                const bgPlayerEntry = players.find(b => b.name.toLowerCase() === bgName.toLowerCase());
-                                const searchExpiry = bgPlayerEntry?.searchExpiresAt && bgPlayerEntry.searchExpiresAt > now()
-                                    ? bgPlayerEntry.searchExpiresAt
-                                    : now() + (3 * 60 * 60 * 1000);
-                                const waitMins = Math.round((searchExpiry - now()) / 60000);
+                                // Still searching (pending) — let search loop find them, then shoot.
+                                // Use expectedFoundAt / visible pending timer, not searchExpiresAt;
+                                // searchExpiresAt may still be the 24h placeholder from search submission.
+                                const searchReadyAt = getPendingSearchExpectedAt(bgName);
+                                const waitMins = Math.max(0, Math.round((searchReadyAt - now()) / 60000));
                                 addLiveLog(`Kill loop: ${bgName} already being searched, found in ~${waitMins}m — waiting`);
                                 state.killSearchLoopActive = true;
                                 state.killLoopActive       = false;
-                                state.killBgWaitUntil      = searchExpiry;
+                                state.killBgWaitUntil      = isPlayerBgFarmEnabled(target) ? 0 : searchReadyAt;
                             }
                         }
 
@@ -9253,11 +9536,13 @@ async function doQTPerkRedeem() {
                 }
 
                 // If shoot toggle is on for this player, proceed to shoot
-                if (pendingNow.shootAfterBg) {
-                    addLiveLog(`Kill loop: no BG on ${tName} — fetching profile for bullet calc`);
-                    state.pendingKillAction = { stage: 'fetch_profile', targetName: tName };
+                if (pendingNow.shootAfterBg && isPlayerShootEnabled(tName)) {
+                    addLiveLog(`Kill loop: no BG on ${tName} — Kill is still enabled, fetching profile for bullet calc`);
+                    const _cleanEntry = (state.killPlayers || []).find(p => p.name.toLowerCase() === tName.toLowerCase());
+                    const _cleanBgFor = _cleanEntry?.isBg ? (_cleanEntry.bgFor || null) : null;
+                    state.pendingKillAction = { stage: 'fetch_profile', targetName: tName, bgFor: _cleanBgFor };
                     // Stay on kill page — profile fetch is async
-                    await doKillShootFlow(tName);
+                    await doKillShootFlow(tName, _cleanBgFor);
                     return;
                 }
 
@@ -9315,34 +9600,31 @@ async function doQTPerkRedeem() {
                     }
 
                     if (isPlayerBgFarmEnabled(bgFor)) {
-                        // Clear per-player farm wait — we're now acting on this player
+                        // Clear per-player farm wait — we're now acting on the original target again
                         const plFarm = state.killPlayers || [];
                         const farmIdx = plFarm.findIndex(p => p.name.toLowerCase() === bgFor.toLowerCase());
                         if (farmIdx !== -1 && plFarm[farmIdx].bgFarmWaitUntil) {
                             delete plFarm[farmIdx].bgFarmWaitUntil;
                             saveKillPlayers(plFarm);
                         }
-                        // BG Farm mode — shoot original target with 1 bullet to find next BG
-                        addLiveLog(`Kill loop: ${target} was BG for ${bgFor} — BG Farm: 1-bullet checking ${bgFor} for next BG`);
-                        state.pendingKillAction = {
-                            stage:        'bg_farm_check',
-                            targetName:   bgFor,
-                            shootAfterBg: isPlayerShootEnabled(bgFor),
-                        };
-                        state.killBgWaitUntil = 0;
+                        // BG Farm — after a BG dies, 1-bullet check the original target again.
+                        addLiveLog(`Kill loop: ${target} was BG for ${bgFor} — BG Farm: 1-bullet checking ${bgFor} again`);
+                        queueBgFarmCheck(bgFor, isPlayerShootEnabled(bgFor), { bgFor: null });
                         await wait(navRand());
                         gotoPage('kill');
                         return;
                     } else if (isPlayerShootEnabled(bgFor)) {
-                        // Normal mode — re-BG check the original target
+                        // Normal Kill+BG Check mode — re-BG check the original target with 1 bullet.
+                        // Never jump straight into shoot_result; that stage only parses an already-fired shot.
                         addLiveLog(`Kill loop: ${target} was BG for ${bgFor} — re-BG checking ${bgFor}`);
                         state.pendingKillAction = {
-                            stage:       'shoot_result',
+                            stage:       'bgcheck',
                             targetName:  bgFor,
                             shootAfterBg: true,
-                            recheck:     true
+                            force:       true
                         };
                         state.killBgWaitUntil = 0;
+                        state.killLoopActive  = true;
                         await wait(navRand());
                         gotoPage('kill');
                         return;
@@ -9478,7 +9760,7 @@ async function doQTPerkRedeem() {
                 // Set travel stage so we're ready when drive is ready
                 // Use killBgWaitUntil to suppress bounce — travel stage bypasses it when ready
                 state.pendingKillAction = { stage: 'travel', travelTo: bgCountry, targetName: bgName,
-                    afterTravel: { stage: 'bg_shoot', targetName: bgName, bgFor, shootAfterBg: pendingNow.shootAfterBg } };
+                    afterTravel: { stage: 'bg_shoot', targetName: bgName, bgFor, shootAfterBg: pendingNow.shootAfterBg, bgVerified: pendingNow.bgVerified } };
                 state.killBgWaitUntil = now() + getInternalDriveRemainingMs() + 2000;
                 await wait(navRand());
                 gotoPage('crimes');
@@ -9488,7 +9770,7 @@ async function doQTPerkRedeem() {
             if (needsBgTravel) {
                 addLiveLog(`Kill loop: travelling to ${bgCountry} to shoot bodyguard ${bgName}`);
                 state.pendingKillAction = { stage: 'travel', travelTo: bgCountry, targetName: bgName,
-                    afterTravel: { stage: 'bg_shoot', targetName: bgName, bgFor, shootAfterBg: pendingNow.shootAfterBg } };
+                    afterTravel: { stage: 'bg_shoot', targetName: bgName, bgFor, shootAfterBg: pendingNow.shootAfterBg, bgVerified: pendingNow.bgVerified } };
                 await wait(navRand());
                 gotoPage('cars');
                 return;
@@ -9526,7 +9808,7 @@ async function doQTPerkRedeem() {
                 if (getPlayerBullets() < bgBullets) {
                     addLiveLog(`Kill loop: not enough bullets for BG shot (need ${bgBullets.toLocaleString()}, have ${getPlayerBullets().toLocaleString()}) — waiting`);
                     // Store shoot target separately so BG Farm interval checks can still run
-                    state.killBgShootPending  = { stage: 'bg_shoot', targetName: bgName, bgFor: bgFor || null, shootAfterBg: pending.shootAfterBg };
+                    state.killBgShootPending  = { stage: 'bg_shoot', targetName: bgName, bgFor: bgFor || null, shootAfterBg: pendingNow.shootAfterBg, bgVerified: pendingNow.bgVerified };
                     state.pendingKillAction   = null;
                     state.killLoopActive      = false;
                     state.killBgSpamPaused    = false;
@@ -9539,7 +9821,13 @@ async function doQTPerkRedeem() {
             // to confirm the target still has this BG (they may have dropped protection)
             if (bgFor && isPlayerBgFarmEnabled(bgFor) && !state.killBgSpamEnabled &&
                 !pendingNow.bgVerified) {
+                if (state.killDebugEnabled) {
+                    addLiveLog(`[DEBUG] verify trigger: bgName=${bgName} bgFor=${bgFor} pendingNow=${JSON.stringify(pendingNow)}`);
+                }
                 addLiveLog(`Kill loop: BG Farm — verifying ${bgFor} still has BG ${bgName} before shooting`);
+                const _vfPlayers = state.killPlayers || [];
+                const _vfIdx = _vfPlayers.findIndex(pl => pl.name.toLowerCase() === bgFor.toLowerCase());
+                if (_vfIdx !== -1) { _vfPlayers[_vfIdx].bgVerifyInFlight = true; saveKillPlayers(_vfPlayers); }
                 state.pendingKillAction = {
                     stage: 'bg_farm_check',
                     targetName: bgFor,
@@ -9551,6 +9839,14 @@ async function doQTPerkRedeem() {
             }
             // Sufficient bullets — shoot the bodyguard
             addLiveLog(`Kill loop: shooting bodyguard ${bgName}`);
+            if (bgFor) {
+                const _clearPlayers = state.killPlayers || [];
+                const _clearIdx = _clearPlayers.findIndex(pl => pl.name.toLowerCase() === bgFor.toLowerCase());
+                if (_clearIdx !== -1 && _clearPlayers[_clearIdx].bgVerifyInFlight) {
+                    delete _clearPlayers[_clearIdx].bgVerifyInFlight;
+                    saveKillPlayers(_clearPlayers);
+                }
+            }
             await doKillShootFlow(bgName, bgFor);
             return;
         }
@@ -9566,6 +9862,9 @@ async function doQTPerkRedeem() {
         const deferred = state.pendingKillAction && state.pendingKillAction.stage === 'bgcheck_deferred'
             ? (state.pendingKillAction.deferred || [])
             : [];
+        const forcedBgCheckName = state.pendingKillAction && state.pendingKillAction.stage === 'bgcheck' && state.pendingKillAction.targetName
+            ? state.pendingKillAction.targetName.toLowerCase()
+            : null;
 
         // Build country → due players map from Players Found + stored country data
         const foundRows = [...document.querySelectorAll('.bgl.i.wb .bgm.chs:not(.pd)')];
@@ -9586,8 +9885,9 @@ async function doQTPerkRedeem() {
         // All due BG check players (including deferred)
         const duePlayers = players.filter(p => {
             if (p.status !== KILL_STATUS.ALIVE) return false;
-            if (!isBgCheckable(p.name)) return false;
+            if (!isBgCheckable(p.name) && p.name.toLowerCase() !== forcedBgCheckName) return false;
             if (deferred.includes(p.name.toLowerCase())) return true; // deferred always retry
+            if (forcedBgCheckName && p.name.toLowerCase() === forcedBgCheckName) return foundMap.has(p.name.toLowerCase());
             if (getBgCheckDueMs(p) > 0) return false;
             // Only include if actually in Players Found — not still being searched
             if (!foundMap.has(p.name.toLowerCase())) return false;
@@ -9599,6 +9899,7 @@ async function doQTPerkRedeem() {
         if (!duePlayers.length) {
             const pendingRows = [...document.querySelectorAll('.bgl.i.wb .bgm.chs.pd')];
             let earliestFoundMs = null;
+            const pendingBgFarmTargets = [];
 
             for (const p of players) {
                 if (!isBgCheckable(p.name) || p.status !== KILL_STATUS.ALIVE) continue;
@@ -9617,8 +9918,14 @@ async function doQTPerkRedeem() {
                     const targetCountry = countryMatch ? countryMatch[1].trim() : null;
                     if (targetCountry && targetCountry.toLowerCase() !== getPlayerLocation().toLowerCase()) {
                         addLiveLog(`Kill loop: BG Farm — ${p.name} found in ${targetCountry} — travelling to check`);
-                        state.pendingKillAction = { stage: 'travel', travelTo: targetCountry, afterTravel: { stage: 'bgcheck' } };
-                        await navigateToTravel(targetCountry);
+                        state.pendingKillAction = {
+                            stage: 'travel',
+                            travelTo: targetCountry,
+                            targetName: p.name,
+                            afterTravel: { stage: 'bgcheck', targetName: p.name, shootAfterBg: isPlayerShootEnabled(p.name) }
+                        };
+                        await wait(navRand());
+                        gotoPage('cars');
                         return;
                     }
                 }
@@ -9631,15 +9938,44 @@ async function doQTPerkRedeem() {
                 if (pendingEl) {
                     const timerSpan = pendingEl.querySelector('.chd');
                     const foundInMs = timerSpan ? parseLostInMs(textOf(timerSpan)) : null;
-                    if (foundInMs && (earliestFoundMs === null || foundInMs < earliestFoundMs)) {
-                        earliestFoundMs = foundInMs;
+                    if (foundInMs && foundInMs > 0) {
+                        pendingBgFarmTargets.push({ name: p.name, foundInMs });
+                        if (earliestFoundMs === null || foundInMs < earliestFoundMs) {
+                            earliestFoundMs = foundInMs;
+                        }
                     }
                 }
             }
             if (earliestFoundMs !== null && earliestFoundMs > 0) {
                 const waitMins = Math.ceil(earliestFoundMs / 60000);
-                addLiveLog(`Kill loop: BG Farm targets not yet in Players Found — waiting ${waitMins}m`);
-                state.killBgWaitUntil = now() + earliestFoundMs + 5000;
+                addLiveLog(`Kill loop: BG Farm targets not yet in Players Found — waiting ${waitMins}m; releasing search loop`);
+                const waitUntil = now() + earliestFoundMs + 5000;
+                state.killBgWaitUntil = waitUntil;
+                // Persist the fact that these original BG Farm targets are in
+                // the game's pending search queue. Otherwise the scheduler sees
+                // dueMs <= 0 on the next tick and immediately rebuilds the same
+                // generic bgcheck action we just released.
+                if (pendingBgFarmTargets.length) {
+                    let changed = false;
+                    for (const item of pendingBgFarmTargets) {
+                        const idx = players.findIndex(pl => pl.name.toLowerCase() === item.name.toLowerCase());
+                        if (idx === -1) continue;
+                        players[idx].pendingSearch = true;
+                        players[idx].expectedFoundAt = now() + item.foundInMs;
+                        const pending3hr = now() + (3 * 60 * 60 * 1000);
+                        if (!players[idx].searchExpiresAt || players[idx].searchExpiresAt < pending3hr) {
+                            players[idx].searchExpiresAt = pending3hr;
+                        }
+                        changed = true;
+                    }
+                    if (changed) saveKillPlayers(players);
+                }
+                // The BG Farm target itself is still being searched, so there is
+                // no BG check to perform yet. Release this generic bgcheck state
+                // so the normal kill scanner can keep searching the rest of the
+                // player list instead of looping kill/online/crimes forever.
+                state.pendingKillAction = null;
+                state.killLoopActive = false;
                 await resumeBgSpamAfterCheck();
                 return;
             }
@@ -9660,8 +9996,10 @@ async function doQTPerkRedeem() {
             if (p.requiredBullets && currentBullets < p.requiredBullets) return false;
             // Skip if player has a known bodyguard currently being searched
             if (p.bodyguard) return false;
-            // If BG ticked and interval is due — handle via BG check path, not here
-            if (isBgCheckable(p.name) && getBgCheckDueMs(p) <= 0) return false;
+            // Any BG Check/BG Farm player may only be killed immediately after a fresh
+            // 1-bullet check returns no BG. Never treat them as kill-only just because
+            // their interval is not due.
+            if (isBgCheckable(p.name)) return false;
             // Must be in Players Found right now — skip if dead, pending, or not found
             if (!foundMap.has(p.name.toLowerCase())) return false;
             // Skip all kill-only players when penalty too high
@@ -9740,7 +10078,7 @@ async function doQTPerkRedeem() {
         // ── BG check targets ─────────────────────────────────────────────────
         // Check if all kill-only players are skipped due to pending bodyguards
         const allSkippedForBg = players.some(p =>
-            isPlayerShootEnabled(p.name) && p.status === KILL_STATUS.ALIVE && p.bodyguard
+            (isPlayerShootEnabled(p.name) || isPlayerBgFarmEnabled(p.name)) && p.status === KILL_STATUS.ALIVE && p.bodyguard
         );
         if (!duePlayers.length) {
             if (allSkippedForBg) {
@@ -9759,21 +10097,13 @@ async function doQTPerkRedeem() {
                     const bgNameLower = p.bodyguard.toLowerCase();
                     // Skip BGs that are already in Players Found — those should be shot, not waited on
                     if (foundNamesOnPage.has(bgNameLower)) continue;
-                    // Read the "Found in Xh Xm Xs" timer from the pending search list on the kill page
-                    const pendingRow = pendingSearchRows.find(row => {
-                        const b = row.querySelector('b');
-                        return b && textOf(b).toLowerCase() === bgNameLower;
-                    });
-                    if (pendingRow) {
-                        const timerSpan = pendingRow.querySelector('.chd');
-                        const foundInMs = timerSpan ? parseLostInMs(textOf(timerSpan)) : null;
-                        if (foundInMs) {
-                            const expiry = nowMs + foundInMs;
-                            earliestExpiry = earliestExpiry ? Math.min(earliestExpiry, expiry) : expiry;
-                        }
-                    }
+                    // Read the true pending-search completion timer. This prefers expectedFoundAt
+                    // and the visible pending row, so it cannot accidentally use the 24h
+                    // searchExpiresAt placeholder from when the search was submitted.
+                    const expiry = getPendingSearchExpectedAt(bgNameLower);
+                    earliestExpiry = earliestExpiry ? Math.min(earliestExpiry, expiry) : expiry;
                 }
-                // Fall back to 3hr if no search expiry found
+                // Fall back to 3hr if no pending-search timer was found
                 if (!earliestExpiry) earliestExpiry = nowMs + (3 * 60 * 60 * 1000);
                 const waitMins = Math.round((earliestExpiry - nowMs) / 60000);
                 state.killBgWaitUntil  = earliestExpiry;
@@ -10313,6 +10643,20 @@ async function doQTPerkRedeem() {
 
         if (!state.enabled) return;
 
+        // ── Jail/Cloudflare fallback watchdog ─────────────────────────────────
+        // If the jail page was replaced by Cloudflare or another stale/interstitial
+        // page, the normal jail-page handlers below will not run because #jailn is
+        // absent. The stable jail deadline is persisted, so once it has elapsed we
+        // force the same post-jail route instead of waiting forever for a MutationObserver.
+        if (state.jailReleasesAt > 0 && now() >= state.jailReleasesAt && !isLikelyJailPage()) {
+            loopBusy = true;
+            try {
+                updatePanel();
+                await leaveJailAfterReleaseFallback('Jail fallback elapsed while away from jail page / after Cloudflare');
+            } finally { loopBusy = false; }
+            return;
+        }
+
         // ── Kill penalty page — handle immediately, skip all other tick logic ──
         // Prevents any other navigation (search loop, online scanner etc.) from
         // navigating away before the penalty page is parsed.
@@ -10394,7 +10738,7 @@ async function doQTPerkRedeem() {
                 // Navigate to the specific car URL we stored
                 if (kpending.travelCarUrl) {
                     addLiveLog('Kill loop: navigating to travel car detail page');
-                    window.location.href = kpending.travelCarUrl;
+                    navigateToUrl(kpending.travelCarUrl);
                     return;
                 }
                 // No stored URL — fall back to cars list to re-select
@@ -10478,6 +10822,7 @@ async function doQTPerkRedeem() {
             const hasKillReady = players.some(p => {
                 if (!isPlayerShootEnabled(p.name)) return false;
                 if (p.status !== KILL_STATUS.ALIVE) return false;
+                if (isBgCheckable(p.name)) return false; // must pass through a fresh 1-bullet check first
                 if (p.bodyguard) return false; // BG being searched — wait
                 if (!p.searchExpiresAt || p.searchExpiresAt < now()) return false;
                 if (p.requiredBullets && getPlayerBullets() < p.requiredBullets) return false;
@@ -10514,16 +10859,30 @@ async function doQTPerkRedeem() {
                 if (!isPlayerBgFarmEnabled(p.name)) return false;
                 if (p.status !== KILL_STATUS.ALIVE) return false;
                 const dueMs = getBgCheckDueMs(p);
-                if (dueMs <= 0 && globalWaitExpired) return true;
-                // Bypass bgFarmWaitUntil if the global killBgWaitUntil has also expired
+                // If the original BG Farm target itself is only in the game's
+                // pending search queue, it cannot be 1-bullet checked yet. The
+                // v12 release path cleared pendingKillAction, but this scheduler
+                // immediately rebuilt {stage:'bgcheck'} because dueMs was still
+                // <= 0. Guard both markers here so search can continue normally.
+                const originalTargetStillPending = !p.bodyguard && (
+                    p.pendingSearch ||
+                    (p.expectedFoundAt && p.expectedFoundAt > nowMs)
+                );
+                if (originalTargetStillPending) return false;
+                // BG Farm interval checks must run even while a known BG is still being searched,
+                // because the original player may swap to a different BG before the old BG is found.
+                if (dueMs <= 0) return true;
+                // bgFarmWaitUntil only suppresses non-interval readiness checks; the interval above wins.
                 if (p.bgFarmWaitUntil && p.bgFarmWaitUntil > nowMs && !globalWaitExpired) return false;
                 // BG is found and ready to shoot
                 if (p.bodyguard) {
                     const bgPlayer = players.find(b => b.name.toLowerCase() === p.bodyguard.toLowerCase());
                     if (!bgPlayer || bgPlayer.status !== KILL_STATUS.ALIVE) return false;
-                    const isActuallyFound = bgPlayer.expectedFoundAt !== undefined && bgPlayer.expectedFoundAt <= nowMs;
-                    if (!isActuallyFound) return false;
-                    if (bgPlayer.requiredBullets && getPlayerBullets() < bgPlayer.requiredBullets) return false;
+                    // expectedFoundAt is deleted once the player appears in Players Found,
+                    // so readiness is either expectedFoundAt elapsed OR an alive searched player with no expectedFoundAt.
+                    const isSearchReady = (bgPlayer.expectedFoundAt !== undefined && bgPlayer.expectedFoundAt <= nowMs) ||
+                                          (bgPlayer.expectedFoundAt === undefined && bgPlayer.searchExpiresAt && bgPlayer.searchExpiresAt > nowMs);
+                    if (!isSearchReady) return false;
                     return true;
                 }
                 return false;
@@ -10695,34 +11054,19 @@ async function doQTPerkRedeem() {
             const ownRow = getOwnJailRow();
             if (ownRow) {
                 jailHadOwnRow = true;
-                // Update stored release time if timer has changed
+                // Fallback: check the existing stable release deadline BEFORE
+                // reading/updating the visible timer. This catches frozen jail
+                // timers after Cloudflare or stale page updates.
+                if (await maybeLeaveJailAfterReleaseFallback('Jail timer elapsed/frozen during passive check')) return;
+
+                // Update stored release estimate only when it moves earlier or
+                // the timer genuinely increased. Do not extend on a stale timer.
                 const jailMs = getOwnJailTimerMs();
-                if (jailMs != null && jailMs > 0) {
-                    const releasesAt = now() + jailMs + 2000;
-                    if (releasesAt > state.jailReleasesAt) {
-                        state.jailReleasesAt = releasesAt;
-                    }
-                }
-                // Fallback: if stored timer has elapsed and DOM still shows our row,
-                // the page has stopped updating (death in jail) — navigate away
-                if (state.jailReleasesAt > 0 && now() >= state.jailReleasesAt) {
-                    addLiveLog('Jail timer elapsed — navigating away (possible death in jail)');
-                    state.jailReleasesAt = 0;
-                    stopJailObserver();
-                    clearScheduledReload();
-                    await wait(rand(500, 1200));
-                    if (state.gtaResetLoopActive) {
-                        gotoPage('gta');
-                    } else if (state.meltResetLoopActive) {
-                        gotoCleanMeltPage(1);
-                    } else {
-                        gotoPage('crimes');
-                    }
-                }
+                updateJailReleaseEstimate(jailMs, 'passive');
                 return;
             }
 
-            state.jailReleasesAt = 0;
+            clearJailReleaseTracking();
             stopJailObserver();
             clearScheduledReload();
             // Dupe mode: optionally linger before leaving jail, or navigate away immediately
@@ -10750,7 +11094,7 @@ async function doQTPerkRedeem() {
             updatePanel();
 
             if (reloadPending) return;
-            if (recentlyActed(600)) { if (isCrimesPage()||hasCrimePageMarkers()) addLiveLog(`tick blocked: recentlyActed ${now()-state.lastActionAt}ms ago`); return; }
+            if (recentlyActed(600)) { if ((isCrimesPage()||hasCrimePageMarkers()) && getAvailableCrimes().length > 0) addLiveLog(`tick blocked: recentlyActed ${now()-state.lastActionAt}ms ago`); return; }
 
             if (hasCTCChallenge()) {
                 await maybeSolveCTC();
@@ -10782,19 +11126,35 @@ async function doQTPerkRedeem() {
             }
 
 
-            // Bullet factory check — fires every 30 minutes on the half-hour
-            // Start a run if due and no other dedicated loop is active
-            if (isBulletFactoryCheckDue() && !state.killLoopActive &&
-                !state.gtaResetLoopActive && !state.meltResetLoopActive) {
+            // Bullet factory check — fires every 30 minutes on the half-hour.
+            // Do not let BG Farm/Kill long-wait states starve Bullet Factory;
+            // only BG Spam and an immediate kill/BG action pause starting/routing.
+            const killImmediateWorkForBulletFactory = killLoopHasImmediateWorkForBulletFactory();
+            if (isBulletFactoryCheckDue() && !killImmediateWorkForBulletFactory) {
                 await startBulletFactoryRun();
                 return;
             }
 
-            // Bullet factory run in progress — route based on stage
-            // Defer to kill loop if it needs the drive, and for travel_car only intercept when drive is actually ready
-            const killNeedsDrive = state.killLoopActive && state.pendingKillAction &&
-                (state.pendingKillAction.stage === 'travel' || state.pendingKillAction.stage === 'travel_car');
-            if (state.pendingBulletRun && !killNeedsDrive &&
+            if (state.pendingBulletRun && isBgSpamBlockingBulletFactory()) {
+                addBulletFactoryPauseLog('bgspam', 'Bullet factory: paused while BG Spam is active — keeping run pending');
+            }
+
+            if (state.pendingBulletRun && killImmediateWorkForBulletFactory) {
+                // Keep the run pending, but hand control back to the kill loop.
+                // If we are on another page because a BF run had started, return
+                // to kill so the urgent BG/Kill state can finish first.
+                if (!isKillPage() && !isKillPenaltyPage()) {
+                    addBulletFactoryPauseLog('kill', 'Bullet factory: paused for active Kill/BG action — keeping run pending');
+                    await wait(navRand());
+                    gotoPage('kill');
+                    return;
+                }
+            }
+
+            // Bullet factory run in progress — route based on stage.
+            // For travel_car only intercept when drive is actually ready; otherwise
+            // leave the pending run alone and allow normal low-priority loops.
+            if (state.pendingBulletRun && !isBgSpamBlockingBulletFactory() && !killImmediateWorkForBulletFactory &&
                 !(state.pendingBulletRun.stage === 'travel_car' && !isInternalDriveReady())) {
                 const run = state.pendingBulletRun;
                 const page = currentPage();
@@ -10838,6 +11198,9 @@ async function doQTPerkRedeem() {
                 }
 
                 if (run.stage === 'travel') {
+                    if (state.killDebugEnabled) {
+                        addLiveLog(`[DEBUG] bulletRun travel stage: target=${run.targets[0]?.country} | killPending=${JSON.stringify(state.pendingKillAction)} | driveReady=${isInternalDriveReady()}`);
+                    }
                     // If on bank page, let handleBankPage handle it (mid-run topup or initial withdraw)
                     if (isBankPage()) {
                         // fall through to handleBankPage below
@@ -10859,7 +11222,7 @@ async function doQTPerkRedeem() {
                     // Drive ready — on car detail page, drive to destination
                     if (!isCarPage()) {
                         if (run.travelCarUrl) {
-                            window.location.href = run.travelCarUrl;
+                            navigateToUrl(run.travelCarUrl);
                         } else {
                             state.pendingBulletRun = { ...run, stage: 'travel' };
                             gotoPage('cars');
@@ -10877,7 +11240,7 @@ async function doQTPerkRedeem() {
                     if (target && !onBuyPage) {
                         addLiveLog(`Bullet factory: navigating to bullet factory in ${target?.country}`);
                         await wait(navRand());
-                        window.location.href = getBulletFactoryUrl(target.countryId);
+                        navigateToUrl(getBulletFactoryUrl(target.countryId));
                         return;
                     }
                     await handleBulletFactoryPage();
@@ -10904,27 +11267,20 @@ async function doQTPerkRedeem() {
                 return;
             }
 
-            // Bodyguard expected found — navigate to kill page when timer elapses
+            // Bodyguard / BG Farm expected found — navigate to kill page when timer elapses.
+            // IMPORTANT: do not clear expectedFoundAt here. The kill page sync needs that marker
+            // so it can tell the player just moved from pending search → Players Found and then
+            // re-activate the BG Farm / kill loop. If the player is still pending, sync will refresh
+            // expectedFoundAt from the game's visible timer instead.
             if (state.killBgCheckEnabled && !state.killLoopActive &&
                 !state.gtaResetLoopActive && !state.meltResetLoopActive && !isKillPage()) {
                 const playerReady = getKillPlayers().some(p =>
                     p.expectedFoundAt && now() >= p.expectedFoundAt
                 );
-                if (playerReady) {
-                    // Clear expectedFoundAt — visit kill page once
-                    // syncKillExpiryFromPage will handle reactivation if player is in Players Found
-                    const pls = state.killPlayers || [];
-                    pls.forEach(p => {
-                        if (p.expectedFoundAt && now() >= p.expectedFoundAt) {
-                            delete p.expectedFoundAt;
-                        }
-                    });
-                    saveKillPlayers(pls);
-                    if (!isKillPenaltyTooHigh()) {
-                        addLiveLog('Kill loop: player search timer elapsed — navigating to kill page');
-                        gotoPage('kill');
-                        return;
-                    }
+                if (playerReady && !isKillPenaltyTooHigh()) {
+                    addLiveLog('Kill loop: player search timer elapsed — navigating to kill page');
+                    gotoPage('kill');
+                    return;
                 }
             }
 
@@ -11003,11 +11359,9 @@ async function doQTPerkRedeem() {
     // ── Bullet Factory Page Handler ───────────────────────────────────────────
     // Handles the weaponry page (?p=weaponry&show=bullet&id=X) during a bullet run
     async function handleBulletFactoryPage() {
-        // BG Spam takes priority only when actively firing — not when paused waiting for target
-        const bgSpamPaused2 = getSetting('killBgSpamPausedUntil', 0) > Date.now();
-        if (state.killBgSpamEnabled && state.killBgSpamTarget && state.killBgCheckEnabled && !bgSpamPaused2) {
-
-            state.pendingBulletRun = null;
+        // BG Spam takes priority only when actively firing — pause BF but keep the run pending.
+        if (isBgSpamBlockingBulletFactory()) {
+            addBulletFactoryPauseLog('bgspam', 'Bullet factory: paused while BG Spam is active — keeping run pending');
             await wait(navRand());
             gotoPage('crimes');
             return;
@@ -11168,7 +11522,7 @@ async function doQTPerkRedeem() {
             addLiveLog(`Bullet factory: already in ${target.country} — going to buy`);
             state.pendingBulletRun = { ...run, stage: 'buy' };
             await wait(navRand());
-            window.location.href = getBulletFactoryUrl(target.countryId);
+            navigateToUrl(getBulletFactoryUrl(target.countryId));
             return;
         }
 
@@ -11212,7 +11566,7 @@ async function doQTPerkRedeem() {
 
         addLiveLog(`Bullet factory: travelling to ${target.country}`);
         state.pendingBulletRun = { ...run, stage: 'travel_car', travelCarUrl };
-        window.location.href = travelCarUrl;
+        navigateToUrl(travelCarUrl);
     }
 
     // Handles the bullet factory travel_car stage — on the car detail page
@@ -11275,7 +11629,7 @@ async function doQTPerkRedeem() {
             addLiveLog(`Bullet factory: already in ${target.country} — going to buy`);
             state.pendingBulletRun = { ...run, stage: 'buy' };
             await wait(navRand());
-            window.location.href = getBulletFactoryUrl(target.countryId);
+            navigateToUrl(getBulletFactoryUrl(target.countryId));
             return;
         }
 
@@ -11728,7 +12082,7 @@ async function doQTPerkRedeem() {
         //   deactivate mid-run. handleKillPage() is the only place that sets
         //   killSearchLoopActive to false when there are genuinely no targets.
         // - If the loop was inactive, check if there are targets to start it:
-        //   unknowns, expiring alives (3hr window), or protected players past
+        //   unknowns, expiring alives (3hr window), or original targets past
         //   their 1hr recheck window.
         if (!state.killSearchEnabled) {
             state.killSearchLoopActive = false;
@@ -13482,7 +13836,7 @@ async function doQTPerkRedeem() {
                 setPaused('Stopped manually');
             } else {
                 // Designate this window as the bot window
-                window.name = 'ug-bot';
+                activateBotWindowIdentity();
                 cancelCurrentRun();
                 state.enabled      = true;
                 state.pausedReason = '';
@@ -13922,6 +14276,7 @@ async function doQTPerkRedeem() {
                 );
                 const allOn = players.every(p => isPlayerBgCheckEnabled(p.name));
                 for (const p of players) setPlayerBgCheckEnabled(p.name, !allOn);
+                if (!allOn && state.killBgCheckEnabled) { state.killBgWaitUntil = 0; state.killLoopCooldownUntil = 0; state.killLoopActive = true; }
                 renderKillList();
                 addLiveLog(`Kill scanner: BG check ${allOn ? 'disabled' : 'enabled'} for all ${players.length} players`);
             });
@@ -13936,6 +14291,7 @@ async function doQTPerkRedeem() {
                 );
                 const allOn = players.every(p => isPlayerShootEnabled(p.name));
                 for (const p of players) setPlayerShootEnabled(p.name, !allOn);
+                if (!allOn && state.killBgCheckEnabled) { state.killBgWaitUntil = 0; state.killLoopCooldownUntil = 0; state.killLoopActive = true; }
                 renderKillList();
                 addLiveLog(`Kill scanner: shoot ${allOn ? 'disabled' : 'enabled'} for all ${players.length} players`);
             });
@@ -13972,11 +14328,19 @@ async function doQTPerkRedeem() {
                     } else if (key === 'killSearch' && !state.killSearchEnabled) {
                         state.killSearchEnabled = true;
                         if (killSearchInput) killSearchInput.checked = true;
-                        // Reset all alive players to unknown so they get re-searched on the new account
+                        // Death/new-account handling already resets the list. At Don, keep
+                        // existing statuses intact and only clear transient search markers so
+                        // BG Farm cannot mistake a pending target for an actionable target.
                         const _players = getSetting('killPlayers', []);
-                        const _reset = _players.map(p => p.status === 'alive' ? { ...p, status: 'unknown', searchedAt: 0, expiresAt: 0, searchExpiresAt: 0, lastChecked: 0 } : p);
+                        const _reset = _players.map(p => {
+                            if (!p.pendingSearch && !p.expectedFoundAt) return p;
+                            const np = { ...p };
+                            delete np.pendingSearch;
+                            delete np.expectedFoundAt;
+                            return np;
+                        });
                         setSetting('killPlayers', _reset);
-                        addLiveLog('Kill scanner: reset alive players to unknown for new account');
+                        addLiveLog('Kill scanner: cleared transient search markers for new account');
                         _reenabled.push(_labels[key]);
                     } else if (key === 'killProtectedRecheck' && !state.killProtectedRecheckEnabled) {
                         state.killProtectedRecheckEnabled = true;
@@ -14009,25 +14373,30 @@ async function doQTPerkRedeem() {
                     autoBuyGun();
                 }
 
-                // Clear stale BG state for BG Farm players — searches were lost on death
-                // Set bgFarmWaitUntil to 3hrs so the kill loop and BG Spam don't act until they can be found
+                // Clear stale BG Farm state from the previous account, but do not
+                // apply a 3hr global wait. The normal search loop must be free
+                // to search every player after Don; BG Farm will resume once its
+                // targets are actually found in Players Found.
                 const _bgFarmPlayers = getSetting('killPlayers', []);
-                const _threeHrs = Date.now() + (3 * 60 * 60 * 1000);
                 const _bgFarmReset = _bgFarmPlayers.map(p => {
                     if (!p.bgFarmEnabled) return p;
                     const np = { ...p };
                     delete np.bodyguard;
                     delete np.expectedFoundAt;
                     delete np.searchExpiresAt;
-                    np.bgFarmWaitUntil = _threeHrs;
+                    delete np.pendingSearch;
+                    delete np.bgFarmWaitUntil;
+                    np.lastBgCheck = 0;
                     return np;
                 });
                 setSetting('killPlayers', _bgFarmReset);
-                setSetting('killBgWaitUntil', _threeHrs);
+                setSetting('killBgWaitUntil', 0);
                 setSetting('killLoopCooldownUntil', 0);
+                setSetting('pendingKillAction', null);
+                setSetting('killLoopActive', false);
                 const _bgFarmCount = _bgFarmPlayers.filter(p => p.bgFarmEnabled).length;
                 if (_bgFarmCount > 0) {
-                    addLiveLog(`BG Farm: cleared stale BG state for ${_bgFarmCount} player(s) — waiting 3hrs for searches to complete`);
+                    addLiveLog(`BG Farm: cleared stale BG state for ${_bgFarmCount} player(s) — search loop can continue`);
                 }
             }
         }
@@ -14250,6 +14619,122 @@ async function doQTPerkRedeem() {
         }
     }
 
+    // ── Per-window bot activation ─────────────────────────────────────────────
+    // The bot must run only in the window you explicitly activate. The old
+    // window.name/sessionStorage approach was not reliable after Cloudflare, and
+    // the URL-hash token approach could confuse navigation. Tampermonkey's
+    // GM_getTab/GM_saveTab is the right fit here: it stores a marker against the
+    // browser tab itself, so it survives normal redirects without touching URLs
+    // and without activating your other game windows.
+    const UG_BOT_WINDOW_NAME = 'ug-bot';
+    const UG_BOT_SESSION_ACTIVE_KEY = 'ugbot_window_active';
+    const UG_BOT_SESSION_TOKEN_KEY  = 'ugbot_window_token';
+
+    let ugBotTabIdentityLoaded = false;
+    let ugBotTabIdentityActive = false;
+    let ugBotTabIdentityToken  = '';
+
+    function makeBotWindowToken() {
+        try {
+            const bytes = new Uint8Array(16);
+            crypto.getRandomValues(bytes);
+            return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+        } catch (_) {
+            return String(Date.now()) + '-' + Math.random().toString(16).slice(2);
+        }
+    }
+
+    function getSessionBotWindowToken() {
+        try { return sessionStorage.getItem(UG_BOT_SESSION_TOKEN_KEY) || ''; } catch (_) { return ''; }
+    }
+
+    function getWindowNameBotToken() {
+        try {
+            const name = String(window.name || '');
+            if (name === UG_BOT_WINDOW_NAME) return getSessionBotWindowToken(); // legacy marker
+            if (name.startsWith(UG_BOT_WINDOW_NAME + ':')) return name.slice((UG_BOT_WINDOW_NAME + ':').length);
+        } catch (_) {}
+        return '';
+    }
+
+    function hasBotWindowSessionFlag() {
+        try { return sessionStorage.getItem(UG_BOT_SESSION_ACTIVE_KEY) === '1'; } catch (_) { return false; }
+    }
+
+    function getBotWindowToken() {
+        return getSessionBotWindowToken() || getWindowNameBotToken() || ugBotTabIdentityToken || '';
+    }
+
+    function setBotWindowSessionFlag(token) {
+        try {
+            sessionStorage.setItem(UG_BOT_SESSION_ACTIVE_KEY, '1');
+            if (token) sessionStorage.setItem(UG_BOT_SESSION_TOKEN_KEY, token);
+        } catch (_) {}
+    }
+
+    function saveBotTabIdentity(token, active = true) {
+        if (typeof GM_getTab !== 'function' || typeof GM_saveTab !== 'function') return;
+        try {
+            GM_getTab(tab => {
+                tab = tab || {};
+                tab.ugbotWindowActive = !!active;
+                if (token) tab.ugbotWindowToken = token;
+                GM_saveTab(tab);
+            });
+        } catch (_) {}
+    }
+
+    function loadBotTabIdentity(done) {
+        if (ugBotTabIdentityLoaded) { done(); return; }
+        if (typeof GM_getTab !== 'function') {
+            ugBotTabIdentityLoaded = true;
+            done();
+            return;
+        }
+        try {
+            GM_getTab(tab => {
+                tab = tab || {};
+                ugBotTabIdentityActive = !!tab.ugbotWindowActive;
+                ugBotTabIdentityToken  = typeof tab.ugbotWindowToken === 'string' ? tab.ugbotWindowToken : '';
+                ugBotTabIdentityLoaded = true;
+                if (ugBotTabIdentityActive) {
+                    activateBotWindowIdentity(ugBotTabIdentityToken, { saveTab: false });
+                }
+                done();
+            });
+        } catch (_) {
+            ugBotTabIdentityLoaded = true;
+            done();
+        }
+    }
+
+    function activateBotWindowIdentity(existingToken = '', opts = {}) {
+        const saveTab = opts.saveTab !== false;
+        const token = existingToken || getBotWindowToken() || makeBotWindowToken();
+        window.name = UG_BOT_WINDOW_NAME + ':' + token;
+        setBotWindowSessionFlag(token);
+        ugBotTabIdentityActive = true;
+        ugBotTabIdentityToken = token;
+        if (saveTab) saveBotTabIdentity(token, true);
+    }
+
+    function isActivatedBotWindow() {
+        return ugBotTabIdentityActive || !!getBotWindowToken() || window.name === UG_BOT_WINDOW_NAME || hasBotWindowSessionFlag();
+    }
+
+    function repairBotWindowIdentityAfterRedirect() {
+        if (ugBotTabIdentityActive) {
+            activateBotWindowIdentity(ugBotTabIdentityToken, { saveTab: false });
+            return;
+        }
+        const token = getBotWindowToken();
+        if (token) {
+            activateBotWindowIdentity(token);
+        } else if (window.name === UG_BOT_WINDOW_NAME || hasBotWindowSessionFlag()) {
+            activateBotWindowIdentity();
+        }
+    }
+
     function init() {
         if (!document.body) {
             setTimeout(init, 300);
@@ -14257,11 +14742,15 @@ async function doQTPerkRedeem() {
         }
 
         // ── Window identity check ─────────────────────────────────────────────
-        // Only run in windows explicitly designated as the bot window via the
-        // activate button. window.name persists across page navigations within
-        // the same window but starts empty in any new window.
-        // If auto account creation is enabled, read the setting directly via
-        if (window.name !== 'ug-bot') {
+        // Load Tampermonkey's per-tab marker first. This survives Cloudflare
+        // redirects without putting anything in the URL and without activating
+        // other browser windows/tabs.
+        if (!ugBotTabIdentityLoaded) {
+            loadBotTabIdentity(() => init());
+            return;
+        }
+        repairBotWindowIdentityAfterRedirect();
+        if (!isActivatedBotWindow()) {
             // Not designated — show a minimal activate button, stay dormant
             const existing = document.querySelector('#ug-bot-activate');
             if (!existing) {
@@ -14271,7 +14760,7 @@ async function doQTPerkRedeem() {
                 btn.style.cssText = 'position:fixed;bottom:10px;right:10px;background:#222;color:#fff;padding:6px 10px;border-radius:6px;cursor:pointer;font-size:12px;z-index:99999;border:1px solid #555;';
                 btn.title = 'Click to activate UG Bot in this window';
                 btn.addEventListener('click', () => {
-                    window.name = 'ug-bot';
+                    activateBotWindowIdentity();
                     btn.remove();
                     init();
                 });
@@ -14378,7 +14867,7 @@ async function doQTPerkRedeem() {
                 if (!isPlayerShootEnabled(p.name)) return false;
                 if (p.lastKillAttempt && (now() - p.lastKillAttempt) < 30000) return false;
                 if (p.requiredBullets && getPlayerBullets() < p.requiredBullets) return false;
-                if (isBgCheckable(p.name) && getBgCheckDueMs(p) <= 0) return false;
+                if (isBgCheckable(p.name)) return false;
                 // Skip if player has a pending bodyguard being searched
                 if (p.bodyguard) return false;
                 // If on kill page, only activate if player is actually in Players Found
@@ -14689,6 +15178,19 @@ async function doQTPerkRedeem() {
                 }
             }
             if (_changed) saveKillPlayers(_players);
+        }
+
+        // ── Singleton guard ───────────────────────────────────────────────────
+        // Prevent multiple script instances running simultaneously during rapid
+        // page reloads. Each instance sets a flag on unsafeWindow; if it's already
+        // set, this instance kills itself immediately.
+        if (typeof unsafeWindow !== 'undefined') {
+            if (unsafeWindow._ugBotRunning) {
+                console.warn('[UG-BOT] Another instance already running — aborting this one');
+                return;
+            }
+            unsafeWindow._ugBotRunning = true;
+            window.addEventListener('unload', () => { unsafeWindow._ugBotRunning = false; });
         }
 
         addLiveLog('Script loaded');
