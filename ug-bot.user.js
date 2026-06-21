@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Full UG Bot
 // @namespace    ug-bot
-// @version      2.6.1
+// @version      2.7.0
 // @description  Auto-runs crimes, GTA, melting, repair, missions, drug running with Swiss Bank management, live log, session stats, action checkboxes, jail handling, runtime tracking, melt pagination, repair cycles, automatic CTC solving, and point-spending features.
 // @match        *://www.underworldgangsters.com/*
 // @match        *://underworldgangsters.com/*
@@ -594,7 +594,7 @@
     // BOT CONFIG
     // =========================================================================
 
-    const SCRIPT_VERSION = '2.6.1';
+    const SCRIPT_VERSION = '2.7.0';
 
     const CRIME_DEFS = [
         { id: 'gang', name: 'Gang Activities' },
@@ -614,6 +614,21 @@
     const CRIME_NAME_BY_ID = Object.fromEntries(CRIME_DEFS.map(c => [c.id, c.name]));
     const DEFAULT_ORDER    = ['gang', 'drug', '1', '3', '4', '5', '6', '7', '2'];
     const ALL_IDS          = [...CRIME_DEFS.map(c => c.id), GTA_DEF.id, MELT_DEF.id];
+
+    // Known crime cooldowns supplied by the game/user.
+    // These let background crimes commit exactly when due without repeatedly
+    // polling /?p=crimes just to discover timers.
+    const BG_CRIME_DEFAULT_COOLDOWNS_MS = {
+        '7':    5 * 1000,        // Pick pennies
+        '6':   10 * 1000,        // Beg for money
+        '5':   20 * 1000,        // Rob a group of kids
+        '4':   30 * 1000,        // Sell pornography to neighbours
+        '3':   60 * 1000,        // Rob a bank
+        drug: 300 * 1000,        // Drug Trafficking
+        '2':  900 * 1000,        // Commit blasphemy
+        '1': 3600 * 1000,        // Steal from a player
+        gang: 1800 * 1000        // Gang Activities
+    };
 
     const GTA_COOLDOWN_MS  = 90 * 1000;
     const MELT_COOLDOWN_MS = 4 * 60 * 1000;
@@ -3212,6 +3227,78 @@
     // BG check / shoot helpers
     // -------------------------------------------------------------------------
 
+    function stripBgFarmVerification(action) {
+        if (!action || typeof action !== 'object') return action;
+        const clean = { ...action };
+        delete clean.bgVerified;
+        delete clean.bgVerifiedAt;
+        delete clean.bgVerifiedSource;
+        delete clean.bgVerifiedFor;
+        delete clean.bgVerifiedBg;
+        if (clean.afterTravel) clean.afterTravel = stripBgFarmVerification(clean.afterTravel);
+        return clean;
+    }
+
+    function markImmediateBgFarmVerification(action, bgFor, bgName) {
+        return {
+            ...action,
+            bgVerified:       true,
+            bgVerifiedAt:     now(),
+            bgVerifiedSource: 'bg_farm_result',
+            bgVerifiedFor:    bgFor || action?.bgFor || null,
+            bgVerifiedBg:     bgName || action?.targetName || null
+        };
+    }
+
+    function isImmediateBgFarmVerification(action, bgFor, bgName) {
+        if (!action || !action.bgVerified) return false;
+        if (action.bgVerifiedSource !== 'bg_farm_result') return false;
+        if (!action.bgVerifiedFor || !action.bgVerifiedBg) return false;
+        if (bgFor && action.bgVerifiedFor.toLowerCase() !== bgFor.toLowerCase()) return false;
+        if (bgName && action.bgVerifiedBg.toLowerCase() !== bgName.toLowerCase()) return false;
+        return true;
+    }
+
+    function queueFreshBgVerifyBeforeShot(bgName, bgFor, shootAfterBg, reason = 'fresh verify required') {
+        if (!bgName || !bgFor) return false;
+        const players = state.killPlayers || [];
+        const ownerIdx = players.findIndex(p => p.name && p.name.toLowerCase() === bgFor.toLowerCase());
+        if (ownerIdx !== -1) {
+            players[ownerIdx].bgVerifyInFlight = true;
+            saveKillPlayers(players);
+        }
+        addLiveLog(`Kill loop: BG Farm — verifying ${bgFor} still has BG ${bgName} before shooting (${reason})`);
+        state.pendingKillAction = {
+            stage: 'bg_farm_check',
+            targetName: bgFor,
+            shootAfterBg: !!shootAfterBg || isPlayerShootEnabled(bgFor),
+            force: true,
+            afterVerify: { stage: 'bg_shoot', targetName: bgName, bgFor, shootAfterBg: !!shootAfterBg || isPlayerShootEnabled(bgFor) }
+        };
+        state.killLoopActive = true;
+        state.killSearchLoopActive = false;
+        return true;
+    }
+
+    function clearStaleBgRelation(bgName, bgFor, reason = 'stale') {
+        if (!bgName || !bgFor) return;
+        const players = state.killPlayers || [];
+        const bgIdx = players.findIndex(p => p.name && p.name.toLowerCase() === bgName.toLowerCase());
+        if (bgIdx !== -1) {
+            delete players[bgIdx].isBg;
+            delete players[bgIdx].bgFor;
+            delete players[bgIdx].bgShootQueued;
+        }
+        const ownerIdx = players.findIndex(p => p.name && p.name.toLowerCase() === bgFor.toLowerCase());
+        if (ownerIdx !== -1 && players[ownerIdx].bodyguard &&
+            players[ownerIdx].bodyguard.toLowerCase() === bgName.toLowerCase()) {
+            players[ownerIdx].bodyguard = null;
+            delete players[ownerIdx].bgVerifyInFlight;
+        }
+        saveKillPlayers(players);
+        addLiveLog(`Kill loop: ${bgName} no longer confirmed as BG for ${bgFor} — ${reason}`);
+    }
+
     // Returns true if a player has BG check enabled (per-player toggle)
     function isPlayerBgCheckEnabled(name) {
         const list = state.killBgCheckPlayers || [];
@@ -4108,8 +4195,9 @@
             // Verify this BG is still the stored bodyguard for their target.
             // If the target has a different BG stored, this player's flags are stale — detach them.
             const bgForPlayer = players.find(pl => pl.name.toLowerCase() === p.bgFor.toLowerCase());
-            if (bgForPlayer && bgForPlayer.bodyguard && bgForPlayer.bodyguard.toLowerCase() !== p.name.toLowerCase()) {
-                addLiveLog(`Kill loop: ${p.name} is no longer BG for ${p.bgFor} (now ${bgForPlayer.bodyguard}) — clearing stale flags`);
+            if (!bgForPlayer || !bgForPlayer.bodyguard || bgForPlayer.bodyguard.toLowerCase() !== p.name.toLowerCase()) {
+                const nowBg = bgForPlayer?.bodyguard || 'none';
+                addLiveLog(`Kill loop: ${p.name} is no longer confirmed as BG for ${p.bgFor} (now ${nowBg}) — clearing stale flags`);
                 delete p.isBg;
                 delete p.bgFor;
                 delete p.bgShootQueued;
@@ -4161,7 +4249,6 @@
             // Respect lastKillAttempt cooldown — don't re-queue if recently failed
             if (p.lastKillAttempt && (now() - p.lastKillAttempt) < 30000) continue;
             const isFarmTarget = isPlayerBgFarmEnabled(p.bgFor);
-            addLiveLog(`Kill loop: bodyguard ${p.name} is now found — queuing shoot for ${p.bgFor}${isFarmTarget ? ' (BG Farm)' : ''}`);
             // Mark as queued so syncKillExpiryFromPage doesn't re-queue on every visit
             const bgQIdx = players.findIndex(pl => pl.name.toLowerCase() === p.name.toLowerCase());
             if (bgQIdx !== -1) { players[bgQIdx].bgShootQueued = true; saveKillPlayers(players); }
@@ -4171,7 +4258,20 @@
                 delete players[bgForIdx].bgFarmWaitUntil;
                 saveKillPlayers(players);
             }
-            state.pendingKillAction = { stage: 'bg_shoot', targetName: p.name, bgFor: p.bgFor, shootAfterBg: isPlayerShootEnabled(p.bgFor) };
+            if (isFarmTarget) {
+                addLiveLog(`Kill loop: bodyguard ${p.name} is now found for ${p.bgFor} (BG Farm) — verifying original before shoot`);
+                if (bgForIdx !== -1) { players[bgForIdx].bgVerifyInFlight = true; saveKillPlayers(players); }
+                state.pendingKillAction = {
+                    stage: 'bg_farm_check',
+                    targetName: p.bgFor,
+                    shootAfterBg: isPlayerShootEnabled(p.bgFor),
+                    force: true,
+                    afterVerify: { stage: 'bg_shoot', targetName: p.name, bgFor: p.bgFor, shootAfterBg: isPlayerShootEnabled(p.bgFor) }
+                };
+            } else {
+                addLiveLog(`Kill loop: bodyguard ${p.name} is now found — queuing shoot for ${p.bgFor}`);
+                state.pendingKillAction = { stage: 'bg_shoot', targetName: p.name, bgFor: p.bgFor, shootAfterBg: isPlayerShootEnabled(p.bgFor) };
+            }
             state.killLoopActive   = true;
             state.killBgWaitUntil  = 0;
             if (isFarmTarget) state.killBgSpamPaused = true;
@@ -6120,6 +6220,123 @@ async function doQTPerkRedeem() {
     let bgCrimeActive = false;
     let bgCrimeToken  = null;
     let bgCrimeCooldowns = {};
+    let bgCrimeNextPageFetchAt = 0;
+    let bgCrimeFetchBackoffMs  = 5000;
+    let bgCrimeJailPauseUntil  = 0;
+    let bgCrimeJailPauseLogged = false;
+
+    const BG_CRIME_READY_POLL_MS       = 250;
+    const BG_CRIME_IDLE_POLL_MS        = 5000;
+    const BG_CRIME_FETCH_BACKOFF_MIN   = 5000;
+    const BG_CRIME_FETCH_BACKOFF_MAX   = 60000;
+    const BG_CRIME_JAIL_FALLBACK_MS    = 30000;
+
+    function getBgCrimeIds() {
+        const gangText = (document.querySelector('#player-gang')?.textContent || '').trim().toLowerCase();
+        const inGang = !!gangText && gangText !== 'none';
+        return inGang ? ['gang', '7', '6', '5', '4', '3', 'drug', '2', '1'] : ['7', '6', '5', '4', '3', 'drug', '2', '1'];
+    }
+
+    function getBgCrimeDefaultCooldownMs(id) {
+        return BG_CRIME_DEFAULT_COOLDOWNS_MS[id] || BG_CRIME_FETCH_BACKOFF_MIN;
+    }
+
+    function setBgCrimeCooldown(id, baseTimeMs = Date.now(), serverSeconds = null) {
+        const parsedSecs = serverSeconds == null ? null : parseInt(serverSeconds, 10);
+        if (parsedSecs !== null && Number.isFinite(parsedSecs)) {
+            bgCrimeCooldowns[id] = parsedSecs <= 0 ? 0 : baseTimeMs + (parsedSecs * 1000);
+            return;
+        }
+        bgCrimeCooldowns[id] = baseTimeMs + getBgCrimeDefaultCooldownMs(id);
+    }
+
+    function getActiveBgCrimeIds() {
+        const ids = getBgCrimeIds();
+        const enabled = ids.filter(id => state.enabledActions.includes(id));
+        return enabled.length > 0 ? enabled : ids;
+    }
+
+    function getBgCrimeJailDelayMs(doc = document) {
+        const jailNode = doc.querySelector?.('#jailn');
+        const jailText = jailNode ? textOf(jailNode) : '';
+        const parsed = jailText ? parseDurationTextToMs(jailText) : null;
+        if (parsed && Number.isFinite(parsed) && parsed > 0) return parsed + 5000;
+
+        if (doc === document) {
+            const ownTimer = getOwnJailTimerMs();
+            if (ownTimer && Number.isFinite(ownTimer) && ownTimer > 0) return ownTimer + 5000;
+
+            if (state.jailReleasesAt && state.jailReleasesAt > Date.now()) {
+                return Math.max(5000, state.jailReleasesAt - Date.now() + 5000);
+            }
+        }
+
+        return BG_CRIME_JAIL_FALLBACK_MS;
+    }
+
+    function noteBgCrimeJailPause(doc = document) {
+        bgCrimeToken = null;
+        bgCrimeJailPauseUntil = Date.now() + getBgCrimeJailDelayMs(doc);
+        if (!bgCrimeJailPauseLogged) {
+            addLiveLog('BG Crime: jailed — pausing background crime page fetches');
+            bgCrimeJailPauseLogged = true;
+        }
+    }
+
+    function resetBgCrimeFetchBackoff() {
+        bgCrimeFetchBackoffMs = BG_CRIME_FETCH_BACKOFF_MIN;
+        bgCrimeNextPageFetchAt = 0;
+    }
+
+    function bumpBgCrimeFetchBackoff() {
+        bgCrimeNextPageFetchAt = Date.now() + bgCrimeFetchBackoffMs;
+        bgCrimeFetchBackoffMs = Math.min(BG_CRIME_FETCH_BACKOFF_MAX, Math.round(bgCrimeFetchBackoffMs * 1.5));
+    }
+
+    function getBgCrimeScheduleDelayMs() {
+        const nowMs = Date.now();
+
+        if (bgCrimeJailPauseUntil > nowMs) {
+            return Math.max(1000, bgCrimeJailPauseUntil - nowMs);
+        }
+
+        if (isLikelyJailPage()) {
+            noteBgCrimeJailPause(document);
+            return Math.max(1000, bgCrimeJailPauseUntil - Date.now());
+        }
+
+        bgCrimeJailPauseLogged = false;
+
+        const activeIds = getActiveBgCrimeIds();
+        if (!activeIds.length) return BG_CRIME_IDLE_POLL_MS;
+
+        const known = activeIds.filter(id => bgCrimeCooldowns[id] !== undefined);
+        const dueKnown = known.filter(id => (bgCrimeCooldowns[id] || 0) <= nowMs);
+        const futureTimes = known
+            .map(id => bgCrimeCooldowns[id])
+            .filter(t => t && t > nowMs)
+            .sort((a, b) => a - b);
+
+        if (!bgCrimeToken) {
+            // No token + known future timers means there is nothing useful to fetch yet.
+            if (known.length > 0 && dueKnown.length === 0) {
+                return futureTimes[0] ? Math.max(1000, futureTimes[0] - nowMs) : BG_CRIME_IDLE_POLL_MS;
+            }
+
+            // Initial token load or token refresh for a due crime. Respect backoff.
+            if (bgCrimeNextPageFetchAt > nowMs) {
+                return Math.max(1000, bgCrimeNextPageFetchAt - nowMs);
+            }
+            return BG_CRIME_READY_POLL_MS;
+        }
+
+        // With a token, unknown cooldowns are allowed only for first-time startup;
+        // after a crimes-page parse, active ids are given explicit cooldowns.
+        const due = activeIds.some(id => (bgCrimeCooldowns[id] ?? 0) <= nowMs);
+        if (due) return BG_CRIME_READY_POLL_MS;
+
+        return futureTimes[0] ? Math.max(1000, futureTimes[0] - nowMs) : BG_CRIME_IDLE_POLL_MS;
+    }
 
     function startBgCrime() {
         if (bgCrimeActive) return;
@@ -6132,44 +6349,60 @@ async function doQTPerkRedeem() {
         if (bgCrimeTimer) { clearTimeout(bgCrimeTimer); bgCrimeTimer = null; }
         bgCrimeToken = null;
         bgCrimeCooldowns = {};
+        bgCrimeNextPageFetchAt = 0;
+        bgCrimeFetchBackoffMs = BG_CRIME_FETCH_BACKOFF_MIN;
+        bgCrimeJailPauseUntil = 0;
+        bgCrimeJailPauseLogged = false;
     }
 
     function scheduleBgCrimePoll() {
+        if (bgCrimeTimer) { clearTimeout(bgCrimeTimer); bgCrimeTimer = null; }
         if (!bgCrimeActive) return;
-        const _inGang = (document.querySelector('#player-gang')?.textContent || '').trim().toLowerCase() !== 'none';
-        const crimeIds = _inGang ? ['gang', '7', '6', '5', '4', '3', 'drug', '2', '1'] : ['7', '6', '5', '4', '3', 'drug', '2', '1'];
-        // bgCrimeCooldowns stores absolute timestamps (ms) when each crime is ready
-        const nowMs = Date.now();
-        const available = crimeIds.some(id => (bgCrimeCooldowns[id] ?? 0) <= nowMs);
-        let delay = 100; // Short retry when crimes are available
-        if (!available) {
-            const soonestAt = crimeIds
-                .filter(id => bgCrimeCooldowns[id] !== undefined && bgCrimeCooldowns[id] > nowMs)
-                .map(id => bgCrimeCooldowns[id])
-                .sort((a, b) => a - b)[0];
-            delay = soonestAt ? Math.max(50, soonestAt - nowMs) : 5000;
-        }
-        bgCrimeTimer = setTimeout(doBgCrimePoll, delay);
+        bgCrimeTimer = setTimeout(doBgCrimePoll, getBgCrimeScheduleDelayMs());
     }
 
     async function doBgCrimePoll() {
         if (!bgCrimeActive || !state.bgCrimeEnabled || !state.enabled || crimePaused) { scheduleBgCrimePoll(); return; }
         if (hasCTCChallenge()) { scheduleBgCrimePoll(); return; }
 
-        try {
-            const _inGang = (document.querySelector('#player-gang')?.textContent || '').trim().toLowerCase() !== 'none';
-        const crimeIds = _inGang ? ['gang', '7', '6', '5', '4', '3', 'drug', '2', '1'] : ['7', '6', '5', '4', '3', 'drug', '2', '1'];
+        if (isLikelyJailPage()) {
+            noteBgCrimeJailPause(document);
+            scheduleBgCrimePoll();
+            return;
+        }
 
-            // Only fetch crimes page if we don't have a cached token
-            // After initial fetch, we chain tokens from each crime response
+        if (bgCrimeJailPauseUntil > Date.now()) { scheduleBgCrimePoll(); return; }
+        bgCrimeJailPauseLogged = false;
+
+        const activeIds = getActiveBgCrimeIds();
+        if (!activeIds.length) { scheduleBgCrimePoll(); return; }
+
+        try {
+            const nowMs = Date.now();
+            const known = activeIds.filter(id => bgCrimeCooldowns[id] !== undefined);
+            const dueKnown = known.filter(id => (bgCrimeCooldowns[id] || 0) <= nowMs);
+
+            // Only refresh /?p=crimes when we actually need a token for a due crime.
+            // If all enabled crimes have future cooldowns, do not poll the page just because the token is missing.
             if (!bgCrimeToken) {
+                if (known.length > 0 && dueKnown.length === 0) {
+                    scheduleBgCrimePoll();
+                    return;
+                }
+
+                if (bgCrimeNextPageFetchAt > nowMs) {
+                    scheduleBgCrimePoll();
+                    return;
+                }
+
                 const pageResp = await fetch('/?p=crimes', { credentials: 'include', cache: 'no-store' });
                 const pageText = await pageResp.text();
                 const parser = new DOMParser();
                 const doc = parser.parseFromString(pageText, 'text/html');
 
-                // Check for jail
+                // Check for jail. Do not repeatedly poll the crimes page while jailed.
                 if (doc.querySelector('#jailn') || pageText.includes('jailn')) {
+                    noteBgCrimeJailPause(doc);
                     scheduleBgCrimePoll();
                     return;
                 }
@@ -6178,24 +6411,33 @@ async function doQTPerkRedeem() {
                 const scripts = [...doc.querySelectorAll('script')];
                 const crimeScript = scripts.find(s => s.textContent.includes('unluckykidda'));
                 const token = crimeScript?.textContent.match(/var unluckykidda\s*=\s*["']([a-f0-9]+)["']/)?.[1];
-                if (!token) { scheduleBgCrimePoll(); return; }
+                if (!token) {
+                    bumpBgCrimeFetchBackoff();
+                    scheduleBgCrimePoll();
+                    return;
+                }
 
                 bgCrimeToken = token;
+                resetBgCrimeFetchBackoff();
 
-                // Get initial cooldowns — convert relative seconds to absolute timestamps
+                // Get initial cooldowns — convert relative seconds to absolute timestamps.
+                // The page is still useful for the first token/state load, but after that
+                // successful crime responses use fixed per-crime cooldown defaults when
+                // the response does not include an explicit timing update.
+                const pageTimerBase = Date.now();
                 const timingMatches = [...(crimeScript?.textContent.matchAll(/timing\["([^"]+)"\]\s*=\s*"?(-?\d+)"?/g) || [])];
-                timingMatches.forEach(m => {
-                    const secs = parseInt(m[2]);
-                    bgCrimeCooldowns[m[1]] = secs <= 0 ? 0 : Date.now() + (secs * 1000);
+                timingMatches.forEach(m => setBgCrimeCooldown(m[1], pageTimerBase, m[2]));
+
+                // If the page omitted an enabled crime timer, make a single normal attempt.
+                // Once it succeeds, fixed cooldowns keep it timer-driven without page polling.
+                activeIds.forEach(id => {
+                    if (bgCrimeCooldowns[id] === undefined) bgCrimeCooldowns[id] = 0;
                 });
             }
 
-            // Commit all available crimes using cached cooldowns
-            // Only commit crimes that are ticked in enabledActions — fall back to all if none ticked
-            const _enabledCrimes = crimeIds.filter(id => state.enabledActions.includes(id));
-            const _activeCrimes = _enabledCrimes.length > 0 ? _enabledCrimes : crimeIds;
-            const nowMs = Date.now();
-            const available = _activeCrimes.filter(id => (bgCrimeCooldowns[id] ?? 0) <= nowMs);
+            // Commit all currently due enabled crimes using cached cooldowns.
+            const commitNow = Date.now();
+            const available = activeIds.filter(id => (bgCrimeCooldowns[id] ?? 0) <= commitNow);
             for (const id of available) {
                 if (!bgCrimeToken) break;
                 if (!bgCrimeActive || !state.bgCrimeEnabled) break;
@@ -6211,25 +6453,42 @@ async function doQTPerkRedeem() {
                     return;
                 }
 
+                if (/#jailn|jail/i.test(text) && !/jailbroken|jail break/i.test(text)) {
+                    bgCrimeToken = null;
+                    bgCrimeJailPauseUntil = Date.now() + BG_CRIME_JAIL_FALLBACK_MS;
+                    if (!bgCrimeJailPauseLogged) {
+                        addLiveLog('BG Crime: jailed after crime — pausing background crime page fetches');
+                        bgCrimeJailPauseLogged = true;
+                    }
+                    scheduleBgCrimePoll();
+                    return;
+                }
+
                 const newToken = text.match(/var unluckykidda\s*=\s*["']([a-f0-9]+)["']/)?.[1];
                 const result = text.match(/^([^<\n]+)/)?.[1]?.trim();
 
                 if (newToken) {
                     bgCrimeToken = newToken;
-                    // Update cooldown as absolute timestamp
-                    const timingMatch = text.match(new RegExp(`timing\\["${id}"\\]\\s*=\\s*"?(\\d+)"?`));
-                    if (timingMatch) bgCrimeCooldowns[id] = Date.now() + (parseInt(timingMatch[1]) * 1000);
+                    resetBgCrimeFetchBackoff();
+                    // Update cooldown as absolute timestamp. If the AJAX response does
+                    // not include a fresh timer, fall back to the known fixed cooldown for
+                    // this exact crime instead of using a short retry/backoff delay.
+                    const timingMatch = text.match(new RegExp(`timing\\["${id}"\\]\\s*=\\s*"?(-?\\d+)"?`));
+                    setBgCrimeCooldown(id, Date.now(), timingMatch ? timingMatch[1] : null);
                     addLiveLog(`BG Crime: ${result || 'committed crime ' + id}`);
                 } else {
-                    // Token rejected — clear it so next poll re-fetches crimes page
+                    // Token rejected or response was incomplete. Do not instantly refetch /?p=crimes.
                     bgCrimeToken = null;
+                    bgCrimeCooldowns[id] = Date.now() + BG_CRIME_FETCH_BACKOFF_MIN;
+                    bumpBgCrimeFetchBackoff();
                     break;
                 }
                 await wait(150);
             }
         } catch (e) {
             addLiveLog(`BG Crime: error — ${e.message}`);
-            bgCrimeToken = null; // clear token on error so next poll re-fetches
+            bgCrimeToken = null; // clear token, but respect fetch backoff before refreshing the crimes page
+            bumpBgCrimeFetchBackoff();
         }
         scheduleBgCrimePoll();
     }
@@ -6319,6 +6578,24 @@ async function doQTPerkRedeem() {
         delete cleaned.navKey;
         delete cleaned.navIssuedAt;
         return cleaned;
+    }
+
+    function escapeRegExp(str) {
+        return String(str || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    }
+
+    function hasBulletFactoryDriveSuccessMessage(country) {
+        if (!country) return false;
+        const re = new RegExp(`\\bYou\\s+drove\\s+to\\s+${escapeRegExp(country)}!?`, 'i');
+        return [...document.querySelectorAll('.bgm.cg, .bgm.success, .bgm')]
+            .some(el => re.test(textOf(el)));
+    }
+
+    function isBulletFactoryDriveConfirmed(target) {
+        if (!target?.country) return false;
+        if (hasBulletFactoryDriveSuccessMessage(target.country)) return true;
+        const playerCountry = getPlayerLocation();
+        return !!playerCountry && playerCountry.toLowerCase() === target.country.toLowerCase();
     }
 
     // Fetches the Global Owners page and returns countries with 300+ bullet stock
@@ -9297,6 +9574,11 @@ async function doQTPerkRedeem() {
                         }
                     }
 
+                    const expectedVerifiedBg = pending.afterVerify?.targetName || null;
+                    if (expectedVerifiedBg && expectedVerifiedBg.toLowerCase() !== bgName.toLowerCase()) {
+                        clearStaleBgRelation(expectedVerifiedBg, target, `fresh verify found ${bgName} instead`);
+                    }
+
                     if (tIdx !== -1) { players[tIdx].bodyguard = bgName; saveKillPlayers(players); }
 
                     // Add BG to kill list if not already there
@@ -9319,11 +9601,12 @@ async function doQTPerkRedeem() {
                     if (alreadyFound) {
                         // This 1-bullet BG Farm check just verified that target currently has this BG.
                         // Carry bgVerified through so bg_shoot does not re-run the same verify loop.
-                        const verifiedAction = pending.afterVerify &&
+                        const verifiedActionBase = pending.afterVerify &&
                             pending.afterVerify.targetName &&
                             pending.afterVerify.targetName.toLowerCase() === bgName.toLowerCase()
-                            ? { ...pending.afterVerify, shootAfterBg: isPlayerShootEnabled(target), bgVerified: true }
-                            : { stage: 'bg_shoot', targetName: bgName, bgFor: target, shootAfterBg: isPlayerShootEnabled(target), bgVerified: true };
+                            ? { ...pending.afterVerify, shootAfterBg: isPlayerShootEnabled(target) }
+                            : { stage: 'bg_shoot', targetName: bgName, bgFor: target, shootAfterBg: isPlayerShootEnabled(target) };
+                        const verifiedAction = markImmediateBgFarmVerification(verifiedActionBase, target, bgName);
                         addLiveLog(`Kill loop: BG Farm — ${bgName} already found and verified as ${target}'s BG — queuing immediate BG kill`);
                         state.pendingKillAction = verifiedAction;
                         state.killLoopActive    = true;
@@ -9347,6 +9630,7 @@ async function doQTPerkRedeem() {
                             pl[bgIdxWait].pendingSearch = true;
                             pl[bgIdxWait].expectedFoundAt = now() + foundInMs;
                         }
+                        if (idx !== -1) { delete pl[idx].bgVerifyInFlight; }
                         if (idx !== -1 || bgIdxWait !== -1) saveKillPlayers(pl);
                         state.pendingKillAction    = null;
                         state.killSearchLoopActive = true;
@@ -9369,6 +9653,7 @@ async function doQTPerkRedeem() {
                             // but do not suppress future interval checks for the full BG search time.
                             pl2[tIdx2].lastBgCheck = now();
                             delete pl2[tIdx2].bgFarmWaitUntil;
+                            delete pl2[tIdx2].bgVerifyInFlight;
                         }
                         saveKillPlayers(pl2);
                         state.pendingKillAction    = null;
@@ -9381,9 +9666,10 @@ async function doQTPerkRedeem() {
                 // No BG — target is unprotected
                 if (pending.afterVerify) {
                     addLiveLog(`Kill loop: BG Farm — ${target} no longer has BG ${pending.afterVerify.targetName} — aborting shot`);
+                    clearStaleBgRelation(pending.afterVerify.targetName, target, 'fresh verify found no BG');
                     const pl  = state.killPlayers || [];
                     const idx = pl.findIndex(p => p.name.toLowerCase() === target.toLowerCase());
-                    if (idx !== -1) { delete pl[idx].bodyguard; pl[idx].lastBgCheck = now(); saveKillPlayers(pl); }
+                    if (idx !== -1) { delete pl[idx].bodyguard; delete pl[idx].bgVerifyInFlight; pl[idx].lastBgCheck = now(); saveKillPlayers(pl); }
                     if (shouldKillAfterCleanBgCheck(target)) {
                         addLiveLog(`Kill loop: BG Farm — clean check, Kill is still enabled — proceeding to kill ${target}`);
                         state.pendingKillAction = { stage: 'fetch_profile', targetName: target, bgFor: pending.bgFor || null };
@@ -9539,15 +9825,12 @@ async function doQTPerkRedeem() {
                                 saveKillPlayers(players);
                                 renderKillList();
                                 // Trigger BG shoot flow directly
-                                state.pendingKillAction = {
+                                state.pendingKillAction = markImmediateBgFarmVerification({
                                     stage:       'bg_shoot',
                                     targetName:  bgName,
                                     bgFor:       target,
-                                    shootAfterBg: isPlayerShootEnabled(target),
-                                    // The 1-bullet check that produced this result has just verified
-                                    // that target currently has this BG, so do not verify-loop.
-                                    bgVerified:  true
-                                };
+                                    shootAfterBg: isPlayerShootEnabled(target)
+                                }, target, bgName);
                                 await wait(navRand());
                                 gotoPage('kill');
                                 return;
@@ -9788,11 +10071,38 @@ async function doQTPerkRedeem() {
             const bgName = pendingNow.targetName;
             const bgFor  = pendingNow.bgFor;
 
+            // Strict stale-BG guard: old stored bgFor/bodyguard state is never enough to fire a BG shot.
+            // If this BG shot is for a BG Farm target and it was not created by the current 1-bullet
+            // verification result, re-check the original target BEFORE penalty checks, travel, profile
+            // fetches, bullet redemption, or the actual shot. This prevents very old stale BGs from
+            // costing bullets just because they later appear in Players Found.
+            if (bgFor && isPlayerBgFarmEnabled(bgFor) && !isImmediateBgFarmVerification(pendingNow, bgFor, bgName)) {
+                queueFreshBgVerifyBeforeShot(bgName, bgFor, pendingNow.shootAfterBg, 'no current verification token');
+                await wait(navRand());
+                gotoPage('kill');
+                return;
+            }
+
+            // Even after a fresh verification token, make sure the stored relation has not already been
+            // contradicted by a newer BG Farm check before the shot stage resumes.
+            if (bgFor && isPlayerBgFarmEnabled(bgFor)) {
+                const relPlayers = state.killPlayers || [];
+                const owner = relPlayers.find(p => p.name && p.name.toLowerCase() === bgFor.toLowerCase());
+                if (!owner || !owner.bodyguard || owner.bodyguard.toLowerCase() !== bgName.toLowerCase()) {
+                    clearStaleBgRelation(bgName, bgFor, `stored BG is ${owner?.bodyguard || 'none'}`);
+                    state.pendingKillAction = null;
+                    state.killLoopActive = false;
+                    await wait(navRand());
+                    gotoPage('crimes');
+                    return;
+                }
+            }
+
             // If penalty is too high, defer the BG kill until the penalty drops.
             // Keep BG Farm/BG Spam checks alive; only the real kill shot is paused.
             if (isKillPenaltyTooHigh()) {
                 const needPenaltyPage = deferKillForPenalty(
-                    { stage: 'bg_shoot', targetName: bgName, bgFor, shootAfterBg: pendingNow.shootAfterBg },
+                    { stage: 'bg_shoot', targetName: bgName, bgFor, shootAfterBg: pendingNow.shootAfterBg, bgVerified: pendingNow.bgVerified, bgVerifiedAt: pendingNow.bgVerifiedAt },
                     `shooting bodyguard ${bgName}`
                 );
                 if (needPenaltyPage) {
@@ -9854,7 +10164,7 @@ async function doQTPerkRedeem() {
                 // Set travel stage so we're ready when drive is ready
                 // Use killBgWaitUntil to suppress bounce — travel stage bypasses it when ready
                 state.pendingKillAction = { stage: 'travel', travelTo: bgCountry, targetName: bgName,
-                    afterTravel: { stage: 'bg_shoot', targetName: bgName, bgFor, shootAfterBg: pendingNow.shootAfterBg, bgVerified: pendingNow.bgVerified } };
+                    afterTravel: stripBgFarmVerification({ stage: 'bg_shoot', targetName: bgName, bgFor, shootAfterBg: pendingNow.shootAfterBg }) };
                 state.killBgWaitUntil = now() + getInternalDriveRemainingMs() + 2000;
                 await wait(navRand());
                 gotoPage('crimes');
@@ -9864,7 +10174,7 @@ async function doQTPerkRedeem() {
             if (needsBgTravel) {
                 addLiveLog(`Kill loop: travelling to ${bgCountry} to shoot bodyguard ${bgName}`);
                 state.pendingKillAction = { stage: 'travel', travelTo: bgCountry, targetName: bgName,
-                    afterTravel: { stage: 'bg_shoot', targetName: bgName, bgFor, shootAfterBg: pendingNow.shootAfterBg, bgVerified: pendingNow.bgVerified } };
+                    afterTravel: stripBgFarmVerification({ stage: 'bg_shoot', targetName: bgName, bgFor, shootAfterBg: pendingNow.shootAfterBg }) };
                 await wait(navRand());
                 gotoPage('cars');
                 return;
@@ -9902,7 +10212,7 @@ async function doQTPerkRedeem() {
                 if (getPlayerBullets() < bgBullets) {
                     addLiveLog(`Kill loop: not enough bullets for BG shot (need ${bgBullets.toLocaleString()}, have ${getPlayerBullets().toLocaleString()}) — waiting`);
                     // Store shoot target separately so BG Farm interval checks can still run
-                    state.killBgShootPending  = { stage: 'bg_shoot', targetName: bgName, bgFor: bgFor || null, shootAfterBg: pendingNow.shootAfterBg, bgVerified: pendingNow.bgVerified };
+                    state.killBgShootPending  = stripBgFarmVerification({ stage: 'bg_shoot', targetName: bgName, bgFor: bgFor || null, shootAfterBg: pendingNow.shootAfterBg });
                     state.pendingKillAction   = null;
                     state.killLoopActive      = false;
                     state.killBgSpamPaused    = false;
@@ -9911,10 +10221,10 @@ async function doQTPerkRedeem() {
                     return;
                 }
             }
-            // For BG Farm players without BG Spam, do a 1-bullet verify before shooting
-            // to confirm the target still has this BG (they may have dropped protection)
-            if (bgFor && isPlayerBgFarmEnabled(bgFor) && !state.killBgSpamEnabled &&
-                !pendingNow.bgVerified) {
+            // For BG Farm players, do a fresh 1-bullet verify before shooting
+            // unless a very recent verify already confirmed this exact BG relationship
+            if (bgFor && isPlayerBgFarmEnabled(bgFor) &&
+                !isImmediateBgFarmVerification(pendingNow, bgFor, bgName)) {
                 if (state.killDebugEnabled) {
                     addLiveLog(`[DEBUG] verify trigger: bgName=${bgName} bgFor=${bgFor} pendingNow=${JSON.stringify(pendingNow)}`);
                 }
@@ -9925,7 +10235,7 @@ async function doQTPerkRedeem() {
                 state.pendingKillAction = {
                     stage: 'bg_farm_check',
                     targetName: bgFor,
-                    afterVerify: { stage: 'bg_shoot', targetName: bgName, bgFor, shootAfterBg: pendingNow.shootAfterBg, bgVerified: true }
+                    afterVerify: { stage: 'bg_shoot', targetName: bgName, bgFor, shootAfterBg: pendingNow.shootAfterBg }
                 };
                 await wait(navRand());
                 gotoPage('kill');
@@ -10475,6 +10785,20 @@ async function doQTPerkRedeem() {
 
     // Handles the full shoot flow — shoots targetName, then BG checks bgFor if set
     async function doKillShootFlow(targetName, bgFor = null) {
+        // Final safety net: if any legacy/deferred path tries to shoot a BG Farm BG directly
+        // through fetch_profile/doKillShootFlow, bounce it back through a fresh original-target
+        // 1-bullet verification first. This protects against stale pending state carried from
+        // older script versions or restored storage.
+        if (bgFor && targetName && targetName.toLowerCase() !== bgFor.toLowerCase() && isPlayerBgFarmEnabled(bgFor)) {
+            const pa = state.pendingKillAction;
+            if (!isImmediateBgFarmVerification(pa, bgFor, targetName)) {
+                queueFreshBgVerifyBeforeShot(targetName, bgFor, pa?.shootAfterBg || isPlayerShootEnabled(bgFor), 'direct shoot path');
+                await wait(navRand());
+                gotoPage('kill');
+                return;
+            }
+        }
+
         // Block all real kills when penalty is too high — 1-bullet BG checks remain allowed.
         // Store a safe resume action instead of clearing the kill entirely. For BG-checkable
         // targets, resume with another 1-bullet check so we do not kill on stale no-BG data.
@@ -11021,8 +11345,21 @@ async function doQTPerkRedeem() {
             const _bspBgP = _bspPlayers.find(p => p.name.toLowerCase() === (_bsp.targetName || '').toLowerCase());
             const _bspBgB = _bspBgP?.requiredBullets || 0;
             if (_bspBgB && getPlayerBullets() >= _bspBgB) {
-                addLiveLog(`Kill loop: bullets sufficient for ${_bsp.targetName} — restoring bg_shoot`);
-                state.pendingKillAction  = _bsp;
+                if (_bsp.bgFor && isPlayerBgFarmEnabled(_bsp.bgFor)) {
+                    addLiveLog(`Kill loop: bullets sufficient for ${_bsp.targetName} — re-verifying ${_bsp.bgFor} before BG shot`);
+                    const _ownIdx = _bspPlayers.findIndex(p => p.name.toLowerCase() === _bsp.bgFor.toLowerCase());
+                    if (_ownIdx !== -1) { _bspPlayers[_ownIdx].bgVerifyInFlight = true; saveKillPlayers(_bspPlayers); }
+                    state.pendingKillAction = {
+                        stage: 'bg_farm_check',
+                        targetName: _bsp.bgFor,
+                        shootAfterBg: _bsp.shootAfterBg || isPlayerShootEnabled(_bsp.bgFor),
+                        force: true,
+                        afterVerify: stripBgFarmVerification(_bsp)
+                    };
+                } else {
+                    addLiveLog(`Kill loop: bullets sufficient for ${_bsp.targetName} — restoring bg_shoot`);
+                    state.pendingKillAction  = _bsp;
+                }
                 state.killBgShootPending = null;
                 state.killLoopActive     = true;
             }
@@ -11092,7 +11429,12 @@ async function doQTPerkRedeem() {
             state.pendingKillAction !== null &&
             !killLoopWaitingForDrive &&
             !bgShootWaitingForDrive;
-        if (state.killSearchLoopActive && !killLoopBlocksSearch) {
+        // While Bullet Factory has an active run, suppress normal Kill Search navigation.
+        // Urgent Kill/BG work is handled above by the kill loop and can still pause BF;
+        // this guard prevents low-priority search/protected rechecks from fighting the
+        // car/factory travel flow during lag.
+        const bulletFactoryBlocksNormalKillSearch = !!state.pendingBulletRun;
+        if (state.killSearchLoopActive && !killLoopBlocksSearch && !bulletFactoryBlocksNormalKillSearch) {
             // Don't intercept GTA or melt pages — let them complete
             if (isGTAPage() || hasGTAPageMarkers() || isMeltPage() || hasMeltPageMarkers()) {
                 // Fall through to normal page handling
@@ -11402,9 +11744,17 @@ async function doQTPerkRedeem() {
                 }
 
                 if (run.stage === 'travel_car') {
-                    // Drive ready — on car detail page, drive to destination
+                    // Drive ready — on car detail page, drive to destination.
+                    // v21: if the car-detail navigation lags, do not hammer the
+                    // same car URL repeatedly; wait briefly for the first navigation
+                    // to settle before retrying.
                     if (!isCarPage()) {
                         if (run.travelCarUrl) {
+                            const navKey = `car:${run.travelCarUrl}`;
+                            if (isBulletFactoryNavRecentlyIssued(run, navKey)) {
+                                return;
+                            }
+                            markBulletFactoryNavIssued(run, navKey);
                             navigateToUrl(run.travelCarUrl);
                         } else {
                             state.pendingBulletRun = { ...run, stage: 'travel' };
@@ -11412,7 +11762,38 @@ async function doQTPerkRedeem() {
                         }
                         return;
                     }
+                    if (run.navKey || run.navIssuedAt) {
+                        state.pendingBulletRun = clearBulletFactoryNavMarker(run);
+                    }
                     await handleBulletFactoryTravelCarPage();
+                    return;
+                }
+
+                if (run.stage === 'drive_wait') {
+                    const target = run.targets?.[0];
+                    if (!target) {
+                        state.pendingBulletRun = null;
+                        gotoPage('crimes');
+                        return;
+                    }
+
+                    if (isBulletFactoryDriveConfirmed(target)) {
+                        addLiveLog(`Bullet factory: drive to ${target.country} confirmed — going to buy`);
+                        const buyRun = clearBulletFactoryNavMarker({ ...run, stage: 'buy' });
+                        const buyNavKey = `buy:${target.countryId}:${target.country}`;
+                        markBulletFactoryNavIssued(buyRun, buyNavKey);
+                        await wait(navRand());
+                        navigateToUrl(getBulletFactoryUrl(target.countryId));
+                        return;
+                    }
+
+                    const navKey = run.navKey || `drive:${target.countryId}:${target.country}:${run.travelCarUrl || ''}`;
+                    if (isBulletFactoryNavRecentlyIssued(run, navKey)) {
+                        return;
+                    }
+
+                    addLiveLog(`Bullet factory: drive to ${target.country} not confirmed — retrying`);
+                    state.pendingBulletRun = clearBulletFactoryNavMarker({ ...run, stage: 'travel_car' });
                     return;
                 }
 
@@ -11467,6 +11848,7 @@ async function doQTPerkRedeem() {
             // re-activate the BG Farm / kill loop. If the player is still pending, sync will refresh
             // expectedFoundAt from the game's visible timer instead.
             if (state.killBgCheckEnabled && !state.killLoopActive &&
+                !state.pendingBulletRun &&
                 !state.gtaResetLoopActive && !state.meltResetLoopActive && !isKillPage()) {
                 const playerReady = getKillPlayers().some(p =>
                     p.expectedFoundAt && now() >= p.expectedFoundAt
@@ -11836,10 +12218,15 @@ async function doQTPerkRedeem() {
 
         freshRadio.checked     = true;
         state.nextDriveReadyAt = now() + 60000;
+        const driveKey = `drive:${target.countryId}:${target.country}:${run.travelCarUrl || window.location.href}`;
+        state.pendingBulletRun = {
+            ...clearBulletFactoryNavMarker(run),
+            stage: 'drive_wait',
+            navKey: driveKey,
+            navIssuedAt: now()
+        };
         humanClick(freshGo);
         addLiveLog(`Bullet factory: driving to ${target.country}`);
-        // After drive — go buy bullets
-        state.pendingBulletRun = { ...run, stage: 'buy' };
     }
 
     function startHeartbeat() {
