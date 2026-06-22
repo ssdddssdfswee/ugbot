@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Full UG Bot
 // @namespace    ug-bot
-// @version      2.7.8
+// @version      2.8.2
 // @description  Auto-runs crimes, GTA, melting, repair, missions, drug running with Swiss Bank management, live log, session stats, action checkboxes, jail handling, runtime tracking, melt pagination, repair cycles, automatic CTC solving, and point-spending features.
 // @match        *://www.underworldgangsters.com/*
 // @match        *://underworldgangsters.com/*
@@ -594,7 +594,7 @@
     // BOT CONFIG
     // =========================================================================
 
-    const SCRIPT_VERSION = '2.7.8';
+    const SCRIPT_VERSION = '2.8.2';
 
     const CRIME_DEFS = [
         { id: 'gang', name: 'Gang Activities' },
@@ -777,6 +777,38 @@
             { b: 16, name: 'Range Rover Sport',         enabled: false, maxPrice: 1000000     },
             { b: 15, name: 'Mercedes GLC Coupe',        enabled: false, maxPrice: 1000000     },
         ],
+
+        // QT auction scanner — caps and minimum amounts.
+        // Bullets use max points per 10,000 bullets so the UI stays readable.
+        qtAuctionEnabled:          false,
+        qtAuctionPollSecs:         5,
+        qtAuctionBulletsEnabled:   false,
+        qtAuctionBulletsMaxPts:    50,      // max pts per 10k bullets
+        qtAuctionBulletsMin:       50000,
+        qtAuctionBustEnabled:      false,
+        qtAuctionBustMaxPts:       3,       // pts per min
+        qtAuctionBustMinMins:      30,
+        qtAuctionAlwaysSuccEnabled: false,
+        qtAuctionAlwaysSuccMaxPts:  3,      // pts per min
+        qtAuctionAlwaysSuccMinMins: 30,
+        qtAuctionDoubleMeltsEnabled: false,
+        qtAuctionDoubleMeltsMaxPts:  3,     // pts per car
+        qtAuctionDoubleMeltsMinCars: 50,
+        qtAuctionDoubleXpEnabled:  false,
+        qtAuctionDoubleXpMaxPts:   3,       // pts per min
+        qtAuctionDoubleXpMinMins:  100,
+        qtAuctionDoubleCashEnabled: false,
+        qtAuctionDoubleCashMaxPts:  3,      // pts per min
+        qtAuctionDoubleCashMinMins: 30,
+        qtAuctionRareEnabled:      false,
+        qtAuctionRareMaxPts:       3,       // pts per car
+        qtAuctionRareMinCars:      50,
+        qtAuctionBulletValueEnabled: false,
+        qtAuctionBulletValueMaxPts:  3,     // pts per car
+        qtAuctionBulletValueMinCars: 20,
+        qtAuctionCarBundleEnabled: false,
+        qtAuctionCarBundleMaxPts:  3,       // pts per car
+        qtAuctionCarBundleMinCars: 25,
 
         // Kill scanner settings
         killScanOnlineEnabled:  false,
@@ -1266,6 +1298,71 @@
         get qtCarsTypes()          { return getSetting('qtCarsTypes', DEFAULTS.qtCarsTypes); },
         set qtCarsTypes(v)         { setSetting('qtCarsTypes', v); },
 
+        get qtAuctionEnabled()          { return !!getSetting('qtAuctionEnabled', DEFAULTS.qtAuctionEnabled); },
+        set qtAuctionEnabled(v)         { setSetting('qtAuctionEnabled', !!v); },
+        get qtAuctionPollSecs()         { return Math.max(3, Number(getSetting('qtAuctionPollSecs', DEFAULTS.qtAuctionPollSecs)) || DEFAULTS.qtAuctionPollSecs); },
+        set qtAuctionPollSecs(v)        { setSetting('qtAuctionPollSecs', Math.max(3, Number(v) || DEFAULTS.qtAuctionPollSecs)); },
+        get qtAuctionBulletsEnabled()   { return !!getSetting('qtAuctionBulletsEnabled', DEFAULTS.qtAuctionBulletsEnabled); },
+        set qtAuctionBulletsEnabled(v)  { setSetting('qtAuctionBulletsEnabled', !!v); },
+        get qtAuctionBulletsMaxPts()    {
+            const v = Number(getSetting('qtAuctionBulletsMaxPts', DEFAULTS.qtAuctionBulletsMaxPts));
+            // v33 stored this as tiny pts-per-bullet values such as 0.00005.
+            // v34 uses readable max pts per 10k bullets; treat old tiny values as unset.
+            if (!Number.isFinite(v) || v <= 0 || v < 1) return DEFAULTS.qtAuctionBulletsMaxPts;
+            return v;
+        },
+        set qtAuctionBulletsMaxPts(v)   { setSetting('qtAuctionBulletsMaxPts', Math.max(0, Number(v) || DEFAULTS.qtAuctionBulletsMaxPts)); },
+        get qtAuctionBulletsMin()       { return Number(getSetting('qtAuctionBulletsMin', DEFAULTS.qtAuctionBulletsMin)); },
+        set qtAuctionBulletsMin(v)      { setSetting('qtAuctionBulletsMin', Math.max(0, Number(v) || DEFAULTS.qtAuctionBulletsMin)); },
+        get qtAuctionBustEnabled()      { return !!getSetting('qtAuctionBustEnabled', DEFAULTS.qtAuctionBustEnabled); },
+        set qtAuctionBustEnabled(v)     { setSetting('qtAuctionBustEnabled', !!v); },
+        get qtAuctionBustMaxPts()       { return Number(getSetting('qtAuctionBustMaxPts', DEFAULTS.qtAuctionBustMaxPts)); },
+        set qtAuctionBustMaxPts(v)      { setSetting('qtAuctionBustMaxPts', Math.max(0, Number(v) || DEFAULTS.qtAuctionBustMaxPts)); },
+        get qtAuctionBustMinMins()      { return Number(getSetting('qtAuctionBustMinMins', DEFAULTS.qtAuctionBustMinMins)); },
+        set qtAuctionBustMinMins(v)     { setSetting('qtAuctionBustMinMins', Math.max(0, Number(v) || DEFAULTS.qtAuctionBustMinMins)); },
+        get qtAuctionAlwaysSuccEnabled() { return !!getSetting('qtAuctionAlwaysSuccEnabled', DEFAULTS.qtAuctionAlwaysSuccEnabled); },
+        set qtAuctionAlwaysSuccEnabled(v){ setSetting('qtAuctionAlwaysSuccEnabled', !!v); },
+        get qtAuctionAlwaysSuccMaxPts() { return Number(getSetting('qtAuctionAlwaysSuccMaxPts', DEFAULTS.qtAuctionAlwaysSuccMaxPts)); },
+        set qtAuctionAlwaysSuccMaxPts(v){ setSetting('qtAuctionAlwaysSuccMaxPts', Math.max(0, Number(v) || DEFAULTS.qtAuctionAlwaysSuccMaxPts)); },
+        get qtAuctionAlwaysSuccMinMins(){ return Number(getSetting('qtAuctionAlwaysSuccMinMins', DEFAULTS.qtAuctionAlwaysSuccMinMins)); },
+        set qtAuctionAlwaysSuccMinMins(v){ setSetting('qtAuctionAlwaysSuccMinMins', Math.max(0, Number(v) || DEFAULTS.qtAuctionAlwaysSuccMinMins)); },
+        get qtAuctionDoubleMeltsEnabled() { return !!getSetting('qtAuctionDoubleMeltsEnabled', DEFAULTS.qtAuctionDoubleMeltsEnabled); },
+        set qtAuctionDoubleMeltsEnabled(v){ setSetting('qtAuctionDoubleMeltsEnabled', !!v); },
+        get qtAuctionDoubleMeltsMaxPts() { return Number(getSetting('qtAuctionDoubleMeltsMaxPts', DEFAULTS.qtAuctionDoubleMeltsMaxPts)); },
+        set qtAuctionDoubleMeltsMaxPts(v){ setSetting('qtAuctionDoubleMeltsMaxPts', Math.max(0, Number(v) || DEFAULTS.qtAuctionDoubleMeltsMaxPts)); },
+        get qtAuctionDoubleMeltsMinCars(){ return Number(getSetting('qtAuctionDoubleMeltsMinCars', DEFAULTS.qtAuctionDoubleMeltsMinCars)); },
+        set qtAuctionDoubleMeltsMinCars(v){ setSetting('qtAuctionDoubleMeltsMinCars', Math.max(0, Number(v) || DEFAULTS.qtAuctionDoubleMeltsMinCars)); },
+        get qtAuctionDoubleXpEnabled()  { return !!getSetting('qtAuctionDoubleXpEnabled', DEFAULTS.qtAuctionDoubleXpEnabled); },
+        set qtAuctionDoubleXpEnabled(v) { setSetting('qtAuctionDoubleXpEnabled', !!v); },
+        get qtAuctionDoubleXpMaxPts()   { return Number(getSetting('qtAuctionDoubleXpMaxPts', DEFAULTS.qtAuctionDoubleXpMaxPts)); },
+        set qtAuctionDoubleXpMaxPts(v)  { setSetting('qtAuctionDoubleXpMaxPts', Math.max(0, Number(v) || DEFAULTS.qtAuctionDoubleXpMaxPts)); },
+        get qtAuctionDoubleXpMinMins()  { return Number(getSetting('qtAuctionDoubleXpMinMins', DEFAULTS.qtAuctionDoubleXpMinMins)); },
+        set qtAuctionDoubleXpMinMins(v) { setSetting('qtAuctionDoubleXpMinMins', Math.max(0, Number(v) || DEFAULTS.qtAuctionDoubleXpMinMins)); },
+        get qtAuctionDoubleCashEnabled(){ return !!getSetting('qtAuctionDoubleCashEnabled', DEFAULTS.qtAuctionDoubleCashEnabled); },
+        set qtAuctionDoubleCashEnabled(v){ setSetting('qtAuctionDoubleCashEnabled', !!v); },
+        get qtAuctionDoubleCashMaxPts() { return Number(getSetting('qtAuctionDoubleCashMaxPts', DEFAULTS.qtAuctionDoubleCashMaxPts)); },
+        set qtAuctionDoubleCashMaxPts(v){ setSetting('qtAuctionDoubleCashMaxPts', Math.max(0, Number(v) || DEFAULTS.qtAuctionDoubleCashMaxPts)); },
+        get qtAuctionDoubleCashMinMins(){ return Number(getSetting('qtAuctionDoubleCashMinMins', DEFAULTS.qtAuctionDoubleCashMinMins)); },
+        set qtAuctionDoubleCashMinMins(v){ setSetting('qtAuctionDoubleCashMinMins', Math.max(0, Number(v) || DEFAULTS.qtAuctionDoubleCashMinMins)); },
+        get qtAuctionRareEnabled()      { return !!getSetting('qtAuctionRareEnabled', DEFAULTS.qtAuctionRareEnabled); },
+        set qtAuctionRareEnabled(v)     { setSetting('qtAuctionRareEnabled', !!v); },
+        get qtAuctionRareMaxPts()       { return Number(getSetting('qtAuctionRareMaxPts', DEFAULTS.qtAuctionRareMaxPts)); },
+        set qtAuctionRareMaxPts(v)      { setSetting('qtAuctionRareMaxPts', Math.max(0, Number(v) || DEFAULTS.qtAuctionRareMaxPts)); },
+        get qtAuctionRareMinCars()      { return Number(getSetting('qtAuctionRareMinCars', DEFAULTS.qtAuctionRareMinCars)); },
+        set qtAuctionRareMinCars(v)     { setSetting('qtAuctionRareMinCars', Math.max(0, Number(v) || DEFAULTS.qtAuctionRareMinCars)); },
+        get qtAuctionBulletValueEnabled() { return !!getSetting('qtAuctionBulletValueEnabled', DEFAULTS.qtAuctionBulletValueEnabled); },
+        set qtAuctionBulletValueEnabled(v){ setSetting('qtAuctionBulletValueEnabled', !!v); },
+        get qtAuctionBulletValueMaxPts(){ return Number(getSetting('qtAuctionBulletValueMaxPts', DEFAULTS.qtAuctionBulletValueMaxPts)); },
+        set qtAuctionBulletValueMaxPts(v){ setSetting('qtAuctionBulletValueMaxPts', Math.max(0, Number(v) || DEFAULTS.qtAuctionBulletValueMaxPts)); },
+        get qtAuctionBulletValueMinCars(){ return Number(getSetting('qtAuctionBulletValueMinCars', DEFAULTS.qtAuctionBulletValueMinCars)); },
+        set qtAuctionBulletValueMinCars(v){ setSetting('qtAuctionBulletValueMinCars', Math.max(0, Number(v) || DEFAULTS.qtAuctionBulletValueMinCars)); },
+        get qtAuctionCarBundleEnabled() { return !!getSetting('qtAuctionCarBundleEnabled', DEFAULTS.qtAuctionCarBundleEnabled); },
+        set qtAuctionCarBundleEnabled(v){ setSetting('qtAuctionCarBundleEnabled', !!v); },
+        get qtAuctionCarBundleMaxPts()  { return Number(getSetting('qtAuctionCarBundleMaxPts', DEFAULTS.qtAuctionCarBundleMaxPts)); },
+        set qtAuctionCarBundleMaxPts(v) { setSetting('qtAuctionCarBundleMaxPts', Math.max(0, Number(v) || DEFAULTS.qtAuctionCarBundleMaxPts)); },
+        get qtAuctionCarBundleMinCars() { return Number(getSetting('qtAuctionCarBundleMinCars', DEFAULTS.qtAuctionCarBundleMinCars)); },
+        set qtAuctionCarBundleMinCars(v){ setSetting('qtAuctionCarBundleMinCars', Math.max(0, Number(v) || DEFAULTS.qtAuctionCarBundleMinCars)); },
+
         // Kill scanner
         get killScanOnlineEnabled()   { return !!getSetting('killScanOnlineEnabled', DEFAULTS.killScanOnlineEnabled); },
         set killScanOnlineEnabled(v)  { setSetting('killScanOnlineEnabled', !!v); },
@@ -1674,6 +1771,35 @@
     let qtPollMaxEl                 = null;
     let qtPointsEnabledInput        = null;
     let qtPointsThresholdEl         = null;
+    let qtAuctionEnabledInput       = null;
+    let qtAuctionPollSecsEl         = null;
+    let qtAuctionBulletsEnabledInput = null;
+    let qtAuctionBulletsMaxPtsEl    = null;
+    let qtAuctionBulletsMinEl       = null;
+    let qtAuctionBustEnabledInput   = null;
+    let qtAuctionBustMaxPtsEl       = null;
+    let qtAuctionBustMinAmtEl       = null;
+    let qtAuctionAlwaysSuccEnabledInput = null;
+    let qtAuctionAlwaysSuccMaxPtsEl = null;
+    let qtAuctionAlwaysSuccMinAmtEl = null;
+    let qtAuctionDoubleMeltsEnabledInput = null;
+    let qtAuctionDoubleMeltsMaxPtsEl = null;
+    let qtAuctionDoubleMeltsMinAmtEl = null;
+    let qtAuctionDoubleXpEnabledInput = null;
+    let qtAuctionDoubleXpMaxPtsEl   = null;
+    let qtAuctionDoubleXpMinAmtEl   = null;
+    let qtAuctionDoubleCashEnabledInput = null;
+    let qtAuctionDoubleCashMaxPtsEl = null;
+    let qtAuctionDoubleCashMinAmtEl = null;
+    let qtAuctionRareEnabledInput   = null;
+    let qtAuctionRareMaxPtsEl       = null;
+    let qtAuctionRareMinAmtEl       = null;
+    let qtAuctionBulletValueEnabledInput = null;
+    let qtAuctionBulletValueMaxPtsEl = null;
+    let qtAuctionBulletValueMinAmtEl = null;
+    let qtAuctionCarBundleEnabledInput = null;
+    let qtAuctionCarBundleMaxPtsEl  = null;
+    let qtAuctionCarBundleMinAmtEl  = null;
     let killScanOnlineInput         = null;
     let killScanIntervalEl          = null;
     let killSearchInput             = null;
@@ -1952,6 +2078,7 @@
         stopQTPerkExtender();
         stopQTPerkRedeemer();
         stopQTCarScanner();
+        stopQTAuctionScanner();
         stopNoReloadBust();
         stopAutoBuyBg();
         stopBonusPointsSpender();
@@ -3623,6 +3750,158 @@
         if (changed) saveKillPlayers(players);
     }
 
+
+    // v36: Per-player Kill/BG Farm toggles must cancel stale pending chains.
+    // Otherwise an old expectedFoundAt timer can keep sending the bot back to
+    // ?p=kill after the owning target has been unticked.
+    function killNameKey(name) {
+        return String(name || '').trim().toLowerCase();
+    }
+
+    function isKillTargetEnabled(name) {
+        const key = killNameKey(name);
+        if (!key) return false;
+        return isPlayerShootEnabled(key) || isPlayerBgFarmEnabled(key) || isPlayerBgCheckEnabled(key);
+    }
+
+    function killActionTouchesName(action, nameKey) {
+        if (!action || typeof action !== 'object' || !nameKey) return false;
+        const targetName = killNameKey(action.targetName);
+        const bgFor      = killNameKey(action.bgFor);
+        const waitingBg  = killNameKey(action.waitingBg);
+        if (targetName === nameKey || bgFor === nameKey || waitingBg === nameKey) return true;
+        if (Array.isArray(action.deferred) && action.deferred.some(a => killActionTouchesName(a, nameKey))) return true;
+        return killActionTouchesName(action.afterTravel, nameKey) || killActionTouchesName(action.afterVerify, nameKey);
+    }
+
+    function killActionTouchesOwnerChain(action, ownerKey, bgNameKeys = new Set()) {
+        if (!action || typeof action !== 'object' || !ownerKey) return false;
+        const targetName = killNameKey(action.targetName);
+        const bgFor      = killNameKey(action.bgFor);
+        const waitingBg  = killNameKey(action.waitingBg);
+        if (targetName === ownerKey || bgFor === ownerKey || waitingBg === ownerKey) return true;
+        if (targetName && bgNameKeys.has(targetName)) return true;
+        if (waitingBg && bgNameKeys.has(waitingBg)) return true;
+        if (Array.isArray(action.deferred) && action.deferred.some(a => killActionTouchesOwnerChain(a, ownerKey, bgNameKeys))) return true;
+        return killActionTouchesOwnerChain(action.afterTravel, ownerKey, bgNameKeys) ||
+               killActionTouchesOwnerChain(action.afterVerify, ownerKey, bgNameKeys);
+    }
+
+    function isBodyguardSearchRelevant(p, players = state.killPlayers || []) {
+        if (!p || !p.name || !p.isBg || !p.bgFor) return false;
+        const owner = players.find(pl => pl.name && killNameKey(pl.name) === killNameKey(p.bgFor));
+        if (!owner || !isKillTargetEnabled(owner.name)) return false;
+        // If the owner now has a different confirmed BG, this old BG search is stale.
+        if (owner.bodyguard && killNameKey(owner.bodyguard) !== killNameKey(p.name)) return false;
+        return true;
+    }
+
+    function isKillExpectedSearchRelevant(p, players = state.killPlayers || []) {
+        if (!p || !p.name) return false;
+        if (isKillTargetEnabled(p.name)) return true;
+        return isBodyguardSearchRelevant(p, players);
+    }
+
+    function hasRelevantPendingBgSearch(players = state.killPlayers || []) {
+        return players.some(p =>
+            (p.pendingSearch || p.expectedFoundAt) && isBodyguardSearchRelevant(p, players)
+        );
+    }
+
+    function hasAnyEnabledKillWork() {
+        return (state.killBgCheckPlayers || []).length > 0 ||
+               (state.killBgFarmPlayers || []).length > 0 ||
+               (state.killShootPlayers || []).length > 0;
+    }
+
+    function clearActionIfOwnedByTarget(actionKey, ownerKey, bgNameKeys) {
+        const action = state[actionKey];
+        if (!action || !killActionTouchesOwnerChain(action, ownerKey, bgNameKeys)) return false;
+        state[actionKey] = null;
+        return true;
+    }
+
+    function cancelPendingKillWorkForTarget(name, reason = 'target disabled', opts = {}) {
+        const ownerKey = killNameKey(name);
+        if (!ownerKey) return false;
+
+        const players = state.killPlayers || [];
+        const ownerIdx = players.findIndex(p => p.name && killNameKey(p.name) === ownerKey);
+        const bgNameKeys = new Set();
+
+        if (ownerIdx !== -1 && players[ownerIdx].bodyguard) {
+            bgNameKeys.add(killNameKey(players[ownerIdx].bodyguard));
+        }
+        for (const p of players) {
+            if (p.name && p.bgFor && killNameKey(p.bgFor) === ownerKey) {
+                bgNameKeys.add(killNameKey(p.name));
+            }
+        }
+
+        let changedPlayers = false;
+        let clearedActions = false;
+
+        clearedActions = clearActionIfOwnedByTarget('pendingKillAction', ownerKey, bgNameKeys) || clearedActions;
+        clearedActions = clearActionIfOwnedByTarget('killBgShootPending', ownerKey, bgNameKeys) || clearedActions;
+        clearedActions = clearActionIfOwnedByTarget('killPenaltyPendingAction', ownerKey, bgNameKeys) || clearedActions;
+
+        if (ownerIdx !== -1) {
+            const owner = players[ownerIdx];
+            if (owner.expectedFoundAt) { delete owner.expectedFoundAt; changedPlayers = true; }
+            if (owner.pendingSearch)   { delete owner.pendingSearch;   changedPlayers = true; }
+            if (owner.bgFarmWaitUntil) { delete owner.bgFarmWaitUntil; changedPlayers = true; }
+            if (owner.bgVerifyInFlight){ delete owner.bgVerifyInFlight;changedPlayers = true; }
+            if (owner.bgShootQueued)   { delete owner.bgShootQueued;   changedPlayers = true; }
+            if (opts.clearLastBgCheck && owner.lastBgCheck) { owner.lastBgCheck = 0; changedPlayers = true; }
+            if (opts.clearOwnerBodyguard && owner.bodyguard) { delete owner.bodyguard; changedPlayers = true; }
+        }
+
+        for (const p of players) {
+            if (!p.name) continue;
+            const pKey = killNameKey(p.name);
+            const isOwnedBg = p.bgFor && killNameKey(p.bgFor) === ownerKey;
+            const wasNamedBg = bgNameKeys.has(pKey);
+            if (!isOwnedBg && !wasNamedBg) continue;
+
+            if (p.isBg)          { delete p.isBg;          changedPlayers = true; }
+            if (p.bgFor)         { delete p.bgFor;         changedPlayers = true; }
+            if (p.bgShootQueued) { delete p.bgShootQueued; changedPlayers = true; }
+
+            // If this old BG is not independently enabled, its pending search timer
+            // must not keep waking the kill loop after the owner was disabled.
+            if (!isKillTargetEnabled(p.name)) {
+                if (p.expectedFoundAt) { delete p.expectedFoundAt; changedPlayers = true; }
+                if (p.pendingSearch)   { delete p.pendingSearch;   changedPlayers = true; }
+            }
+        }
+
+        if (!hasRelevantPendingBgSearch(players)) state.killBgWaitUntil = 0;
+        if (clearedActions && !hasAnyEnabledKillWork()) state.killLoopActive = false;
+
+        if (changedPlayers) saveKillPlayers(players);
+        if ((changedPlayers || clearedActions) && opts.log !== false) {
+            addLiveLog(`Kill loop: cleared pending work for ${name} — ${reason}`);
+        }
+        return changedPlayers || clearedActions;
+    }
+
+    function clearIrrelevantExpiredKillSearchTimers(players = state.killPlayers || []) {
+        const nowMs = now();
+        let cleared = 0;
+        for (const p of players) {
+            if (!p.expectedFoundAt || p.expectedFoundAt > nowMs) continue;
+            if (isKillExpectedSearchRelevant(p, players)) continue;
+            delete p.expectedFoundAt;
+            delete p.pendingSearch;
+            cleared++;
+        }
+        if (cleared) {
+            saveKillPlayers(players);
+            addLiveLog(`Kill loop: ignored ${cleared} stale expired search timer(s) — no enabled target depends on them`);
+        }
+        return cleared;
+    }
+
     // Returns true if a player has BG check enabled (per-player toggle)
     function isPlayerBgCheckEnabled(name) {
         const list = state.killBgCheckPlayers || [];
@@ -3633,13 +3912,25 @@
     function setPlayerBgCheckEnabled(name, enabled) {
         let list = state.killBgCheckPlayers || [];
         const lower = name.toLowerCase();
+        const wasEnabled = list.some(n => n.toLowerCase() === lower);
         if (enabled) {
-            if (!list.some(n => n.toLowerCase() === lower)) list.push(name);
+            if (!wasEnabled) list.push(name);
         } else {
             list = list.filter(n => n.toLowerCase() !== lower);
         }
         state.killBgCheckPlayers = list;
-        if (enabled) clearKillWakeBlockersForPlayer(name, { clearBgCheck: true, clearFarmWait: true });
+        if (enabled) {
+            if (!wasEnabled) {
+                cancelPendingKillWorkForTarget(name, 'BG Check re-enabled — starting fresh check', {
+                    clearOwnerBodyguard: true,
+                    clearLastBgCheck: true,
+                    log: true
+                });
+            }
+            clearKillWakeBlockersForPlayer(name, { clearBgCheck: true, clearFarmWait: true, clearBodyguard: true });
+        } else if (!isKillTargetEnabled(name)) {
+            cancelPendingKillWorkForTarget(name, 'BG Check disabled', { clearOwnerBodyguard: true, log: true });
+        }
     }
 
     // Returns true if a player has shoot enabled (per-player toggle)
@@ -3652,13 +3943,18 @@
     function setPlayerShootEnabled(name, enabled) {
         let list = state.killShootPlayers || [];
         const lower = name.toLowerCase();
+        const wasEnabled = list.some(n => n.toLowerCase() === lower);
         if (enabled) {
-            if (!list.some(n => n.toLowerCase() === lower)) list.push(name);
+            if (!wasEnabled) list.push(name);
         } else {
             list = list.filter(n => n.toLowerCase() !== lower);
         }
         state.killShootPlayers = list;
-        if (enabled) clearKillWakeBlockersForPlayer(name, { clearBgCheck: isBgCheckable(name), clearFarmWait: true, clearKillAttempt: true });
+        if (enabled) {
+            clearKillWakeBlockersForPlayer(name, { clearBgCheck: isBgCheckable(name), clearFarmWait: true, clearKillAttempt: true });
+        } else if (!isKillTargetEnabled(name)) {
+            cancelPendingKillWorkForTarget(name, 'Kill disabled', { clearOwnerBodyguard: true, log: true });
+        }
     }
 
     // Returns true if a player has BG farm enabled (per-player toggle)
@@ -3718,8 +4014,9 @@
     function setPlayerBgFarmEnabled(name, enabled) {
         let list = state.killBgFarmPlayers || [];
         const lower = name.toLowerCase();
+        const wasEnabled = list.some(n => n.toLowerCase() === lower);
         if (enabled) {
-            if (!list.some(n => n.toLowerCase() === lower)) list.push(name);
+            if (!wasEnabled) list.push(name);
             // Auto-select as spam target if none currently selected
             if (!state.killBgSpamTarget) {
                 state.killBgSpamTarget = name;
@@ -3740,7 +4037,18 @@
             // BG Farm is intentionally BG Farm + Kill in practice:
             // keep the per-player Kill toggle enabled so a clean target is killed after BGs are gone.
             if (!isPlayerShootEnabled(name)) setPlayerShootEnabled(name, true);
-            clearKillWakeBlockersForPlayer(name, { clearBgCheck: true, clearFarmWait: true, clearKillAttempt: true });
+            if (!wasEnabled) {
+                cancelPendingKillWorkForTarget(name, 'BG Farm re-enabled — starting fresh BG check', {
+                    clearOwnerBodyguard: true,
+                    clearLastBgCheck: true,
+                    log: true
+                });
+            }
+            clearKillWakeBlockersForPlayer(name, { clearBgCheck: true, clearFarmWait: true, clearKillAttempt: true, clearBodyguard: true });
+        } else {
+            // Turning BG Farm off cancels the verify/search/shoot chain owned by this target.
+            // If Kill remains ticked, the target can still be handled later as normal kill-only work.
+            cancelPendingKillWorkForTarget(name, 'BG Farm disabled', { clearOwnerBodyguard: true, log: true });
         }
         updateBgSpamDropdown();
         syncBgSpamState();
@@ -4194,6 +4502,15 @@
         );
     }
 
+    // Detects the generic success banner shown after completing CTC.
+    // This is not a search result; it means the previous submit was interrupted
+    // by CTC and the kill page is usable again.
+    function hasCTCContinuePlayingMessage() {
+        return [...document.querySelectorAll('.bgm.success')].some(el =>
+            /you can now continue playing/i.test(textOf(el))
+        );
+    }
+
 
     const KILL_SEARCH_SUBMIT_THROTTLE_MS = 5000;
     const KILL_SEARCH_RESPONSE_WAIT_MS   = 20000;
@@ -4399,9 +4716,11 @@
                     const idx = players.findIndex(p => p.name.toLowerCase() === name.toLowerCase());
                     if (idx !== -1) {
                         const p = players[idx];
-                        const relevant = isBgCheckable(p.name) || isPlayerShootEnabled(p.name) || p.isBg;
+                        const relevant = isKillExpectedSearchRelevant(p, players);
                         if (relevant) {
                             players[idx].expectedFoundAt = now() + foundInMs;
+                        } else if (players[idx].expectedFoundAt) {
+                            delete players[idx].expectedFoundAt;
                         }
                         // If this pending player is a bodyguard for a kill-only target,
                         // set killBgWaitUntil so saveSettings doesn't re-enable the kill loop
@@ -4841,6 +5160,8 @@
         })();
         syncKillExpiryFromPage(_syncFromLoop);
 
+        let forceKillSearchTargetName = '';
+
         // Detect manually searched players — read all names from "Your men are
         // out searching for" section and add any not already in the kill list
         // as UNKNOWN so they appear in the UI immediately with BG/Kill checkboxes.
@@ -4896,23 +5217,34 @@
             return;
         }
 
-        // If we have a pending search and a CTC was just solved (no result message
-        // because the page reloaded fresh), treat it as a successful search.
-        // Detection: killCurrentSearch is set but no fail message and no success
-        // message — means the CTC reload cleared the result, so the search went through.
-        if (!killSearchResultHandledThisLoad && state.killCurrentSearch) {
+        // If a pending search was interrupted by CTC, the next kill page can
+        // show the generic "You can now continue playing" banner instead of a
+        // normal search-specific response. Treat that banner as a valid response
+        // for the wait guard so it does not sit on the 20s lag fallback.
+        // Do not force an immediate same-player retry here; the normal scanner
+        // selection below decides what to search next.
+        if (!killSearchResultHandledThisLoad && state.killCurrentSearch && hasCTCContinuePlayingMessage()) {
             const current = state.killCurrentSearch;
+            const currentLower = current.toLowerCase();
             const hasFail    = hasKillDeadMessage() || hasKillProtectedMessage() ||
                                hasKillUncillableMessage() || hasKillSelfSearchMessage();
             const hasSuccess = hasKillSearchStartedMessage();
 
             if (!hasFail && !hasSuccess) {
-                // No result message — likely a CTC reload. Check if search is now active
-                // by looking for the player in "Your men are out searching for" section.
                 const searchingRows = [...document.querySelectorAll('.bgl.i.wb .bgm.chs.pd b')];
                 const nowSearching  = searchingRows.some(el =>
-                    textOf(el).toLowerCase() === current.toLowerCase()
+                    textOf(el).toLowerCase() === currentLower
                 );
+                const foundRows = [...document.querySelectorAll('.bgl.i.wb .bgm.chs:not(.pd) a[href*="?p=profile&u="]')];
+                const nowFound = foundRows.some(a => {
+                    try {
+                        return new URL(a.getAttribute('href'), window.location.href)
+                            .searchParams.get('u').toLowerCase() === currentLower;
+                    } catch (_) {
+                        return false;
+                    }
+                });
+
                 if (nowSearching) {
                     killSearchResultHandledThisLoad = true;
                     updateKillPlayerStatus(current, KILL_STATUS.ALIVE);
@@ -4920,6 +5252,20 @@
                     state.killCurrentSearch = '';
                     clearKillSearchSubmitTracking();
                     renderKillList();
+                } else if (nowFound) {
+                    // syncKillExpiryFromPage() already read the accurate Players Found
+                    // timer on this page. Just clear the submit guard; do not overwrite
+                    // it with the 24h placeholder from updateKillPlayerStatus().
+                    killSearchResultHandledThisLoad = true;
+                    addLiveLog(`Kill scanner: ${current} — found confirmed (post-CTC)`);
+                    state.killCurrentSearch = '';
+                    clearKillSearchSubmitTracking();
+                    renderKillList();
+                } else {
+                    killSearchResultHandledThisLoad = true;
+                    addLiveLog(`Kill scanner: CTC cleared after searching ${current} — continuing search flow`);
+                    state.killCurrentSearch = '';
+                    clearKillSearchSubmitTracking();
                 }
             }
         }
@@ -5022,7 +5368,9 @@
         }
 
         // Find the next player to search
-        const target = getNextKillTarget();
+        const target = forceKillSearchTargetName
+            ? (getKillPlayers().find(p => sameKillName(p.name, forceKillSearchTargetName)) || null)
+            : getNextKillTarget();
 
         if (!target) {
             // No search targets — check if kill loop should activate for BG checks
@@ -6502,6 +6850,213 @@ async function doQTPerkRedeem() {
         }
     }
 
+
+    // ── QT Auction Scanner ───────────────────────────────────────────────────
+    let qtAuctionTimer  = null;
+    let qtAuctionActive = false;
+    let qtAuctionInFlight = false;
+    let qtAuctionLastBidAt = 0;
+    let qtAuctionNoItemsLoggedAt = 0;
+    const qtAuctionUnknownLogged = new Set();
+
+    const QT_AUCTION_RARE_CAR_NAMES = (DEFAULTS.qtCarsTypes || [])
+        .map(c => String(c && c.name || '').trim())
+        .filter(Boolean)
+        .sort((a, b) => b.length - a.length);
+
+    function findQTAuctionRareCarName(rawText) {
+        const lower = String(rawText || '').replace(/\s+/g, ' ').trim().toLowerCase();
+        if (!lower) return '';
+        return QT_AUCTION_RARE_CAR_NAMES.find(name => {
+            const needle = name.toLowerCase();
+            // Orange is a named rare reward, not a make/model string. Keep it word-boundary checked.
+            if (needle === 'orange') return /\borange\b/i.test(lower);
+            return lower.includes(needle);
+        }) || '';
+    }
+
+    function isQTAuctionConfigured() {
+        return state.qtAuctionBulletsEnabled || state.qtAuctionBustEnabled || state.qtAuctionAlwaysSuccEnabled ||
+            state.qtAuctionDoubleMeltsEnabled || state.qtAuctionDoubleXpEnabled || state.qtAuctionDoubleCashEnabled ||
+            state.qtAuctionRareEnabled || state.qtAuctionBulletValueEnabled || state.qtAuctionCarBundleEnabled;
+    }
+
+    function startQTAuctionScanner() {
+        if (qtAuctionActive) return;
+        qtAuctionActive = true;
+        scheduleQTAuctionScan();
+    }
+
+    function stopQTAuctionScanner() {
+        qtAuctionActive = false;
+        if (qtAuctionTimer) { clearTimeout(qtAuctionTimer); qtAuctionTimer = null; }
+    }
+
+    function scheduleQTAuctionScan() {
+        if (!qtAuctionActive) return;
+        const delayMs = Math.max(3000, Math.round((Number(state.qtAuctionPollSecs) || DEFAULTS.qtAuctionPollSecs) * 1000));
+        qtAuctionTimer = setTimeout(doQTAuctionScan, delayMs);
+    }
+
+    function classifyAuctionReward(rawText) {
+        const text = String(rawText || '').replace(/\s+/g, ' ').trim();
+        const lower = text.toLowerCase();
+        const amountMatch = text.match(/[\d,]+(?:\.\d+)?/);
+        const amount = amountMatch ? Number(amountMatch[0].replace(/,/g, '')) : 0;
+        if (!text || !Number.isFinite(amount) || amount <= 0) return null;
+
+        // Order matters: "bullet value" is not a bullets bundle.
+        if (/bullet\s*value/i.test(text)) {
+            return { key: 'bulletValue', label: 'Bullet value', amount, unit: 'cars', enabled: state.qtAuctionBulletValueEnabled, maxPtsPerUnit: state.qtAuctionBulletValueMaxPts, minAmount: state.qtAuctionBulletValueMinCars };
+        }
+        if (/bullets?/i.test(text)) {
+            return { key: 'bullets', label: 'Bullets', amount, unit: 'bullets', enabled: state.qtAuctionBulletsEnabled, maxPtsPer10k: state.qtAuctionBulletsMaxPts, minAmount: state.qtAuctionBulletsMin };
+        }
+        if (/always\s*(?:successful|success)|success(?:ful)?/i.test(text)) {
+            return { key: 'alwaysSucc', label: 'Always Successful', amount, unit: 'mins', enabled: state.qtAuctionAlwaysSuccEnabled, maxPtsPerUnit: state.qtAuctionAlwaysSuccMaxPts, minAmount: state.qtAuctionAlwaysSuccMinMins };
+        }
+        if (/always\s*bust|bust/i.test(text)) {
+            return { key: 'alwaysBust', label: 'Always Bust', amount, unit: 'mins', enabled: state.qtAuctionBustEnabled, maxPtsPerUnit: state.qtAuctionBustMaxPts, minAmount: state.qtAuctionBustMinMins };
+        }
+        if (/double\s*melts?|melts?\s*(?:on|for)/i.test(text)) {
+            return { key: 'doubleMelts', label: 'Double melts', amount, unit: 'cars', enabled: state.qtAuctionDoubleMeltsEnabled, maxPtsPerUnit: state.qtAuctionDoubleMeltsMaxPts, minAmount: state.qtAuctionDoubleMeltsMinCars };
+        }
+        if (/double\s*xp/i.test(text)) {
+            return { key: 'doubleXp', label: 'Double XP', amount, unit: 'mins', enabled: state.qtAuctionDoubleXpEnabled, maxPtsPerUnit: state.qtAuctionDoubleXpMaxPts, minAmount: state.qtAuctionDoubleXpMinMins };
+        }
+        if (/double\s*cash/i.test(text)) {
+            return { key: 'doubleCash', label: 'Double cash', amount, unit: 'mins', enabled: state.qtAuctionDoubleCashEnabled, maxPtsPerUnit: state.qtAuctionDoubleCashMaxPts, minAmount: state.qtAuctionDoubleCashMinMins };
+        }
+        if (/will\s+be\s+rare|rare\s+cars?/i.test(text)) {
+            return { key: 'rare', label: 'Rare cars', amount, unit: 'cars', enabled: state.qtAuctionRareEnabled, maxPtsPerUnit: state.qtAuctionRareMaxPts, minAmount: state.qtAuctionRareMinCars };
+        }
+        // Known auction car bundles look like "25 Jaguar F-Type". Only treat the user's known
+        // rare-car names as car bundles; other number-first rewards are logged as unknown and skipped.
+        if (/^[\d,]+\s+/.test(text)) {
+            const carName = findQTAuctionRareCarName(text);
+            if (carName) {
+                return { key: 'carBundle', label: 'Rare car bundle', carName, amount, unit: 'cars', enabled: state.qtAuctionCarBundleEnabled, maxPtsPerUnit: state.qtAuctionCarBundleMaxPts, minAmount: state.qtAuctionCarBundleMinCars };
+            }
+        }
+        return null;
+    }
+
+    function parseAuctionItems(doc) {
+        const cards = [...doc.querySelectorAll('#maincen .bgl.i.jr, #maincenc .bgl.i.jr')];
+        return cards.map(card => {
+            const rewardEl = card.querySelector('.bgd.pd');
+            const rewardText = rewardEl ? rewardEl.textContent.replace(/\s+/g, ' ').trim() : '';
+            const bidButtons = [...card.querySelectorAll('input[data-perk][data-bid]')]
+                .map(btn => ({
+                    id: String(btn.dataset.perk || '').trim(),
+                    bid: Number(btn.dataset.bid),
+                    valueText: String(btn.value || '').trim()
+                }))
+                .filter(x => x.id && Number.isFinite(x.bid) && x.bid > 0)
+                .sort((a, b) => a.bid - b.bid);
+            const id = bidButtons[0]?.id || card.querySelector('[id^="wbid-"]')?.id?.replace(/^wbid-/, '') || '';
+            const doc = card.ownerDocument || document;
+            const statusText = doc.getElementById(`wbid-${id}`)?.textContent?.replace(/\s+/g, ' ').trim()
+                || card.querySelector('[id^="wbid-"]')?.textContent?.replace(/\s+/g, ' ').trim() || '';
+            const currentBidText = doc.getElementById(`bid-${id}`)?.textContent?.replace(/\s+/g, ' ').trim()
+                || card.querySelector('[id^="bid-"]')?.textContent?.replace(/\s+/g, ' ').trim() || '';
+            const endText = doc.getElementById(`end-${id}`)?.textContent?.replace(/\s+/g, ' ').trim()
+                || card.querySelector('[id^="end-"]')?.textContent?.replace(/\s+/g, ' ').trim() || '';
+            return {
+                id,
+                rewardText,
+                statusText,
+                currentBidText,
+                endText,
+                lowestBid: bidButtons.length ? bidButtons[0].bid : null,
+                bidOptions: bidButtons,
+                isWinning: /you\s+are\s+winning/i.test(statusText)
+            };
+        }).filter(item => item.id && item.rewardText);
+    }
+
+    async function doQTAuctionScan() {
+        if (!qtAuctionActive || !state.enabled || !state.qtAuctionEnabled || crimePaused || (!state.bgCrimeEnabled && (isCrimesPage() || hasCrimePageMarkers()))) { scheduleQTAuctionScan(); return; }
+        if (!isQTAuctionConfigured()) { scheduleQTAuctionScan(); return; }
+        if (hasCTCChallenge()) { scheduleQTAuctionScan(); return; }
+        if (actionInFlight || qtAuctionInFlight) { scheduleQTAuctionScan(); return; }
+
+        qtAuctionInFlight = true;
+        try {
+            const resp = await fetch('/?p=auction', { credentials: 'include', cache: 'no-store' });
+            const text = await resp.text();
+            const doc = new DOMParser().parseFromString(text, 'text/html');
+            const items = parseAuctionItems(doc);
+            if (!items.length) {
+                if (Date.now() - qtAuctionNoItemsLoggedAt > 60000) {
+                    qtAuctionNoItemsLoggedAt = Date.now();
+                    addLiveLog('QT Auction: no auction items found');
+                }
+                return;
+            }
+
+            let matched = 0;
+            let availablePoints = getPlayerPoints();
+            for (const item of items) {
+                const reward = classifyAuctionReward(item.rewardText);
+                if (!reward) {
+                    const key = item.rewardText.toLowerCase();
+                    if (!qtAuctionUnknownLogged.has(key)) {
+                        qtAuctionUnknownLogged.add(key);
+                        addLiveLog(`QT Auction: unknown reward skipped — ${item.rewardText}`);
+                    }
+                    continue;
+                }
+                if (!reward.enabled) continue;
+                if (!item.lowestBid) continue;
+                if (item.isWinning) continue;
+                if (reward.amount < reward.minAmount) continue;
+
+                const isBulletAuction = reward.key === 'bullets';
+                const maxAllowedBid = isBulletAuction
+                    ? Math.floor((reward.amount / 10000) * reward.maxPtsPer10k)
+                    : Math.floor(reward.amount * reward.maxPtsPerUnit);
+                const valueRateText = isBulletAuction
+                    ? `${(item.lowestBid / (reward.amount / 10000)).toFixed(2)} pts/10k`
+                    : `${(item.lowestBid / reward.amount).toFixed(4)} pts/unit`;
+                const maxRateText = isBulletAuction
+                    ? `${Number(reward.maxPtsPer10k).toLocaleString()} pts/10k`
+                    : `${Number(reward.maxPtsPerUnit).toLocaleString()} pts/unit`;
+                if (item.lowestBid > maxAllowedBid) {
+                    addLiveLog(`QT Auction: ${reward.label} ${reward.amount.toLocaleString()} ${reward.unit} skipped — lowest bid ${item.lowestBid} pts (${valueRateText}) exceeds max ${maxAllowedBid.toLocaleString()} pts (${maxRateText})`);
+                    continue;
+                }
+
+                if (availablePoints < item.lowestBid) {
+                    addLiveLog(`QT Auction: ${reward.label} bid ${item.lowestBid} pts but only have ${availablePoints} available — skipping`);
+                    continue;
+                }
+
+                const bidUrl = `/a/bids.php?id=${encodeURIComponent(item.id)}&bid=${encodeURIComponent(item.lowestBid)}&_=${Date.now()}`;
+                const bidResp = await fetch(bidUrl, { credentials: 'include', cache: 'no-store' });
+                await bidResp.text();
+                qtAuctionLastBidAt = Date.now();
+                availablePoints = Math.max(0, availablePoints - item.lowestBid);
+                matched++;
+                addLiveLog(`QT Auction: ✓ Bid ${item.lowestBid} pts on ${item.rewardText} (${valueRateText}; picked lowest bid option)`);
+
+                // Bid every safe match in this scan, but space the AJAX calls slightly instead of firing them all at once.
+                await wait(rand(350, 750));
+            }
+            if (matched > 1) {
+                addLiveLog(`QT Auction: placed ${matched} bids this scan`);
+            }
+            if (matched > 0) {
+                await wait(rand(500, 900));
+            }
+        } catch (e) {
+            addLiveLog(`QT Auction: scan error — ${e.message}`);
+        } finally {
+            qtAuctionInFlight = false;
+            scheduleQTAuctionScan();
+        }
+    }
+
     // ── QT Car Scanner ───────────────────────────────────────────────────────
     let qtCarScanTimer  = null;
     let qtCarScanActive = false;
@@ -7193,6 +7748,7 @@ async function doQTPerkRedeem() {
             if (qtSniperActive)     scheduleQTSniperPoll();
             if (qtPerkExtendActive) scheduleQTPerkExtend();
             if (qtCarScanActive)    scheduleQTCarScan();
+            if (qtAuctionActive)    scheduleQTAuctionScan();
             if (bgCrimeActive)      scheduleBgCrimePoll();
             if (noReloadBustActive) scheduleNoReloadBustPoll();
         }
@@ -12335,11 +12891,16 @@ async function doQTPerkRedeem() {
             if (state.killBgCheckEnabled && !state.killLoopActive &&
                 !state.pendingBulletRun &&
                 !state.gtaResetLoopActive && !state.meltResetLoopActive && !isKillPage()) {
-                const playerReady = getKillPlayers().some(p =>
-                    p.expectedFoundAt && now() >= p.expectedFoundAt
+                const playersForReadyCheck = state.killPlayers || [];
+                clearIrrelevantExpiredKillSearchTimers(playersForReadyCheck);
+                const nowMsReady = now();
+                const playerReady = playersForReadyCheck.find(p =>
+                    p.expectedFoundAt &&
+                    nowMsReady >= p.expectedFoundAt &&
+                    isKillExpectedSearchRelevant(p, playersForReadyCheck)
                 );
                 if (playerReady) {
-                    addLiveLog('Kill loop: player search timer elapsed — navigating to kill page');
+                    addLiveLog(`Kill loop: player search timer elapsed for ${playerReady.name} — navigating to kill page`);
                     gotoPage('kill');
                     return;
                 }
@@ -13011,6 +13572,35 @@ async function doQTPerkRedeem() {
         if (qtBulletValueMinAmtEl)    state.qtBulletValueMinCars = Number(qtBulletValueMinAmtEl.value) || DEFAULTS.qtBulletValueMinCars;
         if (qtCarsEnabledInput)    state.qtCarsEnabled      = qtCarsEnabledInput.checked;
         if (qtCarsIntervalEl)      state.qtCarsScanInterval = Number(qtCarsIntervalEl.value) || DEFAULTS.qtCarsScanInterval;
+        if (qtAuctionEnabledInput) state.qtAuctionEnabled    = qtAuctionEnabledInput.checked;
+        if (qtAuctionPollSecsEl)   state.qtAuctionPollSecs   = Number(qtAuctionPollSecsEl.value) || DEFAULTS.qtAuctionPollSecs;
+        if (qtAuctionBulletsEnabledInput) state.qtAuctionBulletsEnabled = qtAuctionBulletsEnabledInput.checked;
+        if (qtAuctionBulletsMaxPtsEl)     state.qtAuctionBulletsMaxPts  = Number(qtAuctionBulletsMaxPtsEl.value) || DEFAULTS.qtAuctionBulletsMaxPts;
+        if (qtAuctionBulletsMinEl)        state.qtAuctionBulletsMin     = parseFormattedNumber(qtAuctionBulletsMinEl.value) || DEFAULTS.qtAuctionBulletsMin;
+        if (qtAuctionBustEnabledInput)       state.qtAuctionBustEnabled       = qtAuctionBustEnabledInput.checked;
+        if (qtAuctionBustMaxPtsEl)           state.qtAuctionBustMaxPts        = Number(qtAuctionBustMaxPtsEl.value) || DEFAULTS.qtAuctionBustMaxPts;
+        if (qtAuctionBustMinAmtEl)           state.qtAuctionBustMinMins       = Number(qtAuctionBustMinAmtEl.value) || DEFAULTS.qtAuctionBustMinMins;
+        if (qtAuctionAlwaysSuccEnabledInput) state.qtAuctionAlwaysSuccEnabled = qtAuctionAlwaysSuccEnabledInput.checked;
+        if (qtAuctionAlwaysSuccMaxPtsEl)     state.qtAuctionAlwaysSuccMaxPts  = Number(qtAuctionAlwaysSuccMaxPtsEl.value) || DEFAULTS.qtAuctionAlwaysSuccMaxPts;
+        if (qtAuctionAlwaysSuccMinAmtEl)     state.qtAuctionAlwaysSuccMinMins = Number(qtAuctionAlwaysSuccMinAmtEl.value) || DEFAULTS.qtAuctionAlwaysSuccMinMins;
+        if (qtAuctionDoubleMeltsEnabledInput) state.qtAuctionDoubleMeltsEnabled = qtAuctionDoubleMeltsEnabledInput.checked;
+        if (qtAuctionDoubleMeltsMaxPtsEl)    state.qtAuctionDoubleMeltsMaxPts  = Number(qtAuctionDoubleMeltsMaxPtsEl.value) || DEFAULTS.qtAuctionDoubleMeltsMaxPts;
+        if (qtAuctionDoubleMeltsMinAmtEl)    state.qtAuctionDoubleMeltsMinCars = Number(qtAuctionDoubleMeltsMinAmtEl.value) || DEFAULTS.qtAuctionDoubleMeltsMinCars;
+        if (qtAuctionDoubleXpEnabledInput)   state.qtAuctionDoubleXpEnabled    = qtAuctionDoubleXpEnabledInput.checked;
+        if (qtAuctionDoubleXpMaxPtsEl)       state.qtAuctionDoubleXpMaxPts     = Number(qtAuctionDoubleXpMaxPtsEl.value) || DEFAULTS.qtAuctionDoubleXpMaxPts;
+        if (qtAuctionDoubleXpMinAmtEl)       state.qtAuctionDoubleXpMinMins    = Number(qtAuctionDoubleXpMinAmtEl.value) || DEFAULTS.qtAuctionDoubleXpMinMins;
+        if (qtAuctionDoubleCashEnabledInput) state.qtAuctionDoubleCashEnabled  = qtAuctionDoubleCashEnabledInput.checked;
+        if (qtAuctionDoubleCashMaxPtsEl)     state.qtAuctionDoubleCashMaxPts   = Number(qtAuctionDoubleCashMaxPtsEl.value) || DEFAULTS.qtAuctionDoubleCashMaxPts;
+        if (qtAuctionDoubleCashMinAmtEl)     state.qtAuctionDoubleCashMinMins  = Number(qtAuctionDoubleCashMinAmtEl.value) || DEFAULTS.qtAuctionDoubleCashMinMins;
+        if (qtAuctionRareEnabledInput)       state.qtAuctionRareEnabled        = qtAuctionRareEnabledInput.checked;
+        if (qtAuctionRareMaxPtsEl)           state.qtAuctionRareMaxPts         = Number(qtAuctionRareMaxPtsEl.value) || DEFAULTS.qtAuctionRareMaxPts;
+        if (qtAuctionRareMinAmtEl)           state.qtAuctionRareMinCars        = Number(qtAuctionRareMinAmtEl.value) || DEFAULTS.qtAuctionRareMinCars;
+        if (qtAuctionBulletValueEnabledInput) state.qtAuctionBulletValueEnabled = qtAuctionBulletValueEnabledInput.checked;
+        if (qtAuctionBulletValueMaxPtsEl)    state.qtAuctionBulletValueMaxPts  = Number(qtAuctionBulletValueMaxPtsEl.value) || DEFAULTS.qtAuctionBulletValueMaxPts;
+        if (qtAuctionBulletValueMinAmtEl)    state.qtAuctionBulletValueMinCars = Number(qtAuctionBulletValueMinAmtEl.value) || DEFAULTS.qtAuctionBulletValueMinCars;
+        if (qtAuctionCarBundleEnabledInput)  state.qtAuctionCarBundleEnabled   = qtAuctionCarBundleEnabledInput.checked;
+        if (qtAuctionCarBundleMaxPtsEl)      state.qtAuctionCarBundleMaxPts    = Number(qtAuctionCarBundleMaxPtsEl.value) || DEFAULTS.qtAuctionCarBundleMaxPts;
+        if (qtAuctionCarBundleMinAmtEl)      state.qtAuctionCarBundleMinCars   = Number(qtAuctionCarBundleMinAmtEl.value) || DEFAULTS.qtAuctionCarBundleMinCars;
         if (qtPerkExtendEnabledInput) state.qtPerkExtendEnabled = qtPerkExtendEnabledInput.checked;
         if (qtPerkExtendMinsEl)    state.qtPerkExtendMins   = Number(qtPerkExtendMinsEl.value) || DEFAULTS.qtPerkExtendMins;
         if (qtPerkRedeemEnabledInput) state.qtPerkRedeemEnabled = qtPerkRedeemEnabledInput.checked;
@@ -13058,6 +13648,8 @@ async function doQTPerkRedeem() {
         state.qtCarsTypes = carTypes;
         // Start or stop QT car scanner
         if (state.qtCarsEnabled) { startQTCarScanner(); } else { stopQTCarScanner(); }
+        // Start or stop QT auction scanner
+        if (state.qtAuctionEnabled) { startQTAuctionScanner(); } else { stopQTAuctionScanner(); }
         // Start or stop QT sniper
         if (state.qtBgEnabled || state.qtBulletsEnabled) {
             startQTSniper();
@@ -13666,6 +14258,7 @@ async function doQTPerkRedeem() {
                     <div class="ug-sub-tabs">
                         <button class="ug-sub-btn ug-sub-active" data-sub="qtperks" data-parent="qt">Perks</button>
                         <button class="ug-sub-btn" data-sub="qtcars" data-parent="qt">Cars</button>
+                        <button class="ug-sub-btn" data-sub="qtauction" data-parent="qt">Auction</button>
                     </div>
 
                     <!-- QT PERKS sub-tab -->
@@ -13710,7 +14303,39 @@ async function doQTPerkRedeem() {
 
                     </div>
 
+
+                    <!-- QT AUCTION sub-tab -->
+                    <div class="ug-sub-pane" data-sub="qtauction" data-parent="qt" style="display:none;">
+<div style="width:100%;background:#1b1b1b;border:1px solid #444;border-radius:6px;padding:8px;box-sizing:border-box;margin-bottom:4px;overflow:hidden;"><table style="width:auto;border-collapse:collapse;">
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-qt-auction-enabled" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">Auction</td><td style="vertical-align:middle;white-space:nowrap;padding:3px 0;width:1px;"><input id="ug-bot-qt-auction-poll-secs" type="text" inputmode="numeric" class="ug-compact-input ug-compact-input-sm" placeholder="5" /></td><td style="color:#888;font-size:10px;padding-left:3px;vertical-align:middle;white-space:nowrap;">secs</td></tr>
+</table></div>
+<div style="width:100%;background:#1b1b1b;border:1px solid #444;border-radius:6px;padding:8px;box-sizing:border-box;margin-bottom:4px;overflow:hidden;"><table style="width:auto;border-collapse:collapse;">
+                        <tr>
+                            <td colspan="2"></td>
+                            <td style="color:#888;font-size:10px;padding:0 2px 3px;text-align:center;white-space:nowrap;">Max pts/10k</td>
+                            <td style="color:#888;font-size:10px;padding:0 0 3px 4px;white-space:nowrap;">Min bullets</td>
+                        </tr>
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-qt-auction-bullets-enabled" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">Bullets</td><td style="vertical-align:middle;white-space:nowrap;padding:3px 2px;width:1px;"><input id="ug-bot-qt-auction-bullets-maxpts" type="text" inputmode="decimal" class="ug-compact-input ug-compact-input-sm" placeholder="50" /></td><td style="vertical-align:middle;white-space:nowrap;padding:3px 0 3px 4px;width:1px;"><input id="ug-bot-qt-auction-bullets-minamt" type="text" inputmode="numeric" class="ug-compact-input ug-compact-input-sm" placeholder="50000" /></td></tr>
+                        <tr>
+                            <td colspan="2"></td>
+                            <td style="color:#888;font-size:10px;padding:0 2px 3px;text-align:center;white-space:nowrap;">pts/unit</td>
+                            <td style="color:#888;font-size:10px;padding:0 0 3px 4px;white-space:nowrap;">Min amt</td>
+                        </tr>
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-qt-auction-bust-enabled" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">Always Bust</td><td style="vertical-align:middle;white-space:nowrap;padding:3px 2px;width:1px;"><input id="ug-bot-qt-auction-bust-maxpts" type="text" inputmode="decimal" class="ug-compact-input ug-compact-input-sm" placeholder="3" /></td><td style="vertical-align:middle;white-space:nowrap;padding:3px 0 3px 4px;width:1px;"><input id="ug-bot-qt-auction-bust-minamt" type="text" inputmode="numeric" class="ug-compact-input ug-compact-input-sm" placeholder="30 mins" /></td></tr>
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-qt-auction-always-succ-enabled" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">Always Successful</td><td style="vertical-align:middle;white-space:nowrap;padding:3px 2px;width:1px;"><input id="ug-bot-qt-auction-always-succ-maxpts" type="text" inputmode="decimal" class="ug-compact-input ug-compact-input-sm" placeholder="3" /></td><td style="vertical-align:middle;white-space:nowrap;padding:3px 0 3px 4px;width:1px;"><input id="ug-bot-qt-auction-always-succ-minamt" type="text" inputmode="numeric" class="ug-compact-input ug-compact-input-sm" placeholder="30 mins" /></td></tr>
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-qt-auction-double-melts-enabled" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">Double melts</td><td style="vertical-align:middle;white-space:nowrap;padding:3px 2px;width:1px;"><input id="ug-bot-qt-auction-double-melts-maxpts" type="text" inputmode="decimal" class="ug-compact-input ug-compact-input-sm" placeholder="3" /></td><td style="vertical-align:middle;white-space:nowrap;padding:3px 0 3px 4px;width:1px;"><input id="ug-bot-qt-auction-double-melts-minamt" type="text" inputmode="numeric" class="ug-compact-input ug-compact-input-sm" placeholder="50 cars" /></td></tr>
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-qt-auction-double-xp-enabled" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">Double XP</td><td style="vertical-align:middle;white-space:nowrap;padding:3px 2px;width:1px;"><input id="ug-bot-qt-auction-double-xp-maxpts" type="text" inputmode="decimal" class="ug-compact-input ug-compact-input-sm" placeholder="3" /></td><td style="vertical-align:middle;white-space:nowrap;padding:3px 0 3px 4px;width:1px;"><input id="ug-bot-qt-auction-double-xp-minamt" type="text" inputmode="numeric" class="ug-compact-input ug-compact-input-sm" placeholder="100 mins" /></td></tr>
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-qt-auction-double-cash-enabled" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">Double cash</td><td style="vertical-align:middle;white-space:nowrap;padding:3px 2px;width:1px;"><input id="ug-bot-qt-auction-double-cash-maxpts" type="text" inputmode="decimal" class="ug-compact-input ug-compact-input-sm" placeholder="3" /></td><td style="vertical-align:middle;white-space:nowrap;padding:3px 0 3px 4px;width:1px;"><input id="ug-bot-qt-auction-double-cash-minamt" type="text" inputmode="numeric" class="ug-compact-input ug-compact-input-sm" placeholder="30 mins" /></td></tr>
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-qt-auction-rare-enabled" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">Rare cars</td><td style="vertical-align:middle;white-space:nowrap;padding:3px 2px;width:1px;"><input id="ug-bot-qt-auction-rare-maxpts" type="text" inputmode="decimal" class="ug-compact-input ug-compact-input-sm" placeholder="3" /></td><td style="vertical-align:middle;white-space:nowrap;padding:3px 0 3px 4px;width:1px;"><input id="ug-bot-qt-auction-rare-minamt" type="text" inputmode="numeric" class="ug-compact-input ug-compact-input-sm" placeholder="50 cars" /></td></tr>
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-qt-auction-bullet-value-enabled" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">Bullet value</td><td style="vertical-align:middle;white-space:nowrap;padding:3px 2px;width:1px;"><input id="ug-bot-qt-auction-bullet-value-maxpts" type="text" inputmode="decimal" class="ug-compact-input ug-compact-input-sm" placeholder="3" /></td><td style="vertical-align:middle;white-space:nowrap;padding:3px 0 3px 4px;width:1px;"><input id="ug-bot-qt-auction-bullet-value-minamt" type="text" inputmode="numeric" class="ug-compact-input ug-compact-input-sm" placeholder="20 cars" /></td></tr>
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-qt-auction-car-bundle-enabled" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">Rare car bundles</td><td style="vertical-align:middle;white-space:nowrap;padding:3px 2px;width:1px;"><input id="ug-bot-qt-auction-car-bundle-maxpts" type="text" inputmode="decimal" class="ug-compact-input ug-compact-input-sm" placeholder="3" /></td><td style="vertical-align:middle;white-space:nowrap;padding:3px 0 3px 4px;width:1px;"><input id="ug-bot-qt-auction-car-bundle-minamt" type="text" inputmode="numeric" class="ug-compact-input ug-compact-input-sm" placeholder="25 cars" /></td></tr>
+</table>
+<div style="color:#777;font-size:10px;line-height:1.35;margin-top:6px;text-align:left;">Uses fetch only. Unknown auction rewards are logged and skipped until their HTML/text is added.</div>
+</div>
+                    </div>
+
                     <!-- QT CARS sub-tab -->
+
                     <!-- QT CARS sub-tab -->
                     <div class="ug-sub-pane" data-sub="qtcars" data-parent="qt" style="display:none;">
 <div style="width:100%;background:#1b1b1b;border:1px solid #444;border-radius:6px;padding:8px;box-sizing:border-box;margin-bottom:4px;overflow:hidden;"><table style="width:auto;border-collapse:collapse;">
@@ -14408,6 +15033,35 @@ async function doQTPerkRedeem() {
         qtBulletValueMinAmtEl    = document.querySelector('#ug-bot-qt-bullet-value-minamt');
         qtCarsEnabledInput       = document.querySelector('#ug-bot-qt-cars-enabled');
         qtCarsIntervalEl         = document.querySelector('#ug-bot-qt-cars-interval');
+        qtAuctionEnabledInput    = document.querySelector('#ug-bot-qt-auction-enabled');
+        qtAuctionPollSecsEl      = document.querySelector('#ug-bot-qt-auction-poll-secs');
+        qtAuctionBulletsEnabledInput = document.querySelector('#ug-bot-qt-auction-bullets-enabled');
+        qtAuctionBulletsMaxPtsEl = document.querySelector('#ug-bot-qt-auction-bullets-maxpts');
+        qtAuctionBulletsMinEl    = document.querySelector('#ug-bot-qt-auction-bullets-minamt');
+        qtAuctionBustEnabledInput = document.querySelector('#ug-bot-qt-auction-bust-enabled');
+        qtAuctionBustMaxPtsEl    = document.querySelector('#ug-bot-qt-auction-bust-maxpts');
+        qtAuctionBustMinAmtEl    = document.querySelector('#ug-bot-qt-auction-bust-minamt');
+        qtAuctionAlwaysSuccEnabledInput = document.querySelector('#ug-bot-qt-auction-always-succ-enabled');
+        qtAuctionAlwaysSuccMaxPtsEl = document.querySelector('#ug-bot-qt-auction-always-succ-maxpts');
+        qtAuctionAlwaysSuccMinAmtEl = document.querySelector('#ug-bot-qt-auction-always-succ-minamt');
+        qtAuctionDoubleMeltsEnabledInput = document.querySelector('#ug-bot-qt-auction-double-melts-enabled');
+        qtAuctionDoubleMeltsMaxPtsEl = document.querySelector('#ug-bot-qt-auction-double-melts-maxpts');
+        qtAuctionDoubleMeltsMinAmtEl = document.querySelector('#ug-bot-qt-auction-double-melts-minamt');
+        qtAuctionDoubleXpEnabledInput = document.querySelector('#ug-bot-qt-auction-double-xp-enabled');
+        qtAuctionDoubleXpMaxPtsEl = document.querySelector('#ug-bot-qt-auction-double-xp-maxpts');
+        qtAuctionDoubleXpMinAmtEl = document.querySelector('#ug-bot-qt-auction-double-xp-minamt');
+        qtAuctionDoubleCashEnabledInput = document.querySelector('#ug-bot-qt-auction-double-cash-enabled');
+        qtAuctionDoubleCashMaxPtsEl = document.querySelector('#ug-bot-qt-auction-double-cash-maxpts');
+        qtAuctionDoubleCashMinAmtEl = document.querySelector('#ug-bot-qt-auction-double-cash-minamt');
+        qtAuctionRareEnabledInput = document.querySelector('#ug-bot-qt-auction-rare-enabled');
+        qtAuctionRareMaxPtsEl     = document.querySelector('#ug-bot-qt-auction-rare-maxpts');
+        qtAuctionRareMinAmtEl     = document.querySelector('#ug-bot-qt-auction-rare-minamt');
+        qtAuctionBulletValueEnabledInput = document.querySelector('#ug-bot-qt-auction-bullet-value-enabled');
+        qtAuctionBulletValueMaxPtsEl = document.querySelector('#ug-bot-qt-auction-bullet-value-maxpts');
+        qtAuctionBulletValueMinAmtEl = document.querySelector('#ug-bot-qt-auction-bullet-value-minamt');
+        qtAuctionCarBundleEnabledInput = document.querySelector('#ug-bot-qt-auction-car-bundle-enabled');
+        qtAuctionCarBundleMaxPtsEl = document.querySelector('#ug-bot-qt-auction-car-bundle-maxpts');
+        qtAuctionCarBundleMinAmtEl = document.querySelector('#ug-bot-qt-auction-car-bundle-minamt');
         qtPerkExtendEnabledInput = document.querySelector('#ug-bot-qt-perk-extend-enabled');
         qtPerkExtendMinsEl       = document.querySelector('#ug-bot-qt-perk-extend-mins');
         qtPerkRedeemEnabledInput = document.querySelector('#ug-bot-qt-perk-redeem-enabled');
@@ -14720,6 +15374,35 @@ async function doQTPerkRedeem() {
         if (qtBulletValueMinAmtEl)       qtBulletValueMinAmtEl.value        = String(state.qtBulletValueMinCars);
         if (qtCarsEnabledInput)          qtCarsEnabledInput.checked         = state.qtCarsEnabled;
         if (qtCarsIntervalEl)            qtCarsIntervalEl.value             = String(state.qtCarsScanInterval);
+        if (qtAuctionEnabledInput)       qtAuctionEnabledInput.checked      = state.qtAuctionEnabled;
+        if (qtAuctionPollSecsEl)         qtAuctionPollSecsEl.value          = String(state.qtAuctionPollSecs);
+        if (qtAuctionBulletsEnabledInput) qtAuctionBulletsEnabledInput.checked = state.qtAuctionBulletsEnabled;
+        if (qtAuctionBulletsMaxPtsEl)    qtAuctionBulletsMaxPtsEl.value     = String(state.qtAuctionBulletsMaxPts);
+        if (qtAuctionBulletsMinEl)       qtAuctionBulletsMinEl.value        = formatNumberWithCommas(state.qtAuctionBulletsMin);
+        if (qtAuctionBustEnabledInput)   qtAuctionBustEnabledInput.checked  = state.qtAuctionBustEnabled;
+        if (qtAuctionBustMaxPtsEl)       qtAuctionBustMaxPtsEl.value        = String(state.qtAuctionBustMaxPts);
+        if (qtAuctionBustMinAmtEl)       qtAuctionBustMinAmtEl.value        = String(state.qtAuctionBustMinMins);
+        if (qtAuctionAlwaysSuccEnabledInput) qtAuctionAlwaysSuccEnabledInput.checked = state.qtAuctionAlwaysSuccEnabled;
+        if (qtAuctionAlwaysSuccMaxPtsEl) qtAuctionAlwaysSuccMaxPtsEl.value  = String(state.qtAuctionAlwaysSuccMaxPts);
+        if (qtAuctionAlwaysSuccMinAmtEl) qtAuctionAlwaysSuccMinAmtEl.value  = String(state.qtAuctionAlwaysSuccMinMins);
+        if (qtAuctionDoubleMeltsEnabledInput) qtAuctionDoubleMeltsEnabledInput.checked = state.qtAuctionDoubleMeltsEnabled;
+        if (qtAuctionDoubleMeltsMaxPtsEl) qtAuctionDoubleMeltsMaxPtsEl.value = String(state.qtAuctionDoubleMeltsMaxPts);
+        if (qtAuctionDoubleMeltsMinAmtEl) qtAuctionDoubleMeltsMinAmtEl.value = String(state.qtAuctionDoubleMeltsMinCars);
+        if (qtAuctionDoubleXpEnabledInput) qtAuctionDoubleXpEnabledInput.checked = state.qtAuctionDoubleXpEnabled;
+        if (qtAuctionDoubleXpMaxPtsEl)  qtAuctionDoubleXpMaxPtsEl.value     = String(state.qtAuctionDoubleXpMaxPts);
+        if (qtAuctionDoubleXpMinAmtEl)  qtAuctionDoubleXpMinAmtEl.value     = String(state.qtAuctionDoubleXpMinMins);
+        if (qtAuctionDoubleCashEnabledInput) qtAuctionDoubleCashEnabledInput.checked = state.qtAuctionDoubleCashEnabled;
+        if (qtAuctionDoubleCashMaxPtsEl) qtAuctionDoubleCashMaxPtsEl.value   = String(state.qtAuctionDoubleCashMaxPts);
+        if (qtAuctionDoubleCashMinAmtEl) qtAuctionDoubleCashMinAmtEl.value   = String(state.qtAuctionDoubleCashMinMins);
+        if (qtAuctionRareEnabledInput)  qtAuctionRareEnabledInput.checked    = state.qtAuctionRareEnabled;
+        if (qtAuctionRareMaxPtsEl)      qtAuctionRareMaxPtsEl.value          = String(state.qtAuctionRareMaxPts);
+        if (qtAuctionRareMinAmtEl)      qtAuctionRareMinAmtEl.value          = String(state.qtAuctionRareMinCars);
+        if (qtAuctionBulletValueEnabledInput) qtAuctionBulletValueEnabledInput.checked = state.qtAuctionBulletValueEnabled;
+        if (qtAuctionBulletValueMaxPtsEl) qtAuctionBulletValueMaxPtsEl.value = String(state.qtAuctionBulletValueMaxPts);
+        if (qtAuctionBulletValueMinAmtEl) qtAuctionBulletValueMinAmtEl.value = String(state.qtAuctionBulletValueMinCars);
+        if (qtAuctionCarBundleEnabledInput) qtAuctionCarBundleEnabledInput.checked = state.qtAuctionCarBundleEnabled;
+        if (qtAuctionCarBundleMaxPtsEl) qtAuctionCarBundleMaxPtsEl.value     = String(state.qtAuctionCarBundleMaxPts);
+        if (qtAuctionCarBundleMinAmtEl) qtAuctionCarBundleMinAmtEl.value     = String(state.qtAuctionCarBundleMinCars);
 
         drugCompModeInput = document.querySelector('#ug-bot-drug-comp');
         if (drugCompModeInput) {
@@ -14849,6 +15532,7 @@ async function doQTPerkRedeem() {
         attachNumberFormatting(qtBgThresholdEl);
         attachNumberFormatting(qtBulletsThresholdEl);
         attachNumberFormatting(qtBulletsMinEl);
+        attachNumberFormatting(qtAuctionBulletsMinEl);
         attachNumberFormatting(extendBulletsThreshEl);
         attachNumberFormatting(extendRaresThreshEl);
         attachNumberFormatting(extendDoubleMeltsThreshEl);
@@ -15887,6 +16571,10 @@ async function doQTPerkRedeem() {
         if (state.qtCarsEnabled) {
             startQTCarScanner();
         }
+        // Start QT auction scanner on every page load if enabled
+        if (state.qtAuctionEnabled) {
+            startQTAuctionScanner();
+        }
         // Start free entry dice joiner on every page load if enabled
         if (state.diceJoinEnabled) startDiceJoiner();
         // Start background crime loop on every page load if enabled
@@ -16128,6 +16816,35 @@ async function doQTPerkRedeem() {
         qtPointsEnabledInput    = document.querySelector('#ug-bot-qt-points-enabled');
         qtPointsThresholdEl     = document.querySelector('#ug-bot-qt-points-threshold');
         qtCarsEnabledInput      = document.querySelector('#ug-bot-qt-cars-enabled');
+        qtAuctionEnabledInput   = document.querySelector('#ug-bot-qt-auction-enabled');
+        qtAuctionPollSecsEl     = document.querySelector('#ug-bot-qt-auction-poll-secs');
+        qtAuctionBulletsEnabledInput = document.querySelector('#ug-bot-qt-auction-bullets-enabled');
+        qtAuctionBulletsMaxPtsEl = document.querySelector('#ug-bot-qt-auction-bullets-maxpts');
+        qtAuctionBulletsMinEl   = document.querySelector('#ug-bot-qt-auction-bullets-minamt');
+        qtAuctionBustEnabledInput = document.querySelector('#ug-bot-qt-auction-bust-enabled');
+        qtAuctionBustMaxPtsEl   = document.querySelector('#ug-bot-qt-auction-bust-maxpts');
+        qtAuctionBustMinAmtEl   = document.querySelector('#ug-bot-qt-auction-bust-minamt');
+        qtAuctionAlwaysSuccEnabledInput = document.querySelector('#ug-bot-qt-auction-always-succ-enabled');
+        qtAuctionAlwaysSuccMaxPtsEl = document.querySelector('#ug-bot-qt-auction-always-succ-maxpts');
+        qtAuctionAlwaysSuccMinAmtEl = document.querySelector('#ug-bot-qt-auction-always-succ-minamt');
+        qtAuctionDoubleMeltsEnabledInput = document.querySelector('#ug-bot-qt-auction-double-melts-enabled');
+        qtAuctionDoubleMeltsMaxPtsEl = document.querySelector('#ug-bot-qt-auction-double-melts-maxpts');
+        qtAuctionDoubleMeltsMinAmtEl = document.querySelector('#ug-bot-qt-auction-double-melts-minamt');
+        qtAuctionDoubleXpEnabledInput = document.querySelector('#ug-bot-qt-auction-double-xp-enabled');
+        qtAuctionDoubleXpMaxPtsEl = document.querySelector('#ug-bot-qt-auction-double-xp-maxpts');
+        qtAuctionDoubleXpMinAmtEl = document.querySelector('#ug-bot-qt-auction-double-xp-minamt');
+        qtAuctionDoubleCashEnabledInput = document.querySelector('#ug-bot-qt-auction-double-cash-enabled');
+        qtAuctionDoubleCashMaxPtsEl = document.querySelector('#ug-bot-qt-auction-double-cash-maxpts');
+        qtAuctionDoubleCashMinAmtEl = document.querySelector('#ug-bot-qt-auction-double-cash-minamt');
+        qtAuctionRareEnabledInput = document.querySelector('#ug-bot-qt-auction-rare-enabled');
+        qtAuctionRareMaxPtsEl    = document.querySelector('#ug-bot-qt-auction-rare-maxpts');
+        qtAuctionRareMinAmtEl    = document.querySelector('#ug-bot-qt-auction-rare-minamt');
+        qtAuctionBulletValueEnabledInput = document.querySelector('#ug-bot-qt-auction-bullet-value-enabled');
+        qtAuctionBulletValueMaxPtsEl = document.querySelector('#ug-bot-qt-auction-bullet-value-maxpts');
+        qtAuctionBulletValueMinAmtEl = document.querySelector('#ug-bot-qt-auction-bullet-value-minamt');
+        qtAuctionCarBundleEnabledInput = document.querySelector('#ug-bot-qt-auction-car-bundle-enabled');
+        qtAuctionCarBundleMaxPtsEl = document.querySelector('#ug-bot-qt-auction-car-bundle-maxpts');
+        qtAuctionCarBundleMinAmtEl = document.querySelector('#ug-bot-qt-auction-car-bundle-minamt');
         qtBustEnabledInput      = document.querySelector('#ug-bot-qt-bust-enabled');
         qtBustMaxPtsEl          = document.querySelector('#ug-bot-qt-bust-maxpts');
         qtBustMinAmtEl          = document.querySelector('#ug-bot-qt-bust-minamt');
