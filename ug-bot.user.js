@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Full UG Bot
 // @namespace    ug-bot
-// @version      2.7.3
+// @version      2.7.8
 // @description  Auto-runs crimes, GTA, melting, repair, missions, drug running with Swiss Bank management, live log, session stats, action checkboxes, jail handling, runtime tracking, melt pagination, repair cycles, automatic CTC solving, and point-spending features.
 // @match        *://www.underworldgangsters.com/*
 // @match        *://underworldgangsters.com/*
@@ -594,7 +594,7 @@
     // BOT CONFIG
     // =========================================================================
 
-    const SCRIPT_VERSION = '2.7.3';
+    const SCRIPT_VERSION = '2.7.8';
 
     const CRIME_DEFS = [
         { id: 'gang', name: 'Gang Activities' },
@@ -847,18 +847,169 @@
         'betting', 'blackjack', 'dice', 'racetrack', 'gangs', 'gang-info'
     ];
 
+    const PERSONALITY_STORAGE_KEY = 'ugbot_personality';
+    const DUPE_MODE_STORAGE_KEY   = 'ugbot_dupeMode';
+
     let personalityJustGenerated = false;
+    let personalityRecovered     = false;
+
+    function isPlainObject(value) {
+        return !!value && typeof value === 'object' && !Array.isArray(value);
+    }
+
+    function readStoredValue(key, fallback = null) {
+        try {
+            const value = GM_getValue(key, fallback);
+            return value === undefined ? fallback : value;
+        } catch (e) {
+            try {
+                const raw = localStorage.getItem(`ugbot_${key}`);
+                return raw == null ? fallback : JSON.parse(raw);
+            } catch (_) {
+                return fallback;
+            }
+        }
+    }
+
+    function writeStoredValue(key, value) {
+        try {
+            GM_setValue(key, value);
+        } catch (e) {
+            try { localStorage.setItem(`ugbot_${key}`, JSON.stringify(value)); } catch (_) {}
+        }
+    }
+
+    function parseStoredObject(value) {
+        if (isPlainObject(value)) return value;
+        if (typeof value !== 'string') return value;
+        const trimmed = value.trim();
+        if (!trimmed || trimmed === 'undefined' || trimmed === 'null') return null;
+        try { return JSON.parse(trimmed); } catch (_) { return null; }
+    }
+
+    function toFiniteNumber(value) {
+        const n = Number(value);
+        return Number.isFinite(n) ? n : null;
+    }
+
+    function clampNumber(value, fallback, min = -Infinity, max = Infinity) {
+        const n = toFiniteNumber(value);
+        const f = toFiniteNumber(fallback);
+        const base = n !== null ? n : (f !== null ? f : min);
+        return Math.min(max, Math.max(min, base));
+    }
+
+    function numberInRange(value, min, max) {
+        const n = toFiniteNumber(value);
+        if (n === null || n < min || n > max) return null;
+        return n;
+    }
+
+    function boolValue(value, fallback = false) {
+        if (value === true || value === false) return value;
+        if (value === 'true') return true;
+        if (value === 'false') return false;
+        if (value === 1) return true;
+        if (value === 0) return false;
+        return !!fallback;
+    }
+
+    function cleanHumanPages(value) {
+        if (!Array.isArray(value)) return null;
+        const seen = new Set();
+        const pages = [];
+        for (const rawPage of value) {
+            const page = String(rawPage || '').trim();
+            if (!HUMAN_PAGES.includes(page) || seen.has(page)) continue;
+            seen.add(page);
+            pages.push(page);
+        }
+        return pages.length ? pages : null;
+    }
+
+    function getStoredDupeMode(fallback = false) {
+        const storedDupe = readStoredValue(DUPE_MODE_STORAGE_KEY, null);
+        if (storedDupe === true || storedDupe === false) return storedDupe;
+        if (storedDupe === 'true') return true;
+        if (storedDupe === 'false') return false;
+
+        const storedPersonality = parseStoredObject(readStoredValue(PERSONALITY_STORAGE_KEY, null));
+        if (isPlainObject(storedPersonality)) {
+            if (storedPersonality.dupeMode === true || storedPersonality.dupeMode === false) {
+                return storedPersonality.dupeMode;
+            }
+            if (storedPersonality.dupeMode === 'true') return true;
+            if (storedPersonality.dupeMode === 'false') return false;
+        }
+        return !!fallback;
+    }
+
+    function setStoredDupeMode(dupeMode) {
+        writeStoredValue(DUPE_MODE_STORAGE_KEY, !!dupeMode);
+    }
+
+    function normalisePersonality(raw) {
+        const source = parseStoredObject(raw);
+        if (!isPlainObject(source)) return null;
+
+        const dupeMode = boolValue(source.dupeMode, getStoredDupeMode(false));
+        const humanPages = cleanHumanPages(source.humanPages);
+        const navDelayMin = numberInRange(source.navDelayMin, 100, 60000);
+        const navDelayMax = numberInRange(source.navDelayMax, 100, 120000);
+        const heartbeatMs = numberInRange(source.heartbeatMs, 250, 60000);
+        const idleVisitChancePct = numberInRange(source.idleVisitChancePct, 0, 100);
+
+        // These fields are safety-critical. If any are missing/corrupt, regenerate
+        // the personality instead of letting undefined collapse into 0ms timers.
+        if (humanPages === null || navDelayMin === null || navDelayMax === null || heartbeatMs === null || idleVisitChancePct === null) {
+            return null;
+        }
+        if (navDelayMax < navDelayMin) return null;
+
+        return {
+            dupeMode,
+            depositThreshold:    Math.round(clampNumber(source.depositThreshold, DEFAULTS.autoDepositThreshold, 1000000, 1000000000)),
+            drugDepositMult:     +clampNumber(source.drugDepositMult, DEFAULTS.drugDepositMultiplier, 1, 20).toFixed(1),
+            scanIntervalMins:    +clampNumber(source.scanIntervalMins, DEFAULTS.killScanOnlineInterval, 0.1, 60).toFixed(1),
+            timingOffsetMs:      Math.round(clampNumber(source.timingOffsetMs, 0, -5000, 5000)),
+            humanPages,
+            idleVisitChancePct:  Math.round(idleVisitChancePct),
+            idleMinMs:           Math.round(clampNumber(source.idleMinMs, dupeMode ? 30000 : 20000, 1000, 600000)),
+            navDelayMin:         Math.round(navDelayMin),
+            navDelayMax:         Math.round(navDelayMax),
+            heartbeatMs:         Math.round(heartbeatMs),
+            gtaDelayChancePct:   Math.round(clampNumber(source.gtaDelayChancePct, dupeMode ? 25 : 0, 0, 100)),
+            gtaDelayExtraMs:     Math.round(clampNumber(source.gtaDelayExtraMs, dupeMode ? 10000 : 0, 0, 120000)),
+            jailNavigateAway:    boolValue(source.jailNavigateAway, false),
+            jailLeaveDelayMs:    Math.round(clampNumber(source.jailLeaveDelayMs, dupeMode ? 3000 : 0, 0, 120000)),
+            crimePageLingerMs:   Math.round(clampNumber(source.crimePageLingerMs, dupeMode ? 0 : 0, 0, 60000)),
+        };
+    }
 
     function getPersonality() {
-        const stored = GM_getValue('ugbot_personality', null);
-        if (stored) return stored;
+        const stored = readStoredValue(PERSONALITY_STORAGE_KEY, null);
+        const normalised = normalisePersonality(stored);
 
-        // First run — generate a personality and store it permanently
-        personalityJustGenerated = true;
-        return generatePersonality(false);
+        if (normalised) {
+            setStoredDupeMode(normalised.dupeMode);
+            writeStoredValue(PERSONALITY_STORAGE_KEY, normalised);
+            return normalised;
+        }
+
+        const hadStoredValue = stored !== null && stored !== undefined && stored !== '';
+        const dupeMode = getStoredDupeMode(false);
+        if (hadStoredValue) {
+            personalityRecovered = true;
+            console.warn('[UG-BOT] Stored personality was invalid/corrupt. Regenerating safely with dupe mode preserved:', dupeMode);
+        } else {
+            personalityJustGenerated = true;
+        }
+        return generatePersonality(dupeMode);
     }
 
     function generatePersonality(dupeMode) {
+        dupeMode = !!dupeMode;
+        setStoredDupeMode(dupeMode);
         const shuffle = arr => arr.slice().sort(() => Math.random() - 0.5);
         const pageCount = dupeMode
             ? 3 + Math.floor(Math.random() * 4)   // 3–6 pages in dupe mode
@@ -881,8 +1032,9 @@
             jailLeaveDelayMs:    dupeMode ? 2000 + Math.floor(Math.random() * 8000) : 0,
             crimePageLingerMs:   dupeMode ? Math.floor(Math.random() * 3000)        : 0,
         };
-        GM_setValue('ugbot_personality', personality);
-        return personality;
+        const safePersonality = normalisePersonality(personality) || personality;
+        writeStoredValue(PERSONALITY_STORAGE_KEY, safePersonality);
+        return safePersonality;
     }
 
     const PERSONALITY = getPersonality();
@@ -1692,16 +1844,30 @@
     }
 
     function rand(min, max) {
-        return Math.floor(Math.random() * (max - min + 1)) + min;
+        let lo = toFiniteNumber(min);
+        let hi = toFiniteNumber(max);
+        if (lo === null || hi === null) {
+            // Never allow undefined/NaN timer inputs to become immediate 0ms behaviour.
+            lo = DEFAULTS.actionDelayMin;
+            hi = DEFAULTS.actionDelayMax;
+        }
+        if (hi < lo) [lo, hi] = [hi, lo];
+        lo = Math.ceil(lo);
+        hi = Math.floor(hi);
+        if (hi < lo) return lo;
+        return Math.floor(Math.random() * (hi - lo + 1)) + lo;
     }
 
-    // Navigation delay — uses personality values so dupe accounts feel slower/different
+    // Navigation delay — uses validated personality values so dupe accounts feel slower/different
     function navRand() {
-        return rand(PERSONALITY.navDelayMin, PERSONALITY.navDelayMax);
+        const min = clampNumber(PERSONALITY.navDelayMin, DEFAULTS.navDelayMin, 100, 60000);
+        const max = clampNumber(PERSONALITY.navDelayMax, DEFAULTS.navDelayMax, min, 120000);
+        return rand(min, max);
     }
 
     function wait(ms) {
-        return new Promise(resolve => setTimeout(resolve, ms));
+        const safeMs = Math.round(clampNumber(ms, DEFAULTS.actionDelayMin, 0, 10 * 60 * 1000));
+        return new Promise(resolve => setTimeout(resolve, safeMs));
     }
 
     function now() { return Date.now(); }
@@ -3309,6 +3475,78 @@
         return true;
     }
 
+
+    // v31: A freshly found BG Farm bodyguard must complete as an atomic
+    // verify-original -> shoot-BG chain.  Other opportunistic loops (online
+    // scanner, BG Crime polling, generic bgcheck scheduling) must not replace it
+    // with a bare {stage:'bgcheck'} or steal the page flow while the chain is live.
+    function actionMatchesBgFarmChain(action, bgFor, bgName = null) {
+        if (!action || !bgFor) return false;
+        const owner = bgFor.toLowerCase();
+        const bg    = bgName ? bgName.toLowerCase() : null;
+        const target = action.targetName ? action.targetName.toLowerCase() : '';
+        const actionBgFor = action.bgFor ? action.bgFor.toLowerCase() : '';
+        const afterVerifyTarget = action.afterVerify?.targetName ? action.afterVerify.targetName.toLowerCase() : '';
+
+        if ((action.stage === 'bg_farm_check' || action.stage === 'bg_farm_shoot' || action.stage === 'bg_farm_result') &&
+            target === owner && (!bg || afterVerifyTarget === bg)) {
+            return true;
+        }
+        if (action.stage === 'bg_shoot' && actionBgFor === owner && (!bg || target === bg)) {
+            return true;
+        }
+        if (action.stage === 'travel' || action.stage === 'travel_car') {
+            if (actionMatchesBgFarmChain(action.afterTravel, bgFor, bgName)) return true;
+        }
+        return actionMatchesBgFarmChain(action.afterVerify, bgFor, bgName);
+    }
+
+    function hasMatchingBgFarmCriticalChain(bgFor, bgName = null) {
+        return actionMatchesBgFarmChain(state.pendingKillAction, bgFor, bgName) ||
+               actionMatchesBgFarmChain(state.killBgShootPending, bgFor, bgName) ||
+               actionMatchesBgFarmChain(state.killPenaltyPendingAction, bgFor, bgName);
+    }
+
+    function isBgFarmCriticalAction(action) {
+        if (!action) return false;
+        if (action.stage === 'bg_farm_check' || action.stage === 'bg_farm_shoot' || action.stage === 'bg_farm_result') {
+            return !!action.targetName && isPlayerBgFarmEnabled(action.targetName);
+        }
+        if (action.stage === 'bg_shoot' && action.bgFor && isPlayerBgFarmEnabled(action.bgFor)) return true;
+        return isBgFarmCriticalAction(action.afterTravel) || isBgFarmCriticalAction(action.afterVerify);
+    }
+
+    function hasActiveBgFarmCriticalChain() {
+        return isBgFarmCriticalAction(state.pendingKillAction) ||
+               isBgFarmCriticalAction(state.killBgShootPending) ||
+               isBgFarmCriticalAction(state.killPenaltyPendingAction);
+    }
+
+    function queueFoundBgFarmVerificationFromPage(players, foundNamesOnPage, reason = 'found BG is ready') {
+        if (!state.killBgCheckEnabled || isKillPenaltyTooHigh()) return false;
+        for (const owner of players) {
+            if (!owner || owner.status !== KILL_STATUS.ALIVE || !owner.bodyguard) continue;
+            if (!isPlayerBgFarmEnabled(owner.name)) continue;
+            const bgName = owner.bodyguard;
+            if (!foundNamesOnPage.has(bgName.toLowerCase())) continue;
+            if (hasMatchingBgFarmCriticalChain(owner.name, bgName)) return true;
+
+            const bgPlayer = players.find(p => p.name && p.name.toLowerCase() === bgName.toLowerCase());
+            if (bgPlayer) {
+                bgPlayer.isBg = true;
+                bgPlayer.bgFor = owner.name;
+                bgPlayer.bgShootQueued = true;
+            }
+            owner.bgVerifyInFlight = true;
+            delete owner.bgFarmWaitUntil;
+            saveKillPlayers(players);
+            addLiveLog(`Kill loop: ${bgName} is found for ${owner.name} — locking verify→shoot chain`);
+            queueFreshBgVerifyBeforeShot(bgName, owner.name, isPlayerShootEnabled(owner.name), reason);
+            return true;
+        }
+        return false;
+    }
+
     function clearStaleBgRelation(bgName, bgFor, reason = 'stale') {
         if (!bgName || !bgFor) return;
         const players = state.killPlayers || [];
@@ -4070,6 +4308,38 @@
         return nowMs + fallbackMs;
     }
 
+    // v32: strict pending-search timer reader. Unlike getPendingSearchExpectedAt(),
+    // this never invents the old 3-hour fallback. Use it anywhere a false 180m wait
+    // would block a BG Farm verify→shoot chain.
+    function getActualPendingSearchExpectedAt(name) {
+        const nameLower = String(name || '').toLowerCase();
+        if (!nameLower) return 0;
+        const nowMs = now();
+        const players = state.killPlayers || [];
+        const p = players.find(pl => pl.name && pl.name.toLowerCase() === nameLower);
+
+        if (p && p.pendingSearch && p.expectedFoundAt && p.expectedFoundAt > nowMs) {
+            return p.expectedFoundAt;
+        }
+
+        const pendingRow = [...document.querySelectorAll('.bgl.i.wb .bgm.chs.pd')].find(row => {
+            const b = row.querySelector('b');
+            return b && textOf(b).toLowerCase() === nameLower;
+        });
+        if (!pendingRow) return 0;
+
+        const timerSpan = pendingRow.querySelector('.chd');
+        const foundInMs = timerSpan ? parseLostInMs(textOf(timerSpan)) : null;
+        const expectedAt = nowMs + (foundInMs != null ? foundInMs : 60 * 1000);
+        const idx = players.findIndex(pl => pl.name && pl.name.toLowerCase() === nameLower);
+        if (idx !== -1) {
+            players[idx].pendingSearch = true;
+            players[idx].expectedFoundAt = expectedAt;
+            saveKillPlayers(players);
+        }
+        return expectedAt;
+    }
+
     // Reads the "Players found" and "Searching for" sections on the kill page and:
     // 1. Updates each known player's stored expiry time with the accurate "Lost in X" value
     // 2. Adds any unknown players found there to the list as "alive" — cross-device sync
@@ -4332,7 +4602,12 @@
             // and travel/drive cooldowns, and is only cleared when the verify chain
             // actually completes (shoot fires) or genuinely aborts.
             const bgForPlayerFlag = players.find(pl => pl.name.toLowerCase() === p.bgFor?.toLowerCase());
-            if (bgForPlayerFlag?.bgVerifyInFlight) continue;
+            if (bgForPlayerFlag?.bgVerifyInFlight) {
+                if (hasMatchingBgFarmCriticalChain(p.bgFor, p.name)) continue;
+                addLiveLog(`Kill loop: stale BG verify flag for ${p.bgFor}/${p.name} cleared — no active verify→shoot chain`);
+                delete bgForPlayerFlag.bgVerifyInFlight;
+                saveKillPlayers(players);
+            }
             // Verify bodyguard is actually in Players Found right now before queuing shoot
             const inFoundNow = [...document.querySelectorAll('.bgl.i.wb .bgm.chs:not(.pd) a[href*="?p=profile&u="]')]
                 .some(a => { try { return new URL(a.getAttribute('href'), window.location.href).searchParams.get('u').toLowerCase() === p.name.toLowerCase(); } catch(_){ return false; } });
@@ -6515,6 +6790,7 @@ async function doQTPerkRedeem() {
 
     async function doBgCrimePoll() {
         if (!bgCrimeActive || !state.bgCrimeEnabled || !state.enabled || crimePaused) { scheduleBgCrimePoll(); return; }
+        if (hasActiveBgFarmCriticalChain()) { scheduleBgCrimePoll(); return; }
         if (hasCTCChallenge()) { scheduleBgCrimePoll(); return; }
 
         if (isLikelyJailPage()) {
@@ -9978,14 +10254,48 @@ async function doQTPerkRedeem() {
                                 return;
                             } else {
                                 // Still searching (pending) — let search loop find them, then shoot.
-                                // Use expectedFoundAt / visible pending timer, not searchExpiresAt;
-                                // searchExpiresAt may still be the 24h placeholder from search submission.
-                                const searchReadyAt = getPendingSearchExpectedAt(bgName);
-                                const waitMins = Math.max(0, Math.round((searchReadyAt - now()) / 60000));
-                                addLiveLog(`Kill loop: ${bgName} already being searched, found in ~${waitMins}m — waiting`);
-                                state.killSearchLoopActive = true;
-                                state.killLoopActive       = false;
-                                state.killBgWaitUntil      = isPlayerBgFarmEnabled(target) ? 0 : searchReadyAt;
+                                // v32: only wait if the BG is actually visible in the game's pending-search
+                                // queue or has a real expectedFoundAt marker. Do not invent the old 180m
+                                // fallback, because that can starve a BG Farm verify→shoot chain.
+                                const searchReadyAt = getActualPendingSearchExpectedAt(bgName);
+                                if (searchReadyAt) {
+                                    const waitMins = Math.max(0, Math.round((searchReadyAt - now()) / 60000));
+                                    addLiveLog(`Kill loop: ${bgName} already being searched, found in ~${waitMins}m — waiting`);
+                                    state.killSearchLoopActive = true;
+                                    state.killLoopActive       = false;
+                                    state.killBgWaitUntil      = isPlayerBgFarmEnabled(target) ? 0 : searchReadyAt;
+                                } else {
+                                    addLiveLog(`Kill loop: ${bgName} is not found or pending — re-searching bodyguard for ${target}`);
+                                    players[existingIdx].status = KILL_STATUS.UNKNOWN;
+                                    players[existingIdx].pendingSearch = false;
+                                    delete players[existingIdx].expectedFoundAt;
+                                    players[existingIdx].lastChecked = 0;
+                                    saveKillPlayers(players);
+
+                                    const searchForm = document.querySelector('form input[name="do"][value="search"]');
+                                    const searchParent = searchForm ? searchForm.closest('form') : null;
+                                    if (searchParent) {
+                                        const usernameInput = searchParent.querySelector('input[name="username"]');
+                                        const hoursInput    = searchParent.querySelector('input[name="hours"]');
+                                        const submitBtn     = searchParent.querySelector('input[type="submit"][value="Search"]');
+                                        if (usernameInput && submitBtn) {
+                                            usernameInput.value = bgName;
+                                            if (hoursInput) hoursInput.value = '24';
+                                            state.killCurrentSearch = bgName;
+                                            state.pendingKillAction = null;
+                                            state.killLoopActive    = false;
+                                            state.killBgWaitUntil   = isPlayerBgFarmEnabled(target) ? 0 : now() + (3 * 60 * 60 * 1000);
+                                            state.lastActionAt = now();
+                                            await wait(rand(DEFAULTS.actionDelayMin, DEFAULTS.actionDelayMax));
+                                            humanClick(submitBtn);
+                                            addLiveLog(`Kill loop: search submitted for bodyguard ${bgName}`);
+                                            return;
+                                        }
+                                    }
+                                    state.killSearchLoopActive = true;
+                                    state.killLoopActive       = false;
+                                    state.killBgWaitUntil      = 0;
+                                }
                             }
                         }
 
@@ -10550,8 +10860,21 @@ async function doQTPerkRedeem() {
             return true;
         });
 
-        // Sync country data from Players Found so foundMap is always fresh
+        // Sync country data from Players Found so foundMap is always fresh.
+        // v31: if the sync sees a searched BG has just appeared and queues a
+        // BG Farm verify→shoot chain, stop this generic bgcheck pass immediately.
+        // Continuing with the old bare bgcheck state can otherwise fall into the
+        // 3-hour/180m pending-search branch and mask the fresh chain.
+        const _pendingBeforeSync = state.pendingKillAction;
         syncKillExpiryFromPage(true);
+        if (state.pendingKillAction && state.pendingKillAction !== _pendingBeforeSync && hasActiveBgFarmCriticalChain()) {
+            addLiveLog('Kill loop: BG Farm verify→shoot chain queued — holding kill flow');
+            state.killLoopActive = true;
+            state.killSearchLoopActive = false;
+            await wait(navRand());
+            gotoPage('kill');
+            return;
+        }
 
         // Helper: get country from live Players Found only — no stale p.country fallback
         // If a player isn't in Players Found right now (dead, not yet found, moved),
@@ -10665,6 +10988,14 @@ async function doQTPerkRedeem() {
                     return;
                 }
 
+                // If the stored BG is already in Players Found, do not turn this
+                // into a generic search wait. Lock the fresh BG Farm verify→shoot chain.
+                if (queueFoundBgFarmVerificationFromPage(players, foundNamesOnPage, 'stored BG found during generic bgcheck')) {
+                    await wait(navRand());
+                    gotoPage('kill');
+                    return;
+                }
+
                 let earliestExpiry = 0;
                 const pendingSearchRows = [...document.querySelectorAll('.bgl.i.wb .bgm.chs.pd')];
                 for (const p of players) {
@@ -10675,12 +11006,22 @@ async function doQTPerkRedeem() {
                     // Read the true pending-search completion timer. This prefers expectedFoundAt
                     // and the visible pending row, so it cannot accidentally use the 24h
                     // searchExpiresAt placeholder from when the search was submitted.
-                    const expiry = getPendingSearchExpectedAt(bgNameLower);
+                    const expiry = getActualPendingSearchExpectedAt(bgNameLower);
+                    if (!expiry) continue;
                     earliestExpiry = earliestExpiry ? Math.min(earliestExpiry, expiry) : expiry;
                 }
-                // Fall back to 3hr if no pending-search timer was found
-                if (!earliestExpiry) earliestExpiry = nowMs + (3 * 60 * 60 * 1000);
-                const waitMins = Math.round((earliestExpiry - nowMs) / 60000);
+                // If there are stored BGs but no pending-search row for them, do
+                // not invent a 3-hour wait.  That was the source of the repeated
+                // "waiting 180m" loop. Release the bare bgcheck and re-sync shortly.
+                if (!earliestExpiry) {
+                    addLiveLog('Kill loop: BG search wait had no pending BG timer — releasing stale bgcheck and re-syncing soon');
+                    state.killBgWaitUntil = nowMs + 15000;
+                    state.pendingKillAction = null;
+                    state.killLoopActive = false;
+                    await resumeBgSpamAfterCheck();
+                    return;
+                }
+                const waitMins = Math.max(0, Math.round((earliestExpiry - nowMs) / 60000));
                 state.killBgWaitUntil  = earliestExpiry;
                 addLiveLog(`Kill loop: bodyguard search pending — waiting ${waitMins}m for result`);
                 // Reset lastBgCheck only for BG Farm players whose BG is actually being waited on
@@ -11546,9 +11887,16 @@ async function doQTPerkRedeem() {
                 return false;
             });
             if (hasBgFarmPending && !(state.killLoopCooldownUntil > Date.now())) {
-                state.killLoopActive    = true;
-                state.killBgSpamPaused  = true;
-                state.pendingKillAction = { stage: 'bgcheck' };
+                const foundNamesOnPage = new Set(
+                    [...document.querySelectorAll('.bgl.i.wb .bgm.chs:not(.pd) a[href*="?p=profile&u="]')]
+                        .map(a => { try { return new URL(a.getAttribute('href'), window.location.href).searchParams.get('u').toLowerCase(); } catch(_){ return ''; } })
+                        .filter(Boolean)
+                );
+                if (!queueFoundBgFarmVerificationFromPage(players, foundNamesOnPage, 'BG Farm scheduler saw found BG')) {
+                    state.killLoopActive    = true;
+                    state.killBgSpamPaused  = true;
+                    state.pendingKillAction = { stage: 'bgcheck' };
+                }
                 stopBgSpam();
             }
         }
@@ -11963,7 +12311,8 @@ async function doQTPerkRedeem() {
             // Only runs when no dedicated loop is active and scan is due.
             if (isKillOnlineScanDue() && !state.gtaResetLoopActive &&
                 !state.meltResetLoopActive && !state.resetCrimesEnabled && !isKillPenaltyPage() &&
-                !state.pendingBulletRun) {
+                !state.pendingBulletRun && !state.killLoopActive && !state.pendingKillAction &&
+                !state.killBgShootPending && !hasActiveBgFarmCriticalChain()) {
                 addLiveLog('Kill scanner: online scan due — navigating to Players Online');
                 gotoPage('online');
                 return;
@@ -12368,7 +12717,8 @@ async function doQTPerkRedeem() {
     function startHeartbeat() {
         stopHeartbeat();
         startRuntimeIfNeeded();
-        heartbeatHandle = setInterval(() => tick(), PERSONALITY.heartbeatMs);
+        const heartbeatMs = Math.round(clampNumber(PERSONALITY.heartbeatMs, DEFAULTS.heartbeatMs, 250, 60000));
+        heartbeatHandle = setInterval(() => tick(), heartbeatMs);
         setTimeout(() => tick(), 400);
         addLiveLog('Heartbeat started');
         // Clear stale kill loop state — only if wait is implausibly long (>1 day = truly stale)
@@ -14824,7 +15174,8 @@ async function doQTPerkRedeem() {
         if (personalityInfoEl) {
             const p = PERSONALITY;
             const mode = p.dupeMode ? 'Dupe' : 'Normal';
-            personalityInfoEl.textContent = `${mode} mode · nav ${p.navDelayMin}–${p.navDelayMax}ms · heartbeat ${p.heartbeatMs}ms · idle ${p.idleVisitChancePct}% · human pages: ${p.humanPages.length}`;
+            const humanPageCount = Array.isArray(p.humanPages) ? p.humanPages.length : 0;
+            personalityInfoEl.textContent = `${mode} mode · nav ${p.navDelayMin}–${p.navDelayMax}ms · heartbeat ${p.heartbeatMs}ms · idle ${p.idleVisitChancePct}% · human pages: ${humanPageCount}`;
         }
 
         const accGenerateBtn = document.querySelector('#ug-bot-acc-generate');
@@ -15892,11 +16243,13 @@ async function doQTPerkRedeem() {
 
         // Expose a console-accessible reset function
         window.ugbotResetPersonality = function() {
-            GM_setValue('ugbot_personality', null);
-            console.log('[UG Bot] Personality reset — reload the page to generate a new one.');
+            setStoredDupeMode(getStoredDupeMode(PERSONALITY.dupeMode));
+            writeStoredValue(PERSONALITY_STORAGE_KEY, null);
+            console.log('[UG Bot] Personality reset — reload the page to generate a new one. Dupe mode has been preserved.');
         };
 
         applyPersonalityDefaults();
+        if (personalityRecovered) addLiveLog('[Personality] Corrupt stored personality recovered safely; dupe mode preserved.');
         if (state.enabled) startHeartbeat();
         setSetting('autoBuyGunPending', false); // clear any stale lock from previous session
 
