@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Full UG Bot
 // @namespace    ug-bot
-// @version      2.8.2
+// @version      2.8.6
 // @description  Auto-runs crimes, GTA, melting, repair, missions, drug running with Swiss Bank management, live log, session stats, action checkboxes, jail handling, runtime tracking, melt pagination, repair cycles, automatic CTC solving, and point-spending features.
 // @match        *://www.underworldgangsters.com/*
 // @match        *://underworldgangsters.com/*
@@ -594,7 +594,7 @@
     // BOT CONFIG
     // =========================================================================
 
-    const SCRIPT_VERSION = '2.8.2';
+    const SCRIPT_VERSION = '2.8.6';
 
     const CRIME_DEFS = [
         { id: 'gang', name: 'Gang Activities' },
@@ -2872,7 +2872,30 @@
             });
             state.pendingBankAction = null;
             await wait(navRand());
-            if (pending.source === 'bulletFactory' && pending.substage === 'topup') {
+            if (pending.source === 'killLoop' && pending.substage === 'travelCarRepair') {
+                // Kill/BG travel-car repair top-up — return to the same car detail page and retry repair/drive.
+                const action = state.pendingKillAction;
+                const returnUrl = pending.returnUrl || action?.travelCarUrl;
+                if (action && returnUrl) {
+                    state.pendingKillAction = { ...action, stage: 'travel_car', travelCarUrl: returnUrl };
+                    navigateToUrl(returnUrl);
+                } else {
+                    state.pendingKillAction = null;
+                    state.killLoopActive = false;
+                    gotoPage('crimes');
+                }
+            } else if (pending.source === 'bulletFactory' && pending.substage === 'travelCarRepair') {
+                // Travel-car repair top-up — return to the same car detail page and retry repair/drive.
+                const run = state.pendingBulletRun;
+                const returnUrl = pending.returnUrl || run?.travelCarUrl;
+                if (run && returnUrl) {
+                    state.pendingBulletRun = { ...run, stage: 'travel_car', travelCarUrl: returnUrl };
+                    navigateToUrl(returnUrl);
+                } else {
+                    state.pendingBulletRun = null;
+                    gotoPage('crimes');
+                }
+            } else if (pending.source === 'bulletFactory' && pending.substage === 'topup') {
                 // Mid-run top-up — go back to the weaponry page for the current target
                 const run = state.pendingBulletRun;
                 const target = run?.targets?.[0];
@@ -2901,6 +2924,24 @@
                 // Proceed to travel with whatever cash is on hand
                 if (state.pendingBulletRun) state.pendingBulletRun = { ...state.pendingBulletRun, stage: 'travel' };
                 gotoPage('cars');
+            } else if (pending.source === 'killLoop' && pending.substage === 'travelCarRepair') {
+                // Could not top up for this repair; try another travel car rather than looping.
+                const action = state.pendingKillAction;
+                if (action) {
+                    const failedUrls = [...(action.failedCarUrls || []), action.travelCarUrl || pending.returnUrl].filter(Boolean);
+                    state.pendingKillAction = { ...action, travelCarUrl: null, stage: 'travel', failedCarUrls };
+                    await wait(navRand());
+                    gotoPage('cars');
+                } else {
+                    state.killLoopActive = false;
+                    await wait(navRand());
+                    gotoPage('crimes');
+                }
+            } else if (pending.source === 'bulletFactory' && pending.substage === 'travelCarRepair') {
+                // Could not top up for this repair; try picking a different travel car rather than looping.
+                if (state.pendingBulletRun) state.pendingBulletRun = { ...state.pendingBulletRun, stage: 'travel' };
+                await wait(navRand());
+                gotoPage('cars');
             } else if (pending.source === 'bulletFactory' && pending.substage === 'topup') {
                 const run = state.pendingBulletRun;
                 const target = run?.targets?.[0];
@@ -2924,6 +2965,28 @@
             const bfFails = (state.bfWithdrawFails || 0) + 1;
             state.bfWithdrawFails = bfFails;
             state.pendingBankAction = null;
+            if (pending.source === 'killLoop' && pending.substage === 'travelCarRepair') {
+                addLiveLog(`Swiss Bank: kill travel-car repair top-up of $${pending.amount.toLocaleString()} did not confirm — trying another travel car`);
+                const action = state.pendingKillAction;
+                if (action) {
+                    const failedUrls = [...(action.failedCarUrls || []), action.travelCarUrl || pending.returnUrl].filter(Boolean);
+                    state.pendingKillAction = { ...action, travelCarUrl: null, stage: 'travel', failedCarUrls };
+                    await wait(navRand());
+                    gotoPage('cars');
+                } else {
+                    state.killLoopActive = false;
+                    await wait(navRand());
+                    gotoPage('crimes');
+                }
+                return;
+            }
+            if (pending.source === 'bulletFactory' && pending.substage === 'travelCarRepair') {
+                addLiveLog(`Swiss Bank: repair top-up of $${pending.amount.toLocaleString()} did not confirm — trying another travel car`);
+                if (state.pendingBulletRun) state.pendingBulletRun = { ...state.pendingBulletRun, stage: 'travel' };
+                await wait(navRand());
+                gotoPage('cars');
+                return;
+            }
             if (bfFails >= 3) {
                 // 3 consecutive failed withdrawals — abort the entire bullet factory run
                 addLiveLog(`Swiss Bank: withdraw failed ${bfFails} times — aborting bullet factory run`);
@@ -4037,14 +4100,19 @@
             // BG Farm is intentionally BG Farm + Kill in practice:
             // keep the per-player Kill toggle enabled so a clean target is killed after BGs are gone.
             if (!isPlayerShootEnabled(name)) setPlayerShootEnabled(name, true);
+            let queueFreshBgFarmCheck = false;
             if (!wasEnabled) {
                 cancelPendingKillWorkForTarget(name, 'BG Farm re-enabled — starting fresh BG check', {
                     clearOwnerBodyguard: true,
                     clearLastBgCheck: true,
                     log: true
                 });
+                queueFreshBgFarmCheck = true;
             }
             clearKillWakeBlockersForPlayer(name, { clearBgCheck: true, clearFarmWait: true, clearKillAttempt: true, clearBodyguard: true });
+            if (queueFreshBgFarmCheck) {
+                queueBgFarmCheck(name, isPlayerShootEnabled(name), { force: true });
+            }
         } else {
             // Turning BG Farm off cancels the verify/search/shoot chain owned by this target.
             // If Kill remains ticked, the target can still be handled later as normal kill-only work.
@@ -4897,10 +4965,28 @@
             // Target cost must account for penalty increasing after killing BG (+0.1x)
             const bgBullets      = p.requiredBullets || 0;
             const currentBullets = getPlayerBullets();
-            // Only block if we don't have enough for the BG shot itself
-            // Target kill cost is handled separately after BG is dead and target is checked
+            const bgShootWaitMatches = (obj) => obj && obj.stage === 'bg_shoot' &&
+                obj.targetName?.toLowerCase() === p.name.toLowerCase() &&
+                (!p.bgFor || !obj.bgFor || obj.bgFor.toLowerCase() === p.bgFor.toLowerCase());
+            // Only block if we don't have enough for the BG shot itself.
+            // Target kill cost is handled separately after BG is dead and target is checked.
+            // Persist this as a deferred bullet wait so the scheduler can monitor bullets
+            // instead of re-opening Kill every tick and re-logging the same shortage.
             if (bgBullets && currentBullets < bgBullets) {
-                addLiveLog(`Kill loop: not enough bullets for BG shot of ${p.name} (need ${bgBullets.toLocaleString()}, have ${currentBullets.toLocaleString()}) — waiting`);
+                if (!bgShootWaitMatches(state.killBgShootPending)) {
+                    addLiveLog(`Kill loop: not enough bullets for BG shot of ${p.name} (need ${bgBullets.toLocaleString()}, have ${currentBullets.toLocaleString()}) — waiting`);
+                }
+                state.killBgShootPending = stripBgFarmVerification({
+                    stage: 'bg_shoot',
+                    targetName: p.name,
+                    bgFor: p.bgFor || null,
+                    shootAfterBg: p.bgFor ? isPlayerShootEnabled(p.bgFor) : false,
+                    waitingForBullets: true
+                });
+                state.pendingKillAction = null;
+                state.killLoopActive = false;
+                state.killBgSpamPaused = false;
+                state.killBgWaitUntil = now() + 60000;
                 continue;
             }
             const pa = state.pendingKillAction;
@@ -7270,6 +7356,20 @@ async function doQTPerkRedeem() {
         bgCrimeNextPageFetchAt = 0;
     }
 
+    function clearBgCrimeJailPause(reason = '') {
+        const wasPaused = bgCrimeJailPauseUntil > Date.now() || bgCrimeJailPauseLogged;
+        bgCrimeJailPauseUntil = 0;
+        bgCrimeJailPauseLogged = false;
+        bgCrimeToken = null;
+        resetBgCrimeFetchBackoff();
+        if (wasPaused) {
+            addLiveLog(reason
+                ? `BG Crime: jail pause cleared — ${reason}`
+                : 'BG Crime: jail pause cleared — resuming background crime fetches');
+        }
+        if (bgCrimeActive && state.bgCrimeEnabled && state.enabled) scheduleBgCrimePoll();
+    }
+
     function bumpBgCrimeFetchBackoff() {
         bgCrimeNextPageFetchAt = Date.now() + bgCrimeFetchBackoffMs;
         bgCrimeFetchBackoffMs = Math.min(BG_CRIME_FETCH_BACKOFF_MAX, Math.round(bgCrimeFetchBackoffMs * 1.5));
@@ -7345,7 +7445,11 @@ async function doQTPerkRedeem() {
 
     async function doBgCrimePoll() {
         if (!bgCrimeActive || !state.bgCrimeEnabled || !state.enabled || crimePaused) { scheduleBgCrimePoll(); return; }
-        if (hasActiveBgFarmCriticalChain()) { scheduleBgCrimePoll(); return; }
+        // BG Crime uses AJAX and should keep committing while Kill/BG Farm is
+        // merely waiting/searching/verifying. In v47 this was blocked by
+        // hasActiveBgFarmCriticalChain(), which meant a stored BG shot waiting
+        // for bullets could pause background crimes entirely after the initial
+        // due burst. Only CTC/jail/crime settle windows should pause it here.
         if (hasCTCChallenge()) { scheduleBgCrimePoll(); return; }
 
         if (isLikelyJailPage()) {
@@ -7516,16 +7620,125 @@ async function doQTPerkRedeem() {
         return state.lastBulletFactoryCheck < lastHalfHourBoundary();
     }
 
+    function killLoopActionBlocksBulletFactory(action) {
+        if (!action || typeof action !== 'object') return false;
+        const stage = action.stage || '';
+
+        // Travel stages are only active/urgent when the shared drive timer is ready.
+        // If drive is cooling down, Bullet Factory and normal crimes must be allowed
+        // to continue rather than bouncing crimes ⇄ kill every tick.
+        // If Bullet Factory is already mid-run, optional BG-check/BG-Farm travel
+        // must also yield; otherwise the BG check consumes the shared drive timer
+        // and prevents the bullet run from buying the bullets needed for the BG shot.
+        if (stage === 'travel' || stage === 'travel_car') {
+            const nextStage = action.afterTravel?.stage || action.stage || '';
+            const optionalBgCheckTravel = nextStage === 'bgcheck' ||
+                nextStage === 'bg_farm_check' ||
+                nextStage === 'bg_farm_shoot' ||
+                action.stage === 'bgcheck' ||
+                (!!action.shootAfterBg && !action.killOnly && action.stage !== 'bg_shoot');
+            if (state.pendingBulletRun && optionalBgCheckTravel) return false;
+            return isInternalDriveReady();
+        }
+
+        // A stored BG shot with too few bullets is the opposite of something that
+        // should pause Bullet Factory: Bullet Factory is what can make the shot
+        // possible. Only block BF when the shot can actually be attempted now.
+        if (stage === 'bg_shoot') {
+            const targetName = (action.targetName || '').toLowerCase();
+            const players = getKillPlayers();
+            const target = players.find(p => p.name && p.name.toLowerCase() === targetName);
+            const need = Number(target?.requiredBullets || 0);
+            if (need && getPlayerBullets() < need) return false;
+            if (state.killPenaltyThreshold > 0 && isKillPenaltyTooHigh()) return false;
+            return true;
+        }
+
+        // Starting a BG check is not urgent enough to pause an already-pending
+        // Bullet Factory run. Finishing a result/shot page is urgent, though,
+        // because leaving mid-result can corrupt the BG Farm chain.
+        if (state.pendingBulletRun && (
+            stage === 'bgcheck' ||
+            stage === 'bg_farm_check' ||
+            stage === 'bg_farm_shoot'
+        )) {
+            return false;
+        }
+
+        return true;
+    }
+
     function killLoopHasImmediateWorkForBulletFactory() {
-        // A pending kill/BG action means the kill loop is actively doing work
-        // rather than merely waiting on a long BG search timer. Pause Bullet
-        // Factory routing so it cannot steal the page flow or shared drive.
+        // Only pause Bullet Factory for kill/BG work that can actually progress
+        // now. Long waits (drive cooldown, not enough bullets, periodic BG checks)
+        // must not starve Bullet Factory or BG Crime.
         if (!state.killLoopActive) return false;
-        if (state.pendingKillAction) return true;
-        // If we are already on a kill/penalty page while the kill loop is active,
-        // let that page finish deciding before Bullet Factory takes over.
-        if (isKillPage() || isKillPenaltyPage()) return true;
+        if (state.pendingKillAction) return killLoopActionBlocksBulletFactory(state.pendingKillAction);
+
+        if (state.killBgShootPending) {
+            const targetName = (state.killBgShootPending.targetName || '').toLowerCase();
+            const players = getKillPlayers();
+            const target = players.find(p => p.name && p.name.toLowerCase() === targetName);
+            const need = Number(target?.requiredBullets || 0);
+            return !!(need && getPlayerBullets() >= need);
+        }
+
+        // Penalty pages should still be allowed to finish parsing immediately.
+        if (isKillPenaltyPage()) return true;
         return false;
+    }
+
+
+    function getBgShotBulletWaitInfo(action = null) {
+        const candidates = [];
+        if (action && action.stage === 'bg_shoot') candidates.push(action);
+        if (state.killBgShootPending && state.killBgShootPending.stage === 'bg_shoot') {
+            candidates.push(state.killBgShootPending);
+        }
+
+        const players = getKillPlayers();
+        for (const shot of candidates) {
+            const targetName = (shot.targetName || '').toLowerCase();
+            if (!targetName) continue;
+            const target = players.find(p => p.name && p.name.toLowerCase() === targetName);
+            const need = Number(target?.requiredBullets || 0);
+            const have = getPlayerBullets();
+            if (need && have < need) {
+                return { waiting: true, targetName: shot.targetName || target?.name || '', need, have };
+            }
+        }
+        return { waiting: false, targetName: '', need: 0, have: getPlayerBullets() };
+    }
+
+    function isPassiveBgBulletWaitActive(action = null) {
+        return getBgShotBulletWaitInfo(action).waiting;
+    }
+
+    function hasForegroundWorkThatShouldBeatPassiveBulletWait() {
+        // While a BG shot is only waiting for bullets, the bot should keep doing
+        // useful foreground work. This includes the bullet run that will create
+        // the bullets, BG Crime background mode, and normal Crimes/GTA/Melt work.
+        if (state.pendingBulletRun) return true;
+        if (state.bgCrimeEnabled) return true;
+        if (isCrimesPage() || hasCrimePageMarkers()) {
+            try {
+                if (getAvailableCrimes().length > 0) return true;
+            } catch (_) {}
+        }
+        if (isGTAEnabled() && !isGTALocked() && isInternalGTAReady()) return true;
+        if (isMeltUsable() && isInternalMeltReady()) return true;
+        return false;
+    }
+
+
+    function shouldDeferKillSearchForPassiveBulletWait() {
+        // Kill Search / protected rechecks are low-priority foreground navigation.
+        // During a stored BG-shot bullet wait they can reload the page every few
+        // seconds, which kills the BG Crime AJAX timer and makes it look as if
+        // crimes stopped. Keep BG Crime/normal script stable; BG Farm interval
+        // checks still run through the kill-loop scheduler, and the actual BG
+        // shot wakes as soon as bullets are sufficient.
+        return isPassiveBgBulletWaitActive(state.pendingKillAction);
     }
 
     let lastBulletFactoryPauseLogKey = '';
@@ -8300,6 +8513,7 @@ async function doQTPerkRedeem() {
                 clearJailReleaseTracking();
                 stopJailObserver();
                 clearScheduledReload();
+                clearBgCrimeJailPause('jail row gone, resuming background crime fetches');
                 await wait(rand(500, 1200));
                 // Return to the correct page based on which loop is active
                 if (state.gtaResetLoopActive) {
@@ -8356,6 +8570,7 @@ async function doQTPerkRedeem() {
         clearJailReleaseTracking();
         stopJailObserver();
         clearScheduledReload();
+        clearBgCrimeJailPause('jail fallback released, resuming background crime fetches');
         await wait(rand(500, 1200));
         if (state.gtaResetLoopActive) {
             gotoPage('gta');
@@ -8404,6 +8619,7 @@ async function doQTPerkRedeem() {
                     clearJailReleaseTracking();
                     stopJailObserver();
                     clearScheduledReload();
+                    clearBgCrimeJailPause('leave-jail succeeded, resuming background crime fetches');
                     await wait(rand(800, 1500));
                     // Return to the correct page based on which loop is active
                     if (state.gtaResetLoopActive) {
@@ -8426,6 +8642,7 @@ async function doQTPerkRedeem() {
         clearJailReleaseTracking();
         stopJailObserver();
         clearScheduledReload();
+        clearBgCrimeJailPause('not in jail, resuming background crime fetches');
         await wait(rand(500, 1200));
         // Return to the correct page based on which loop is active
         if (state.gtaResetLoopActive) {
@@ -9636,7 +9853,7 @@ async function doQTPerkRedeem() {
                 }
             }
 
-            if (drugsUsable && isInternalDriveReady() && !state.killLoopActive && !(state.killBgSpamEnabled && state.killBgSpamTarget && state.killBgCheckEnabled)) {
+            if (drugsUsable && isInternalDriveReady() && (!state.killLoopActive || isPassiveBgBulletWaitActive(state.pendingKillAction)) && !(state.killBgSpamEnabled && state.killBgSpamTarget && state.killBgCheckEnabled)) {
                 await wait(navRand());
                 gotoPage('drugs');
                 return;
@@ -9754,13 +9971,13 @@ async function doQTPerkRedeem() {
         const bgSpamSuppressed = state.killBgSpamEnabled && state.killBgSpamTarget && state.killBgCheckEnabled;
 
         // Comp mode — always go to drugs to buy 1 unit at a time, drive not needed yet
-        if (drugsUsable && state.drugCompEnabled && !state.killLoopActive && !bgSpamSuppressed) {
+        if (drugsUsable && state.drugCompEnabled && (!state.killLoopActive || isPassiveBgBulletWaitActive(state.pendingKillAction)) && !bgSpamSuppressed) {
             await wait(navRand());
             gotoPage('drugs');
             return;
         }
 
-        if (drugsUsable && isInternalDriveReady() && !state.killLoopActive && !bgSpamSuppressed) {
+        if (drugsUsable && isInternalDriveReady() && (!state.killLoopActive || isPassiveBgBulletWaitActive(state.pendingKillAction)) && !bgSpamSuppressed) {
             await wait(navRand());
             gotoPage('drugs');
             return;
@@ -10165,7 +10382,9 @@ async function doQTPerkRedeem() {
                 const isDamaged = !!driveSection;
 
                 if (isDamaged) {
-                    // Repair the car first
+                    // Repair the car first. If cash on hand is too low, top up
+                    // from Swiss Bank instead of repeatedly clicking Repair and
+                    // reloading back onto the same failure page.
                     const repairBtn = document.querySelector('form input[type="submit"][name="repair"]');
                     if (!repairBtn) {
                         addLiveLog('Kill loop: car damaged but no repair button — trying next car');
@@ -10174,7 +10393,33 @@ async function doQTPerkRedeem() {
                         gotoPage('cars');
                         return;
                     }
-                    addLiveLog('Kill loop: car too damaged — repairing before travel');
+
+                    const repairCost = parseMoney(repairBtn.value || repairBtn.getAttribute('value') || '');
+                    const cashOnHand = getPlayerMoney();
+                    const repairFailMsg = [...document.querySelectorAll('.bgm.cr, .bgm.fail')]
+                        .find(el => /additional\s+\$?[\d,]+\s+to repair/i.test(textOf(el)));
+                    const shownShortfall = repairFailMsg ? parseMoney(textOf(repairFailMsg)) : 0;
+                    const calculatedShortfall = repairCost > 0 ? Math.max(0, repairCost - cashOnHand) : 0;
+                    const shortfall = Math.max(shownShortfall, calculatedShortfall);
+
+                    if (shortfall > 0) {
+                        const withdrawAmount = Math.ceil(shortfall);
+                        const returnUrl = pending.travelCarUrl || window.location.href;
+                        addLiveLog(`Kill loop: repair needs $${withdrawAmount.toLocaleString()} more — withdrawing from Swiss Bank`);
+                        state.pendingKillAction = { ...pending, stage: 'travel_car', travelCarUrl: returnUrl };
+                        state.pendingBankAction = {
+                            type: 'withdraw',
+                            amount: withdrawAmount,
+                            source: 'killLoop',
+                            substage: 'travelCarRepair',
+                            returnUrl
+                        };
+                        await wait(navRand());
+                        gotoPage('bank');
+                        return;
+                    }
+
+                    addLiveLog(`Kill loop: car too damaged — repairing before travel${repairCost ? ` ($${repairCost.toLocaleString()})` : ''}`);
                     state.lastActionAt = now();
                     await wait(rand(DEFAULTS.actionDelayMin, DEFAULTS.actionDelayMax));
                     const freshRepair = document.querySelector('form input[type="submit"][name="repair"]');
@@ -11219,10 +11464,11 @@ async function doQTPerkRedeem() {
                 if (getPlayerBullets() < bgBullets) {
                     addLiveLog(`Kill loop: not enough bullets for BG shot (need ${bgBullets.toLocaleString()}, have ${getPlayerBullets().toLocaleString()}) — waiting`);
                     // Store shoot target separately so BG Farm interval checks can still run
-                    state.killBgShootPending  = stripBgFarmVerification({ stage: 'bg_shoot', targetName: bgName, bgFor: bgFor || null, shootAfterBg: pendingNow.shootAfterBg });
+                    state.killBgShootPending  = stripBgFarmVerification({ stage: 'bg_shoot', targetName: bgName, bgFor: bgFor || null, shootAfterBg: pendingNow.shootAfterBg, waitingForBullets: true });
                     state.pendingKillAction   = null;
                     state.killLoopActive      = false;
                     state.killBgSpamPaused    = false;
+                    state.killBgWaitUntil     = now() + 60000;
                     await wait(navRand());
                     gotoPage('crimes');
                     return;
@@ -12168,6 +12414,42 @@ async function doQTPerkRedeem() {
             return;
         }
 
+        // Pending Swiss Bank actions are transactional and must take priority
+        // over Bullet Factory / Kill travel routing. v44 could set a repair top-up,
+        // navigate to bank, then the active Kill/BF travel state would immediately
+        // navigate back to the car page before the bank form was submitted, causing
+        // a car <-> bank loop. While a bank action is pending, stay on / return to
+        // the Bank page until handleBankPage submits or clears it.
+        if (state.pendingBankAction) {
+            loopBusy = true;
+            try {
+                updatePanel();
+                if (hasCTCChallenge()) {
+                    await maybeSolveCTC();
+                    return;
+                }
+                if (isLikelyJailPage()) {
+                    await handleJailState();
+                    return;
+                }
+
+                if (isBankPage()) {
+                    await handleBankPage();
+                    return;
+                }
+
+                const pendingBank = state.pendingBankAction;
+                if (!pendingBank.navIssuedAt || (now() - pendingBank.navIssuedAt) > 5000) {
+                    const label = pendingBank.type === 'deposit' ? 'deposit' : 'withdraw';
+                    addLiveLog(`Swiss Bank: pending ${label} of $${Number(pendingBank.amount || 0).toLocaleString()} — navigating to bank`);
+                    state.pendingBankAction = { ...pendingBank, navIssuedAt: now() };
+                    await wait(navRand());
+                    gotoPage('bank');
+                }
+            } finally { loopBusy = false; }
+            return;
+        }
+
         // Resume any kill/BG kill action that was deferred only because the
         // kill penalty was above the user's threshold. While still above threshold,
         // this deliberately does not activate the kill loop, so crimes/Bullet Factory
@@ -12208,6 +12490,56 @@ async function doQTPerkRedeem() {
                 state.killLoopActive   = false;
                 state.killBgSpamPaused = false;
             }
+        }
+
+        // If a BG shot is deferred only because bullets are too low, keep the
+        // kill loop asleep while the normal script/Bullet Factory can build stock.
+        // The restore block below wakes it as soon as the live bullet count is enough.
+        if (state.killLoopActive && !state.pendingKillAction && state.killBgShootPending) {
+            const bsp = state.killBgShootPending;
+            const bspPlayers = getKillPlayers();
+            const bspBg = bspPlayers.find(p => p.name.toLowerCase() === (bsp.targetName || '').toLowerCase());
+            const bspNeed = bspBg?.requiredBullets || 0;
+            if (bspNeed && getPlayerBullets() < bspNeed) {
+                state.killLoopActive = false;
+                state.killBgSpamPaused = false;
+            }
+        }
+
+        // If the current Kill/BG action is only waiting (drive cooldown,
+        // bullet shortage, or a low-priority BG check while Bullet Factory is
+        // pending), put the kill loop to sleep. The pending action is kept so it
+        // can resume later, but normal scripts/BG Crime/Bullet Factory are not
+        // starved by a crimes ⇄ kill bounce.
+        if (state.killLoopActive && state.pendingKillAction) {
+            const paSleep = state.pendingKillAction;
+            let shouldSleepKillLoop = false;
+
+            if (paSleep.stage === 'bg_shoot') {
+                const playersSleep = getKillPlayers();
+                const bgSleep = playersSleep.find(p => p.name.toLowerCase() === (paSleep.targetName || '').toLowerCase());
+                const needSleep = Number(bgSleep?.requiredBullets || 0);
+                if ((needSleep && getPlayerBullets() < needSleep) || !isInternalDriveReady() || isKillPenaltyTooHigh()) {
+                    shouldSleepKillLoop = true;
+                }
+            }
+
+            if (state.pendingBulletRun && !killLoopActionBlocksBulletFactory(paSleep)) {
+                shouldSleepKillLoop = true;
+            }
+
+            if (shouldSleepKillLoop) {
+                state.killLoopActive = false;
+                state.killBgSpamPaused = false;
+            }
+        }
+
+        // Low-bullet BG shots are passive waits. They must not stop BG Crime,
+        // normal Crimes, GTA/Melt, or Bullet Factory from running while bullets
+        // accumulate. The BG shot is restored automatically once bullets are enough.
+        if (state.killLoopActive && isPassiveBgBulletWaitActive(state.pendingKillAction) && hasForegroundWorkThatShouldBeatPassiveBulletWait()) {
+            state.killLoopActive = false;
+            state.killBgSpamPaused = false;
         }
 
         // ── Dedicated loop intercepts ─────────────────────────────────────────
@@ -12322,7 +12654,8 @@ async function doQTPerkRedeem() {
                     const bgB = bgP?.requiredBullets || 0;
                     if (bgB && getPlayerBullets() < bgB) waitingForBullets = true;
                 }
-                if (!waitingForDrive && !waitingForBullets && (!isKillPenaltyTooHigh() || pa.stage === 'travel')) {
+                if (!waitingForDrive && !waitingForBullets && (!isKillPenaltyTooHigh() || pa.stage === 'travel') &&
+                    (!state.pendingBulletRun || killLoopActionBlocksBulletFactory(pa))) {
                     state.killLoopActive = true;
                 }
             }
@@ -12402,7 +12735,7 @@ async function doQTPerkRedeem() {
 
         // Also check BG Farm players — periodically visit kill page so syncKillExpiryFromPage
         // can detect their BGs in Players Found and queue the bg_shoot automatically
-        if (state.killBgCheckEnabled && !state.killLoopActive && !state.pendingKillAction && !midBgShoot && !killLoopOnCooldown) {
+        if (state.killBgCheckEnabled && !state.pendingBulletRun && !state.killLoopActive && !state.pendingKillAction && !midBgShoot && !killLoopOnCooldown) {
             const players = getKillPlayers();
             const nowMs = now();
             const globalWaitExpired = !(state.killBgWaitUntil > nowMs);
@@ -12438,6 +12771,25 @@ async function doQTPerkRedeem() {
                     // If penalty is too high, the interval check above may still fire,
                     // but do not keep re-arming the loop just to attempt the blocked BG kill.
                     if (isKillPenaltyTooHigh()) return false;
+                    // If the BG shot is known but bullets are currently too low, defer it
+                    // and let the bullet monitor below restore the shot when stock is enough.
+                    const bgNeed = bgPlayer.requiredBullets || 0;
+                    const bgShootWaitMatches = state.killBgShootPending &&
+                        state.killBgShootPending.stage === 'bg_shoot' &&
+                        state.killBgShootPending.targetName?.toLowerCase() === bgPlayer.name.toLowerCase() &&
+                        (!state.killBgShootPending.bgFor || state.killBgShootPending.bgFor.toLowerCase() === p.name.toLowerCase());
+                    if (bgNeed && getPlayerBullets() < bgNeed) {
+                        if (!bgShootWaitMatches) {
+                            state.killBgShootPending = stripBgFarmVerification({
+                                stage: 'bg_shoot',
+                                targetName: bgPlayer.name,
+                                bgFor: p.name,
+                                shootAfterBg: isPlayerShootEnabled(p.name),
+                                waitingForBullets: true
+                            });
+                        }
+                        return false;
+                    }
                     return true;
                 }
                 return false;
@@ -12476,15 +12828,18 @@ async function doQTPerkRedeem() {
         // this guard prevents low-priority search/protected rechecks from fighting the
         // car/factory travel flow during lag.
         const bulletFactoryBlocksNormalKillSearch = !!state.pendingBulletRun;
-        if (state.killSearchLoopActive && !killLoopBlocksSearch && !bulletFactoryBlocksNormalKillSearch) {
+        const passiveBulletWaitBlocksNormalKillSearch = shouldDeferKillSearchForPassiveBulletWait();
+        if (state.killSearchLoopActive && !killLoopBlocksSearch && !bulletFactoryBlocksNormalKillSearch && !passiveBulletWaitBlocksNormalKillSearch) {
             // Don't intercept GTA or melt pages — let them complete
             if (isGTAPage() || hasGTAPageMarkers() || isMeltPage() || hasMeltPageMarkers()) {
                 // Fall through to normal page handling
             } else if (isCrimesPage() || hasCrimePageMarkers()) {
                 // On crimes page — let GTA/melt fire first if ready, then kill scanner can run
-                const gtaReady  = isGTAEnabled() && !isGTALocked() && isInternalGTAReady();
-                const meltReady = isMeltUsable() && isInternalMeltReady();
-                if (!gtaReady && !meltReady) {
+                const gtaReady   = isGTAEnabled() && !isGTALocked() && isInternalGTAReady();
+                const meltReady  = isMeltUsable() && isInternalMeltReady();
+                let crimesReady  = false;
+                try { crimesReady = getAvailableCrimes().length > 0; } catch (_) { crimesReady = false; }
+                if (!crimesReady && !gtaReady && !meltReady) {
             // Don't intercept jail page — kill page is accessible whilst jailed,
             // so continue searching. Jail observer handles release separately.
             if (hasCTCChallenge()) {
@@ -12868,7 +13223,8 @@ async function doQTPerkRedeem() {
             if (isKillOnlineScanDue() && !state.gtaResetLoopActive &&
                 !state.meltResetLoopActive && !state.resetCrimesEnabled && !isKillPenaltyPage() &&
                 !state.pendingBulletRun && !state.killLoopActive && !state.pendingKillAction &&
-                !state.killBgShootPending && !hasActiveBgFarmCriticalChain()) {
+                !state.killBgShootPending && !hasActiveBgFarmCriticalChain() &&
+                !shouldDeferKillSearchForPassiveBulletWait()) {
                 addLiveLog('Kill scanner: online scan due — navigating to Players Online');
                 gotoPage('online');
                 return;
@@ -13217,7 +13573,32 @@ async function doQTPerkRedeem() {
         if (driveSection) {
             const repairBtn = document.querySelector('form input[type="submit"][name="repair"]');
             if (repairBtn) {
-                addLiveLog('Bullet factory: car damaged — repairing');
+                const repairCost = parseMoney(repairBtn.value || repairBtn.getAttribute('value') || '');
+                const cashOnHand = getPlayerMoney();
+                const repairFailMsg = [...document.querySelectorAll('.bgm.cr, .bgm.fail')]
+                    .find(el => /additional\s+\$?[\d,]+\s+to repair/i.test(textOf(el)));
+                const shownShortfall = repairFailMsg ? parseMoney(textOf(repairFailMsg)) : 0;
+                const calculatedShortfall = repairCost > 0 ? Math.max(0, repairCost - cashOnHand) : 0;
+                const shortfall = Math.max(shownShortfall, calculatedShortfall);
+
+                if (shortfall > 0) {
+                    const withdrawAmount = Math.ceil(shortfall);
+                    const returnUrl = run.travelCarUrl || window.location.href;
+                    addLiveLog(`Bullet factory: repair needs $${withdrawAmount.toLocaleString()} more — withdrawing from Swiss Bank`);
+                    state.pendingBulletRun = { ...run, stage: 'travel_car', travelCarUrl: returnUrl };
+                    state.pendingBankAction = {
+                        type: 'withdraw',
+                        amount: withdrawAmount,
+                        source: 'bulletFactory',
+                        substage: 'travelCarRepair',
+                        returnUrl
+                    };
+                    await wait(navRand());
+                    gotoPage('bank');
+                    return;
+                }
+
+                addLiveLog(`Bullet factory: car damaged — repairing${repairCost ? ` for $${repairCost.toLocaleString()}` : ''}`);
                 state.lastActionAt = now();
                 await wait(rand(DEFAULTS.actionDelayMin, DEFAULTS.actionDelayMax));
                 humanClick(document.querySelector('form input[type="submit"][name="repair"]'));
@@ -13326,6 +13707,7 @@ async function doQTPerkRedeem() {
         if (protectedRecheckHandle) clearInterval(protectedRecheckHandle);
         protectedRecheckHandle = setInterval(() => {
             if (!state.enabled || !state.killProtectedRecheckEnabled || !state.killSearchEnabled) return;
+            if (shouldDeferKillSearchForPassiveBulletWait()) return;
             if (state.killSearchLoopActive || state.killLoopActive) return;
             const recheckMs = state.killProtectedRecheckMins * 60 * 1000;
             const nowMs = now();
@@ -13744,6 +14126,8 @@ async function doQTPerkRedeem() {
         //   unknowns, expiring alives (3hr window), or original targets past
         //   their 1hr recheck window.
         if (!state.killSearchEnabled) {
+            state.killSearchLoopActive = false;
+        } else if (shouldDeferKillSearchForPassiveBulletWait()) {
             state.killSearchLoopActive = false;
         } else if (state.killSearchLoopActive) {
             // Loop was already running — keep it active, don't second-guess it
@@ -16584,6 +16968,8 @@ async function doQTPerkRedeem() {
         // Kill search loop — activate on startup if toggle is on and there are due targets.
         // Uses the same logic as getNextKillTarget to avoid unnecessary kill page visits.
         if (!state.killSearchEnabled) {
+            state.killSearchLoopActive = false;
+        } else if (shouldDeferKillSearchForPassiveBulletWait()) {
             state.killSearchLoopActive = false;
         } else if (state.killSearchLoopActive) {
             // Was already running — keep it active
