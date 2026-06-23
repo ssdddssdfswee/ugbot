@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Full UG Bot
 // @namespace    ug-bot
-// @version      2.8.6
+// @version      2.8.8
 // @description  Auto-runs crimes, GTA, melting, repair, missions, drug running with Swiss Bank management, live log, session stats, action checkboxes, jail handling, runtime tracking, melt pagination, repair cycles, automatic CTC solving, and point-spending features.
 // @match        *://www.underworldgangsters.com/*
 // @match        *://underworldgangsters.com/*
@@ -594,7 +594,7 @@
     // BOT CONFIG
     // =========================================================================
 
-    const SCRIPT_VERSION = '2.8.6';
+    const SCRIPT_VERSION = '2.8.8';
 
     const CRIME_DEFS = [
         { id: 'gang', name: 'Gang Activities' },
@@ -7637,7 +7637,7 @@ async function doQTPerkRedeem() {
                 nextStage === 'bg_farm_shoot' ||
                 action.stage === 'bgcheck' ||
                 (!!action.shootAfterBg && !action.killOnly && action.stage !== 'bg_shoot');
-            if (state.pendingBulletRun && optionalBgCheckTravel) return false;
+            if (state.pendingBulletRun && optionalBgCheckTravel && !action.postBgKillRecheck && !action.afterTravel?.postBgKillRecheck) return false;
             return isInternalDriveReady();
         }
 
@@ -7654,14 +7654,18 @@ async function doQTPerkRedeem() {
             return true;
         }
 
-        // Starting a BG check is not urgent enough to pause an already-pending
-        // Bullet Factory run. Finishing a result/shot page is urgent, though,
-        // because leaving mid-result can corrupt the BG Farm chain.
+        // Starting a normal interval BG check is not urgent enough to pause an
+        // already-pending Bullet Factory run. However, the forced re-check
+        // immediately after killing a BG is part of the same BG Farm chain and
+        // must run before Bullet Factory can consume the shared drive timer.
         if (state.pendingBulletRun && (
             stage === 'bgcheck' ||
             stage === 'bg_farm_check' ||
             stage === 'bg_farm_shoot'
         )) {
+            if (action.postBgKillRecheck && (stage === 'bg_farm_check' || stage === 'bg_farm_shoot')) {
+                return true;
+            }
             return false;
         }
 
@@ -10663,10 +10667,10 @@ async function doQTPerkRedeem() {
                         travelTo:    targetCountry,
                         targetName:  target,
                         shootAfterBg: pending.shootAfterBg,
-                        afterTravel: { stage: 'bg_farm_shoot', targetName: target, shootAfterBg: pending.shootAfterBg, afterVerify: pending.afterVerify, bgFor: pending.bgFor || null }
+                        afterTravel: { stage: 'bg_farm_shoot', targetName: target, shootAfterBg: pending.shootAfterBg, afterVerify: pending.afterVerify, bgFor: pending.bgFor || null, postBgKillRecheck: !!pending.postBgKillRecheck }
                     };
                 } else {
-                    state.pendingKillAction = { stage: 'bg_farm_shoot', targetName: target, shootAfterBg: pending.shootAfterBg, afterVerify: pending.afterVerify, bgFor: pending.bgFor || null };
+                    state.pendingKillAction = { stage: 'bg_farm_shoot', targetName: target, shootAfterBg: pending.shootAfterBg, afterVerify: pending.afterVerify, bgFor: pending.bgFor || null, postBgKillRecheck: !!pending.postBgKillRecheck };
                 }
             } else {
                 // Check if already being searched
@@ -10753,7 +10757,7 @@ async function doQTPerkRedeem() {
                     usernameSelect.value = target;
                     bulletsInput.value   = '1';
                     if (showCheckbox) showCheckbox.checked = !state.killAnonymousShooting;
-                    state.pendingKillAction = { stage: 'bg_farm_result', targetName: target, shootAfterBg: pending.shootAfterBg, afterVerify: pending.afterVerify, bgFor: pending.bgFor || null };
+                    state.pendingKillAction = { stage: 'bg_farm_result', targetName: target, shootAfterBg: pending.shootAfterBg, afterVerify: pending.afterVerify, bgFor: pending.bgFor || null, postBgKillRecheck: !!pending.postBgKillRecheck };
                     state.lastActionAt = now();
                     humanClick(submitBtn);
                     return;
@@ -11239,7 +11243,7 @@ async function doQTPerkRedeem() {
                         }
                         // BG Farm — after a BG dies, 1-bullet check the original target again.
                         addLiveLog(`Kill loop: ${target} was BG for ${bgFor} — BG Farm: 1-bullet checking ${bgFor} again`);
-                        queueBgFarmCheck(bgFor, isPlayerShootEnabled(bgFor), { bgFor: null });
+                        queueBgFarmCheck(bgFor, isPlayerShootEnabled(bgFor), { bgFor: null, postBgKillRecheck: true });
                         await wait(navRand());
                         gotoPage('kill');
                         return;
@@ -11670,11 +11674,15 @@ async function doQTPerkRedeem() {
         const _pendingBeforeSync = state.pendingKillAction;
         syncKillExpiryFromPage(true);
         if (state.pendingKillAction && state.pendingKillAction !== _pendingBeforeSync && hasActiveBgFarmCriticalChain()) {
-            addLiveLog('Kill loop: BG Farm verify→shoot chain queued — holding kill flow');
+            // A BG Farm verify→shoot chain was queued while this generic bgcheck
+            // pass was syncing the Kill page.  Do not navigate/reload and let the
+            // old bare {stage:'bgcheck'} pass run again — that can loop forever.
+            // Instead, process the newly queued chain on this same page now.
+            addLiveLog('Kill loop: BG Farm verify→shoot chain queued — processing now');
             state.killLoopActive = true;
             state.killSearchLoopActive = false;
             await wait(navRand());
-            gotoPage('kill');
+            await handleKillLoopPage();
             return;
         }
 
