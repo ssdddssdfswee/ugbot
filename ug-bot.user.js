@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Full UG Bot
 // @namespace    ug-bot
-// @version      2.9.1
+// @version      2.9.2
 // @description  Auto-runs crimes, GTA, melting, repair, missions, drug running with Swiss Bank management, live log, session stats, action checkboxes, jail handling, runtime tracking, melt pagination, repair cycles, automatic CTC solving, and point-spending features.
 // @match        *://www.underworldgangsters.com/*
 // @match        *://underworldgangsters.com/*
@@ -605,7 +605,7 @@
     // BOT CONFIG
     // =========================================================================
 
-    const SCRIPT_VERSION = '2.9.1';
+    const SCRIPT_VERSION = '2.9.2';
 
     const CRIME_DEFS = [
         { id: 'gang', name: 'Gang Activities' },
@@ -9834,10 +9834,20 @@ async function doQTPerkRedeem() {
         GM_setValue('killSearchIndex', 0);
         GM_setValue('killCurrentSearch', '');
         GM_setValue('killLastOnlineScan', 0);
+        setSetting('killSearchSubmitAt', 0);
+        setSetting('killSearchSubmitName', '');
+        setSetting('killSearchWaitLogAt', 0);
+        setSetting('pendingKillAction', null);
+        setSetting('killBgShootPending', null);
+        setSetting('killPenaltyPendingAction', null);
+        setSetting('pendingPenaltyPage', false);
+        setSetting('penaltyDropsAt', 0);
+        setSetting('killTravelHandoff', null);
         setSetting('bgSpamTravelTarget', '');
         setSetting('killBgSpamPaused', false);
         setSetting('killBgWaitUntil', 0);
         setSetting('killLoopCooldownUntil', 0);
+        setSetting('killLoopYieldUntil', 0);
         stopBgSpam();
         // Clear BG Farm state and reset all alive players to unknown — searches are cleared on death
         const _players = getSetting('killPlayers', []);
@@ -13072,6 +13082,14 @@ async function doQTPerkRedeem() {
                 gotoPage('kill-penalty');
                 return;
             }
+        }
+
+        // v66: when the Kill page itself just set a cooldown because no
+        // actionable targets were present, honour that cooldown before the
+        // dedicated Kill router can bounce straight back to p=kill on reload.
+        if (state.killLoopActive && !state.pendingKillAction && !state.killBgShootPending && state.killLoopCooldownUntil > Date.now()) {
+            state.killLoopActive = false;
+            state.killBgSpamPaused = false;
         }
 
         // v19: a deferred penalty wait must not leave the kill loop marked
@@ -17138,6 +17156,12 @@ async function doQTPerkRedeem() {
                             return np;
                         });
                         setSetting('killPlayers', _reset);
+                        setSetting('killSearchSubmitAt', 0);
+                        setSetting('killSearchSubmitName', '');
+                        setSetting('killSearchWaitLogAt', 0);
+                        state.killSearchIndex = 0;
+                        state.killCurrentSearch = '';
+                        state.killSearchLoopActive = true;
                         addLiveLog('Kill scanner: cleared transient search markers for new account');
                         _reenabled.push(_labels[key]);
                     } else if (key === 'killProtectedRecheck' && !state.killProtectedRecheckEnabled) {
@@ -17171,29 +17195,60 @@ async function doQTPerkRedeem() {
                     autoBuyGun();
                 }
 
-                // Clear stale BG Farm state from the previous account, but do not
-                // apply a 3hr global wait. The normal search loop must be free
-                // to search every player after Don; BG Farm will resume once its
-                // targets are actually found in Players Found.
+                // Clear stale Kill/BG state from the previous account, but do
+                // not apply a 3hr global wait. Search/found/BG markers are tied
+                // to the account that submitted the search, so after Don on the
+                // new account the normal search loop must be free to search the
+                // targets again before any BG check or shot can run.
                 const _bgFarmPlayers = getSetting('killPlayers', []);
+                let _newAccountKillResetCount = 0;
                 const _bgFarmReset = _bgFarmPlayers.map(p => {
-                    if (!p.bgFarmEnabled) return p;
                     const np = { ...p };
+                    const hadTransient = !!(
+                        np.bodyguard || np.expectedFoundAt || np.searchExpiresAt || np.pendingSearch ||
+                        np.bgFarmWaitUntil || np.bgVerifyInFlight || np.lastKillAttempt
+                    );
                     delete np.bodyguard;
                     delete np.expectedFoundAt;
                     delete np.searchExpiresAt;
                     delete np.pendingSearch;
                     delete np.bgFarmWaitUntil;
-                    np.lastBgCheck = 0;
+                    delete np.bgVerifyInFlight;
+                    delete np.lastKillAttempt;
+                    if (np.bgFarmEnabled) np.lastBgCheck = 0;
+                    if (np.status === KILL_STATUS.ALIVE || np.status === KILL_STATUS.PROTECTED) {
+                        np.status = KILL_STATUS.UNKNOWN;
+                        _newAccountKillResetCount++;
+                    } else if (hadTransient) {
+                        _newAccountKillResetCount++;
+                    }
                     return np;
                 });
                 setSetting('killPlayers', _bgFarmReset);
                 setSetting('killBgWaitUntil', 0);
                 setSetting('killLoopCooldownUntil', 0);
+                setSetting('killLoopYieldUntil', 0);
                 setSetting('pendingKillAction', null);
+                setSetting('killBgShootPending', null);
+                setSetting('killPenaltyPendingAction', null);
+                setSetting('pendingPenaltyPage', false);
+                setSetting('penaltyDropsAt', 0);
+                setSetting('killTravelHandoff', null);
+                setSetting('bgSpamTravelTarget', '');
+                setSetting('killBgSpamPaused', false);
                 setSetting('killLoopActive', false);
+                // Search state must win immediately after Don. The new account
+                // cannot 1-bullet BG-check old/unknown targets until the normal
+                // search loop has actually found them on this account.
+                if (state.killSearchEnabled) {
+                    setSetting('killSearchLoopActive', true);
+                    setSetting('killSearchIndex', 0);
+                    setSetting('killCurrentSearch', '');
+                }
                 const _bgFarmCount = _bgFarmPlayers.filter(p => p.bgFarmEnabled).length;
-                if (_bgFarmCount > 0) {
+                if (_newAccountKillResetCount > 0) {
+                    addLiveLog(`Kill scanner: reset stale new-account kill/BG state for ${_newAccountKillResetCount} player(s) — search loop can continue`);
+                } else if (_bgFarmCount > 0) {
                     addLiveLog(`BG Farm: cleared stale BG state for ${_bgFarmCount} player(s) — search loop can continue`);
                 }
             }
@@ -17659,9 +17714,14 @@ async function doQTPerkRedeem() {
             state.pendingKillAction = null;
         } else if (state.killLoopActive) {
             // Already running — keep active
+        } else if (state.killLoopCooldownUntil > now()) {
+            // A recent Kill-page sync found no actionable target. Respect the
+            // cooldown across reloads; older versions re-armed here immediately
+            // and bounced Crimes <-> Kill every second.
+            state.killLoopActive = false;
         } else {
             const alivePlayers = getKillPlayers().filter(p =>
-                p.status === KILL_STATUS.ALIVE || p.status === KILL_STATUS.UNKNOWN
+                p.status === KILL_STATUS.ALIVE
             );
             // Only activate if on kill page and can verify player is in Players Found
             // On other pages, syncKillExpiryFromPage handles reactivation when player appears
@@ -17673,6 +17733,7 @@ async function doQTPerkRedeem() {
                 : null;
 
             const hasDueBgCheck = alivePlayers.some(p => {
+                if (p.status !== KILL_STATUS.ALIVE) return false;
                 if (!isBgCheckable(p.name)) return false;
                 if (getBgCheckDueMs(p) > 0) return false;
                 // On kill page: verify player is actually in Players Found right now
