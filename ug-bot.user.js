@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Full UG Bot
 // @namespace    ug-bot
-// @version      2.9.2
+// @version      2.10.0
 // @description  Auto-runs crimes, GTA, melting, repair, missions, drug running with Swiss Bank management, live log, session stats, action checkboxes, jail handling, runtime tracking, melt pagination, repair cycles, automatic CTC solving, and point-spending features.
 // @match        *://www.underworldgangsters.com/*
 // @match        *://underworldgangsters.com/*
@@ -605,7 +605,7 @@
     // BOT CONFIG
     // =========================================================================
 
-    const SCRIPT_VERSION = '2.9.2';
+    const SCRIPT_VERSION = '2.10.0';
 
     const CRIME_DEFS = [
         { id: 'gang', name: 'Gang Activities' },
@@ -824,6 +824,9 @@
         qtAuctionCarBundleEnabled: false,
         qtAuctionCarBundleMaxPts:  3,       // pts per car
         qtAuctionCarBundleMinCars: 25,
+        qtAuctionRobotBgEnabled:   false,
+        qtAuctionRobotBgMaxPts:    3,       // pts per robot bodyguard
+        qtAuctionRobotBgMin:       1,
 
         // Kill scanner settings
         killScanOnlineEnabled:  false,
@@ -1377,6 +1380,12 @@
         set qtAuctionCarBundleMaxPts(v) { setSetting('qtAuctionCarBundleMaxPts', Math.max(0, Number(v) || DEFAULTS.qtAuctionCarBundleMaxPts)); },
         get qtAuctionCarBundleMinCars() { return Number(getSetting('qtAuctionCarBundleMinCars', DEFAULTS.qtAuctionCarBundleMinCars)); },
         set qtAuctionCarBundleMinCars(v){ setSetting('qtAuctionCarBundleMinCars', Math.max(0, Number(v) || DEFAULTS.qtAuctionCarBundleMinCars)); },
+        get qtAuctionRobotBgEnabled()   { return !!getSetting('qtAuctionRobotBgEnabled', DEFAULTS.qtAuctionRobotBgEnabled); },
+        set qtAuctionRobotBgEnabled(v)  { setSetting('qtAuctionRobotBgEnabled', !!v); },
+        get qtAuctionRobotBgMaxPts()    { return Number(getSetting('qtAuctionRobotBgMaxPts', DEFAULTS.qtAuctionRobotBgMaxPts)); },
+        set qtAuctionRobotBgMaxPts(v)   { setSetting('qtAuctionRobotBgMaxPts', Math.max(0, Number(v) || DEFAULTS.qtAuctionRobotBgMaxPts)); },
+        get qtAuctionRobotBgMin()       { return Number(getSetting('qtAuctionRobotBgMin', DEFAULTS.qtAuctionRobotBgMin)); },
+        set qtAuctionRobotBgMin(v)      { setSetting('qtAuctionRobotBgMin', Math.max(0, Number(v) || DEFAULTS.qtAuctionRobotBgMin)); },
 
         // Kill scanner
         get killScanOnlineEnabled()   { return !!getSetting('killScanOnlineEnabled', DEFAULTS.killScanOnlineEnabled); },
@@ -1834,6 +1843,9 @@
     let qtAuctionCarBundleEnabledInput = null;
     let qtAuctionCarBundleMaxPtsEl  = null;
     let qtAuctionCarBundleMinAmtEl  = null;
+    let qtAuctionRobotBgEnabledInput = null;
+    let qtAuctionRobotBgMaxPtsEl    = null;
+    let qtAuctionRobotBgMinAmtEl    = null;
     let killScanOnlineInput         = null;
     let killScanIntervalEl          = null;
     let killSearchInput             = null;
@@ -1890,6 +1902,14 @@
         const nowMs = now();
         if (debugLogLastAt[key] && (nowMs - debugLogLastAt[key]) < intervalMs) return;
         debugLogLastAt[key] = nowMs;
+        addLiveLog(message);
+    }
+
+    const qtSniperPageSkipLogKeys = new Set();
+    function addQTSniperSkipLog(message) {
+        if (!message) return;
+        if (qtSniperPageSkipLogKeys.has(message)) return;
+        qtSniperPageSkipLogKeys.add(message);
         addLiveLog(message);
     }
 
@@ -4605,12 +4625,48 @@
         return (p?.country || p?.location || p?.lastKnownCountry || '').trim();
     }
 
+    function normalizeCountryName(country) {
+        return String(country || '').trim().toLowerCase();
+    }
+
+    function isCurrentlyInCountry(countryName) {
+        const target = normalizeCountryName(countryName);
+        const current = normalizeCountryName(getPlayerLocation());
+        return !!target && !!current && target === current;
+    }
+
     function killActionNeedsTravel(action) {
         if (!action) return false;
         const targetCountry = (action.travelTo || action.targetCountry || getKillPlayerCountryByName(action.targetName) || '').trim();
-        const myCountry     = getPlayerLocation();
-        if (!targetCountry || !myCountry) return false;
-        return targetCountry.toLowerCase() !== myCountry.toLowerCase();
+        if (!targetCountry) return false;
+        return !isCurrentlyInCountry(targetCountry);
+    }
+
+    function completeKillTravelAfterArrival(pending, reason = '') {
+        if (!pending || !pending.travelTo || !isCurrentlyInCountry(pending.travelTo)) return false;
+
+        const reasonText = reason ? ` (${reason})` : '';
+        addLiveLog(`Kill loop: already in ${pending.travelTo} — continuing pending kill action${reasonText}`);
+        state.killTravelHandoff = null;
+
+        if (pending.afterTravel) {
+            state.pendingKillAction = { ...pending.afterTravel };
+        } else if (pending.killOnly) {
+            // We travelled for a kill-only target; continue with the full kill shot,
+            // not a 1-bullet BG check. BG-checkable targets use explicit afterTravel stages.
+            state.pendingKillAction = { stage: 'fetch_profile', targetName: pending.targetName, bgFor: pending.bgFor || null };
+        } else {
+            state.pendingKillAction = {
+                stage: 'bgcheck',
+                targetName: pending.targetName,
+                shootAfterBg: pending.shootAfterBg,
+                deferred: pending.deferred
+            };
+        }
+
+        state.killLoopActive = true;
+        state.killSearchLoopActive = false;
+        return true;
     }
 
     // Submits a shoot POST to the kill page
@@ -5266,6 +5322,7 @@
             } else {
                 // Player already in list — update expiry, never resurrect dead
                 if (players[idx].status !== KILL_STATUS.DEAD) {
+                    const wasPendingSearch = !!players[idx].pendingSearch || !!players[idx].expectedFoundAt;
                     players[idx].searchExpiresAt = expiresAt;
                     players[idx].status          = KILL_STATUS.ALIVE;
                     players[idx].pendingSearch   = false;
@@ -5274,6 +5331,13 @@
                     if (players[idx].expectedFoundAt) {
                         delete players[idx].expectedFoundAt;
                         newlyFound++; // Was pending, now found — relevant for kill loop reactivation
+                    }
+                    if (wasPendingSearch && isPlayerBgFarmEnabled(name)) {
+                        // v72: A just-found BG Farm target has not been BG-checked yet.
+                        // Do not keep the old search wait + interval, and do not let a
+                        // previously stamped search-time lastBgCheck delay the first probe.
+                        delete players[idx].bgFarmWaitUntil;
+                        players[idx].lastBgCheck = 0;
                     }
                     updated++;
                 }
@@ -6122,7 +6186,7 @@
         while (true) {
             attempts++;
             try {
-                const resp = await fetch(`/a/quickbank.php?type=deposit&_=${Date.now()}`, { credentials: 'include' });
+                const resp = await fetch(`/a/quickbank.php?type=deposit`, { credentials: 'include' });
                 await resp.text();
                 if (attempts > 1) addLiveLog(`QT Sniper: deposit succeeded after ${attempts} attempts`);
                 return; // success
@@ -6960,7 +7024,7 @@ async function doQTPerkRedeem() {
 
         try {
             qtSniperAbortController = new AbortController();
-            const resp = await fetch('/?p=qt&a=perks', { credentials: 'include', cache: 'no-store', signal: qtSniperAbortController.signal });
+            const resp = await fetch('/index3.php?p=qt&a=perks', { credentials: 'include', cache: 'no-store', signal: qtSniperAbortController.signal });
             const text = await resp.text();
             const parser = new DOMParser();
             const doc = parser.parseFromString(text, 'text/html');
@@ -6983,7 +7047,7 @@ async function doQTPerkRedeem() {
                         // Check points balance
                         const points = getPlayerPoints();
                         if (points < price) {
-                            addLiveLog(`QT Sniper: BG costs ${price} points but only have ${points} — skipping`);
+                            addQTSniperSkipLog(`QT Sniper: BG costs ${price} points but only have ${points} — skipping`);
                             continue;
                         }
                         const radio = row.querySelector('input[type="radio"]');
@@ -7038,13 +7102,13 @@ async function doQTPerkRedeem() {
                         const cash  = getPlayerMoney();
                         const swiss = getPlayerSwiss();
                         if (cash + swiss < totalNeeded) {
-                            addLiveLog(`QT Sniper: insufficient funds for bullet purchases — skipping`);
+                            addQTSniperSkipLog(`QT Sniper: insufficient funds for bullet purchases — skipping`);
                         } else {
                             // Single withdraw if needed, then buy all, then single deposit
                             let didWithdraw = false;
                             if (cash < totalNeeded) {
                                 try {
-                                    const wResp = await fetch(`/a/quickbank.php?type=withdraw&_=${Date.now()}`, { credentials: 'include' });
+                                    const wResp = await fetch(`/a/quickbank.php?type=withdraw`, { credentials: 'include' });
                                     await wResp.text();
                                     didWithdraw = true;
                                     await wait(150);
@@ -7110,13 +7174,13 @@ async function doQTPerkRedeem() {
                         const cash  = getPlayerMoney();
                         const swiss = getPlayerSwiss();
                         if (cash + swiss < totalNeeded) {
-                            addLiveLog(`QT Sniper: insufficient funds for points purchases — skipping`);
+                            addQTSniperSkipLog(`QT Sniper: insufficient funds for points purchases — skipping`);
                         } else {
                             // Always withdraw first and deposit after — ensures money
                             // never sits exposed on hand after points purchases
                             let didWithdraw = false;
                             try {
-                                const wResp = await fetch(`/a/quickbank.php?type=withdraw&_=${Date.now()}`, { credentials: 'include' });
+                                const wResp = await fetch(`/a/quickbank.php?type=withdraw`, { credentials: 'include' });
                                 await wResp.text();
                                 didWithdraw = true;
                                 await wait(150);
@@ -7196,13 +7260,13 @@ async function doQTPerkRedeem() {
                     // Check per-unit price (pts per car/min)
                     const ptsPerUnit = amt > 0 ? pts / amt : pts;
                     if (ptsPerUnit > maxPts) {
-                        addLiveLog(`QT Sniper: ${label} ${amt} ${unit} skipped — ${ptsPerUnit.toFixed(2)} pts/${unit.replace('s','')} exceeds max ${maxPts}`);
+                        addQTSniperSkipLog(`QT Sniper: ${label} ${amt} ${unit} skipped — ${ptsPerUnit.toFixed(2)} pts/${unit.replace('s','')} exceeds max ${maxPts}`);
                         continue;
                     }
                     // Check points balance
                     const playerPts = getPlayerPoints();
                     if (playerPts < pts) {
-                        addLiveLog(`QT Sniper: ${label} ${amt} ${unit} costs ${pts} pts but only have ${playerPts} — skipping`);
+                        addQTSniperSkipLog(`QT Sniper: ${label} ${amt} ${unit} costs ${pts} pts but only have ${playerPts} — skipping`);
                         continue;
                     }
                     const radio = row.querySelector('input[type="radio"]');
@@ -7308,7 +7372,8 @@ async function doQTPerkRedeem() {
     function isQTAuctionConfigured() {
         return state.qtAuctionBulletsEnabled || state.qtAuctionBustEnabled || state.qtAuctionAlwaysSuccEnabled ||
             state.qtAuctionDoubleMeltsEnabled || state.qtAuctionDoubleXpEnabled || state.qtAuctionDoubleCashEnabled ||
-            state.qtAuctionRareEnabled || state.qtAuctionBulletValueEnabled || state.qtAuctionCarBundleEnabled;
+            state.qtAuctionRareEnabled || state.qtAuctionBulletValueEnabled || state.qtAuctionCarBundleEnabled ||
+            state.qtAuctionRobotBgEnabled;
     }
 
     function startQTAuctionScanner() {
@@ -7331,13 +7396,23 @@ async function doQTPerkRedeem() {
     function classifyAuctionReward(rawText) {
         const text = String(rawText || '').replace(/\s+/g, ' ').trim();
         const lower = text.toLowerCase();
+        const isRobotBgAuction = /robot\s*(?:body\s*guards?|bgs?)\b/i.test(text);
         const amountMatch = text.match(/[\d,]+(?:\.\d+)?/);
-        const amount = amountMatch ? Number(amountMatch[0].replace(/,/g, '')) : 0;
+        const amount = amountMatch ? Number(amountMatch[0].replace(/,/g, '')) : (isRobotBgAuction ? 1 : 0);
         if (!text || !Number.isFinite(amount) || amount <= 0) return null;
 
-        // Order matters: "bullet value" is not a bullets bundle.
+        if (isRobotBgAuction) {
+            return { key: 'robotBg', label: 'Robot BG', amount, unit: 'robot BGs', enabled: state.qtAuctionRobotBgEnabled, maxPtsPerUnit: state.qtAuctionRobotBgMaxPts, minAmount: state.qtAuctionRobotBgMin };
+        }
+
+        // Order matters: "bullet value" is not a bullets bundle, and
+        // "The next 200 cars melted will provide double bullets" is a double-melts
+        // auction reward even though it contains the word "bullets".
         if (/bullet\s*value/i.test(text)) {
             return { key: 'bulletValue', label: 'Bullet value', amount, unit: 'cars', enabled: state.qtAuctionBulletValueEnabled, maxPtsPerUnit: state.qtAuctionBulletValueMaxPts, minAmount: state.qtAuctionBulletValueMinCars };
+        }
+        if (/double\s*melts?|melts?\s*(?:on|for)|cars?\s+melt(?:ed|s)?\b.*double\s+bullets?|double\s+bullets?\b.*cars?\s+melt(?:ed|s)?/i.test(text)) {
+            return { key: 'doubleMelts', label: 'Double melts', amount, unit: 'cars', enabled: state.qtAuctionDoubleMeltsEnabled, maxPtsPerUnit: state.qtAuctionDoubleMeltsMaxPts, minAmount: state.qtAuctionDoubleMeltsMinCars };
         }
         if (/bullets?/i.test(text)) {
             return { key: 'bullets', label: 'Bullets', amount, unit: 'bullets', enabled: state.qtAuctionBulletsEnabled, maxPtsPer10k: state.qtAuctionBulletsMaxPts, minAmount: state.qtAuctionBulletsMin };
@@ -7347,9 +7422,6 @@ async function doQTPerkRedeem() {
         }
         if (/always\s*bust|bust/i.test(text)) {
             return { key: 'alwaysBust', label: 'Always Bust', amount, unit: 'mins', enabled: state.qtAuctionBustEnabled, maxPtsPerUnit: state.qtAuctionBustMaxPts, minAmount: state.qtAuctionBustMinMins };
-        }
-        if (/double\s*melts?|melts?\s*(?:on|for)/i.test(text)) {
-            return { key: 'doubleMelts', label: 'Double melts', amount, unit: 'cars', enabled: state.qtAuctionDoubleMeltsEnabled, maxPtsPerUnit: state.qtAuctionDoubleMeltsMaxPts, minAmount: state.qtAuctionDoubleMeltsMinCars };
         }
         if (/double\s*xp/i.test(text)) {
             return { key: 'doubleXp', label: 'Double XP', amount, unit: 'mins', enabled: state.qtAuctionDoubleXpEnabled, maxPtsPerUnit: state.qtAuctionDoubleXpMaxPts, minAmount: state.qtAuctionDoubleXpMinMins };
@@ -7462,7 +7534,7 @@ async function doQTPerkRedeem() {
                     continue;
                 }
 
-                const bidUrl = `/a/bids.php?id=${encodeURIComponent(item.id)}&bid=${encodeURIComponent(item.lowestBid)}&_=${Date.now()}`;
+                const bidUrl = `/a/bids.php?id=${encodeURIComponent(item.id)}&bid=${encodeURIComponent(item.lowestBid)}`;
                 const bidResp = await fetch(bidUrl, { credentials: 'include', cache: 'no-store' });
                 await bidResp.text();
                 qtAuctionLastBidAt = Date.now();
@@ -7563,7 +7635,7 @@ async function doQTPerkRedeem() {
                 // Quick withdraw if needed
                 if (!didWithdraw && cash < totalNeeded) {
                     try {
-                        const wResp = await fetch(`/a/quickbank.php?type=withdraw&_=${Date.now()}`, { credentials: 'include' });
+                        const wResp = await fetch(`/a/quickbank.php?type=withdraw`, { credentials: 'include' });
                         await wResp.text();
                         didWithdraw = true;
                         await wait(200);
@@ -7619,7 +7691,7 @@ async function doQTPerkRedeem() {
             // Quick deposit after all purchases if we withdrew
             if (didWithdraw || totalSpent > 0) {
                 try {
-                    await fetch(`/a/quickbank.php?type=deposit&_=${Date.now()}`, { credentials: 'include' });
+                    await fetch(`/a/quickbank.php?type=deposit`, { credentials: 'include' });
                 } catch (_) {}
             }
         } catch (e) {
@@ -7637,7 +7709,7 @@ async function doQTPerkRedeem() {
     let bgCrimeJailPauseUntil  = 0;
     let bgCrimeJailPauseLogged = false;
 
-    const BG_CRIME_READY_POLL_MS       = 250;
+    const BG_CRIME_READY_POLL_MS       = 150;
     const BG_CRIME_IDLE_POLL_MS        = 5000;
     const BG_CRIME_FETCH_BACKOFF_MIN   = 5000;
     const BG_CRIME_FETCH_BACKOFF_MAX   = 60000;
@@ -7746,7 +7818,9 @@ async function doQTPerkRedeem() {
         if (!bgCrimeToken) {
             // No token + known future timers means there is nothing useful to fetch yet.
             if (known.length > 0 && dueKnown.length === 0) {
-                return futureTimes[0] ? Math.max(1000, futureTimes[0] - nowMs) : BG_CRIME_IDLE_POLL_MS;
+                return futureTimes[0]
+                ? Math.max(BG_CRIME_READY_POLL_MS, futureTimes[0] - nowMs)
+                : BG_CRIME_IDLE_POLL_MS;
             }
 
             // Initial token load or token refresh for a due crime. Respect backoff.
@@ -7761,7 +7835,9 @@ async function doQTPerkRedeem() {
         const due = activeIds.some(id => (bgCrimeCooldowns[id] ?? 0) <= nowMs);
         if (due) return BG_CRIME_READY_POLL_MS;
 
-        return futureTimes[0] ? Math.max(1000, futureTimes[0] - nowMs) : BG_CRIME_IDLE_POLL_MS;
+        return futureTimes[0]
+                ? Math.max(BG_CRIME_READY_POLL_MS, futureTimes[0] - nowMs)
+                : BG_CRIME_IDLE_POLL_MS;
     }
 
     function startBgCrime() {
@@ -7873,7 +7949,7 @@ async function doQTPerkRedeem() {
                 if (!bgCrimeToken) break;
                 if (!bgCrimeActive || !state.bgCrimeEnabled) break;
 
-                const resp = await fetch(`/a/crime.php?id=${id}&noob=${bgCrimeToken}&unlucky=${rand(4,196)}&kidda=${rand(4,18)}&_=${Date.now()}`, {
+                const resp = await fetch(`/a/crime.php?id=${id}&noob=${bgCrimeToken}&unlucky=${rand(4,196)}&kidda=${rand(4,18)}`, {
                     credentials: 'include'
                 });
                 const text = await resp.text();
@@ -9039,8 +9115,7 @@ async function doQTPerkRedeem() {
     async function doNoReloadBustPoll() {
         if (!noReloadBustActive) return;
         try {
-            const cache = Math.random();
-            const resp = await fetch(`/a/jailn.php?cache=${cache}`, {
+            const resp = await fetch('/a/jailn.php', {
                 credentials: 'include',
                 cache: 'no-store'
             });
@@ -10746,6 +10821,12 @@ async function doQTPerkRedeem() {
         // Handle pending travel — we've just arrived on a car page to drive somewhere
         // ── Stage: travel — on cars LIST page, find and navigate to best car ──
         if (pending && pending.stage === 'travel' && pending.travelTo) {
+            if (completeKillTravelAfterArrival(pending, 'manual travel detected before car selection')) {
+                await wait(navRand());
+                gotoPage('kill');
+                return;
+            }
+
             // Wait for cars page DOM to fully load before searching for car links
             const carLinks = document.querySelectorAll('a[href*="?p=car&id="]');
             if (carLinks.length === 0) {
@@ -10794,6 +10875,12 @@ async function doQTPerkRedeem() {
 
         // ── Stage: travel_car — on car DETAIL page, repair if needed then drive ──
         if (pending && pending.stage === 'travel_car' && pending.travelTo) {
+            if (completeKillTravelAfterArrival(pending, 'manual travel detected on car detail page')) {
+                await wait(navRand());
+                gotoPage('kill');
+                return;
+            }
+
             const locationValue = getLocationValueForCountry(pending.travelTo);
             if (!locationValue) {
                 addLiveLog(`Kill loop: invalid travel target "${pending.travelTo}" — clearing`);
@@ -11140,11 +11227,14 @@ async function doQTPerkRedeem() {
                     const idx = pl.findIndex(p => p.name.toLowerCase() === target.toLowerCase());
                     if (idx !== -1) {
                         if (foundInMs != null) {
+                            const readyAt = now() + Math.max(foundInMs, 5000);
                             pl[idx].pendingSearch = true;
                             pl[idx].expectedFoundAt = now() + foundInMs;
-                            pl[idx].bgFarmWaitUntil = now() + foundInMs + (5 * 60 * 1000);
+                            // v72: This is only the target's initial search wait, not a completed BG check.
+                            // Do not add the BG Farm interval here, and do not stamp lastBgCheck yet.
+                            // The first 1-bullet BG Farm check should fire as soon as the target is found.
+                            pl[idx].bgFarmWaitUntil = readyAt;
                         }
-                        pl[idx].lastBgCheck = now(); // mark as checked so interval resets
                         saveKillPlayers(pl);
                     }
                     // Don't deactivate kill loop — continue to next due player
@@ -11410,12 +11500,17 @@ async function doQTPerkRedeem() {
         // Handle result of a previous shoot action
         if (pending && pending.stage === 'shoot_result') {
             const target = pending.targetName;
-            // Check page for shoot result messages
-            const failEl    = document.querySelector('.bgm.fail');
+            // Check page for shoot result messages.
+            // Some laggy renders / alternate UG result templates do not keep the
+            // bodyguard or failed-shot message on .bgm.fail/.bgm.cred.  Search
+            // the normal result containers too so 1-bullet BG checks do not get
+            // misclassified as "unknown" just because the class differs.
+            const resultEls = [...document.querySelectorAll('.bgm, .bgd, .bgl')];
+            const failEl    = document.querySelector('.bgm.fail') ||
+                              resultEls.find(el => /has a bodyguard called|cannot be killed/i.test(textOf(el))) || null;
             const successEl  = document.querySelector('.bgm.success, .bgm.cg') ||
-                               [...document.querySelectorAll('.bgm')].find(el => /you killed/i.test(textOf(el))) || null;
-            // Check ALL .bgm.cred elements — active bodyguards produce multiple cred divs
-            const credEls    = [...document.querySelectorAll('.bgm.cred')];
+                               resultEls.find(el => /you killed/i.test(textOf(el))) || null;
+            const credEls    = [...document.querySelectorAll('.bgm.cred'), ...resultEls];
             const credEl     = credEls.find(el => /failed to kill/i.test(textOf(el))) || null;
 
             if (failEl) {
@@ -11776,6 +11871,25 @@ async function doQTPerkRedeem() {
                 state.killLoopActive    = false; // pause until BG is found
                 await wait(navRand());
                 gotoPage('crimes');
+                return;
+            }
+
+            // If this is a 1-bullet BG check and the game/page is laggy, the
+            // result message can be missing for a moment on the first script pass.
+            // Do not immediately clear the check; wait briefly and parse the same
+            // page again before falling through to the old unknown-result cleanup.
+            const unknownPaPre = state.pendingKillAction;
+            const isOwnerBgCheckResult = unknownPaPre && !unknownPaPre.bgFor &&
+                (isPlayerBgFarmEnabled(target) || isPlayerBgCheckEnabled(target) || unknownPaPre.shootAfterBg);
+            const graceRetries = Number(unknownPaPre?.resultGraceRetries || 0);
+            if (isOwnerBgCheckResult && graceRetries < 2) {
+                state.pendingKillAction = {
+                    ...unknownPaPre,
+                    resultGraceRetries: graceRetries + 1,
+                    resultStartedAt: unknownPaPre?.resultStartedAt || now()
+                };
+                addLiveLog(`Kill loop: BG check result for ${target} not visible yet — waiting before clearing`);
+                await wait(2500 + (graceRetries * 1500));
                 return;
             }
 
@@ -12224,19 +12338,47 @@ async function doQTPerkRedeem() {
         });
 
         // Sync country data from Players Found so foundMap is always fresh.
-        // If this sync queues a BG Farm verify→shoot chain, do not recurse here.
-        // The earlier sync in this same handler now refreshes `pending` before
-        // stage handling, and any late change can safely be advanced on the next
-        // clean kill-page tick without repeatedly logging "processing now".
+        // If this sync queues a *new* BG Farm verify→shoot chain, advance it on a
+        // clean kill-page tick.  v70: compare a semantic signature, not only object
+        // identity.  syncKillExpiryFromPage can rebuild the same {stage:'bgcheck',
+        // targetName:...} object on every load; treating that as a new chain caused
+        // a tight "BG Farm verify→shoot chain queued — advancing" reload loop that
+        // never reached the generic bgcheck shooter until pause/start reset state.
         const _pendingBeforeSync = state.pendingKillAction;
+        const _pendingSig = (pa) => {
+            if (!pa) return '';
+            const defer = Array.isArray(pa.deferred) ? pa.deferred.slice().sort().join(',') : '';
+            const after = pa.afterVerify ? `${pa.afterVerify.stage || ''}:${pa.afterVerify.targetName || ''}:${pa.afterVerify.bgFor || ''}` : '';
+            const afterTravel = pa.afterTravel ? `${pa.afterTravel.stage || ''}:${pa.afterTravel.targetName || ''}:${pa.afterTravel.travelTo || ''}` : '';
+            return [
+                pa.stage || '',
+                pa.targetName || '',
+                pa.bgFor || '',
+                pa.travelTo || '',
+                pa.shootAfterBg ? '1' : '0',
+                pa.force ? '1' : '0',
+                pa.postBgKillRecheck ? '1' : '0',
+                defer,
+                after,
+                afterTravel
+            ].join('|').toLowerCase();
+        };
+        const _pendingBeforeSig = _pendingSig(_pendingBeforeSync);
         syncKillExpiryFromPage(true);
-        if (state.pendingKillAction && state.pendingKillAction !== _pendingBeforeSync && hasActiveBgFarmCriticalChain()) {
-            addLiveLog('Kill loop: BG Farm verify→shoot chain queued — advancing');
-            state.killLoopActive = true;
-            state.killSearchLoopActive = false;
-            await wait(navRand());
-            gotoPage('kill');
-            return;
+        const _pendingAfterSync = state.pendingKillAction;
+        const _pendingAfterSig = _pendingSig(_pendingAfterSync);
+        if (_pendingAfterSync && _pendingAfterSig !== _pendingBeforeSig && hasActiveBgFarmCriticalChain()) {
+            // If the new chain is the generic bgcheck stage, we are already on the
+            // kill page and the handler below can process it immediately.  Do not
+            // bounce back to the same page and risk starving the shooter again.
+            if (_pendingAfterSync.stage !== 'bgcheck') {
+                addLiveLog('Kill loop: BG Farm verify→shoot chain queued — advancing');
+                state.killLoopActive = true;
+                state.killSearchLoopActive = false;
+                await wait(navRand());
+                gotoPage('kill');
+                return;
+            }
         }
 
         // Helper: get country from live Players Found only — no stale p.country fallback
@@ -12623,7 +12765,9 @@ async function doQTPerkRedeem() {
         const remainingDeferred = deferred.filter(n => n !== bgTarget.name.toLowerCase());
         state.pendingKillAction = { stage: 'shoot_result', targetName: bgTarget.name,
             shootAfterBg: isPlayerShootEnabled(bgTarget.name),
-            deferred: remainingDeferred };
+            deferred: remainingDeferred,
+            resultStartedAt: bgCheckShotAt,
+            resultGraceRetries: 0 };
         state.lastActionAt      = bgCheckShotAt;
         await wait(rand(DEFAULTS.actionDelayMin, DEFAULTS.actionDelayMax));
 
@@ -14662,6 +14806,9 @@ async function doQTPerkRedeem() {
         if (qtAuctionCarBundleEnabledInput)  state.qtAuctionCarBundleEnabled   = qtAuctionCarBundleEnabledInput.checked;
         if (qtAuctionCarBundleMaxPtsEl)      state.qtAuctionCarBundleMaxPts    = Number(qtAuctionCarBundleMaxPtsEl.value) || DEFAULTS.qtAuctionCarBundleMaxPts;
         if (qtAuctionCarBundleMinAmtEl)      state.qtAuctionCarBundleMinCars   = Number(qtAuctionCarBundleMinAmtEl.value) || DEFAULTS.qtAuctionCarBundleMinCars;
+        if (qtAuctionRobotBgEnabledInput)    state.qtAuctionRobotBgEnabled     = qtAuctionRobotBgEnabledInput.checked;
+        if (qtAuctionRobotBgMaxPtsEl)        state.qtAuctionRobotBgMaxPts      = Number(qtAuctionRobotBgMaxPtsEl.value) || DEFAULTS.qtAuctionRobotBgMaxPts;
+        if (qtAuctionRobotBgMinAmtEl)        state.qtAuctionRobotBgMin         = Number(qtAuctionRobotBgMinAmtEl.value) || DEFAULTS.qtAuctionRobotBgMin;
         if (qtPerkExtendEnabledInput) state.qtPerkExtendEnabled = qtPerkExtendEnabledInput.checked;
         if (qtPerkExtendMinsEl)    state.qtPerkExtendMins   = Number(qtPerkExtendMinsEl.value) || DEFAULTS.qtPerkExtendMins;
         if (qtPerkRedeemEnabledInput) state.qtPerkRedeemEnabled = qtPerkRedeemEnabledInput.checked;
@@ -15392,6 +15539,7 @@ async function doQTPerkRedeem() {
                         <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-qt-auction-rare-enabled" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">Rare cars</td><td style="vertical-align:middle;white-space:nowrap;padding:3px 2px;width:1px;"><input id="ug-bot-qt-auction-rare-maxpts" type="text" inputmode="decimal" class="ug-compact-input ug-compact-input-sm" placeholder="3" /></td><td style="vertical-align:middle;white-space:nowrap;padding:3px 0 3px 4px;width:1px;"><input id="ug-bot-qt-auction-rare-minamt" type="text" inputmode="numeric" class="ug-compact-input ug-compact-input-sm" placeholder="50 cars" /></td></tr>
                         <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-qt-auction-bullet-value-enabled" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">Bullet value</td><td style="vertical-align:middle;white-space:nowrap;padding:3px 2px;width:1px;"><input id="ug-bot-qt-auction-bullet-value-maxpts" type="text" inputmode="decimal" class="ug-compact-input ug-compact-input-sm" placeholder="3" /></td><td style="vertical-align:middle;white-space:nowrap;padding:3px 0 3px 4px;width:1px;"><input id="ug-bot-qt-auction-bullet-value-minamt" type="text" inputmode="numeric" class="ug-compact-input ug-compact-input-sm" placeholder="20 cars" /></td></tr>
                         <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-qt-auction-car-bundle-enabled" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">Rare car bundles</td><td style="vertical-align:middle;white-space:nowrap;padding:3px 2px;width:1px;"><input id="ug-bot-qt-auction-car-bundle-maxpts" type="text" inputmode="decimal" class="ug-compact-input ug-compact-input-sm" placeholder="3" /></td><td style="vertical-align:middle;white-space:nowrap;padding:3px 0 3px 4px;width:1px;"><input id="ug-bot-qt-auction-car-bundle-minamt" type="text" inputmode="numeric" class="ug-compact-input ug-compact-input-sm" placeholder="25 cars" /></td></tr>
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-qt-auction-robot-bg-enabled" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">Robot BGs</td><td style="vertical-align:middle;white-space:nowrap;padding:3px 2px;width:1px;"><input id="ug-bot-qt-auction-robot-bg-maxpts" type="text" inputmode="decimal" class="ug-compact-input ug-compact-input-sm" placeholder="3" /></td><td style="vertical-align:middle;white-space:nowrap;padding:3px 0 3px 4px;width:1px;"><input id="ug-bot-qt-auction-robot-bg-minamt" type="text" inputmode="numeric" class="ug-compact-input ug-compact-input-sm" placeholder="1 BG" /></td></tr>
 </table>
 <div style="color:#777;font-size:10px;line-height:1.35;margin-top:6px;text-align:left;">Uses fetch only. Unknown auction rewards are logged and skipped until their HTML/text is added.</div>
 </div>
@@ -16125,6 +16273,9 @@ async function doQTPerkRedeem() {
         qtAuctionCarBundleEnabledInput = document.querySelector('#ug-bot-qt-auction-car-bundle-enabled');
         qtAuctionCarBundleMaxPtsEl = document.querySelector('#ug-bot-qt-auction-car-bundle-maxpts');
         qtAuctionCarBundleMinAmtEl = document.querySelector('#ug-bot-qt-auction-car-bundle-minamt');
+        qtAuctionRobotBgEnabledInput = document.querySelector('#ug-bot-qt-auction-robot-bg-enabled');
+        qtAuctionRobotBgMaxPtsEl = document.querySelector('#ug-bot-qt-auction-robot-bg-maxpts');
+        qtAuctionRobotBgMinAmtEl = document.querySelector('#ug-bot-qt-auction-robot-bg-minamt');
         qtPerkExtendEnabledInput = document.querySelector('#ug-bot-qt-perk-extend-enabled');
         qtPerkExtendMinsEl       = document.querySelector('#ug-bot-qt-perk-extend-mins');
         qtPerkRedeemEnabledInput = document.querySelector('#ug-bot-qt-perk-redeem-enabled');
@@ -16466,6 +16617,9 @@ async function doQTPerkRedeem() {
         if (qtAuctionCarBundleEnabledInput) qtAuctionCarBundleEnabledInput.checked = state.qtAuctionCarBundleEnabled;
         if (qtAuctionCarBundleMaxPtsEl) qtAuctionCarBundleMaxPtsEl.value     = String(state.qtAuctionCarBundleMaxPts);
         if (qtAuctionCarBundleMinAmtEl) qtAuctionCarBundleMinAmtEl.value     = String(state.qtAuctionCarBundleMinCars);
+        if (qtAuctionRobotBgEnabledInput) qtAuctionRobotBgEnabledInput.checked = state.qtAuctionRobotBgEnabled;
+        if (qtAuctionRobotBgMaxPtsEl) qtAuctionRobotBgMaxPtsEl.value         = String(state.qtAuctionRobotBgMaxPts);
+        if (qtAuctionRobotBgMinAmtEl) qtAuctionRobotBgMinAmtEl.value         = String(state.qtAuctionRobotBgMin);
 
         drugCompModeInput = document.querySelector('#ug-bot-drug-comp');
         if (drugCompModeInput) {
@@ -17953,6 +18107,9 @@ async function doQTPerkRedeem() {
         qtAuctionCarBundleEnabledInput = document.querySelector('#ug-bot-qt-auction-car-bundle-enabled');
         qtAuctionCarBundleMaxPtsEl = document.querySelector('#ug-bot-qt-auction-car-bundle-maxpts');
         qtAuctionCarBundleMinAmtEl = document.querySelector('#ug-bot-qt-auction-car-bundle-minamt');
+        qtAuctionRobotBgEnabledInput = document.querySelector('#ug-bot-qt-auction-robot-bg-enabled');
+        qtAuctionRobotBgMaxPtsEl = document.querySelector('#ug-bot-qt-auction-robot-bg-maxpts');
+        qtAuctionRobotBgMinAmtEl = document.querySelector('#ug-bot-qt-auction-robot-bg-minamt');
         qtBustEnabledInput      = document.querySelector('#ug-bot-qt-bust-enabled');
         qtBustMaxPtsEl          = document.querySelector('#ug-bot-qt-bust-maxpts');
         qtBustMinAmtEl          = document.querySelector('#ug-bot-qt-bust-minamt');
@@ -18160,6 +18317,8 @@ async function doQTPerkRedeem() {
             }
         }
 
+
+
         // Inject per-table Select All buttons on the perks page
         if (document.querySelectorAll('.sortable-table').length > 0) {
             document.querySelectorAll('.sortable-table').forEach(table => {
@@ -18189,4 +18348,548 @@ async function doQTPerkRedeem() {
     init();
 
     }); // end window.onload
+
+    // =========================================================================
+    // QT PERKS SHOW/HIDE CHECKBOX MEMORY
+    // =========================================================================
+    // Standalone helper for ?p=qt&a=perks.  The game renders every Show/Hide
+    // checkbox as checked by default, so this remembers the user's hidden/shown
+    // choices by checkbox value (pcard, pib, pd, ppbot, etc.) and reapplies them
+    // whenever the category appears again.
+    (function ugQtPerksCheckboxMemory() {
+        'use strict';
+
+        const STORAGE_KEY = 'ug_qt_perks_toggleperk_memory_v1';
+        const LOG_PREFIX  = '[UG QT Checkbox Memory]';
+
+        function isQtPerksPage() {
+            const params = new URLSearchParams(location.search || '');
+            return params.get('p') === 'qt' && params.get('a') === 'perks';
+        }
+
+        function safeCssClass(value) {
+            if (window.CSS && typeof CSS.escape === 'function') {
+                return CSS.escape(value);
+            }
+            return String(value).replace(/[^a-zA-Z0-9_-]/g, '\\$&');
+        }
+
+        function loadState() {
+            try {
+                const saved = GM_getValue(STORAGE_KEY, {});
+                return saved && typeof saved === 'object' ? saved : {};
+            } catch (e) {
+                try {
+                    const raw = localStorage.getItem(STORAGE_KEY);
+                    return raw ? JSON.parse(raw) : {};
+                } catch (_) {
+                    return {};
+                }
+            }
+        }
+
+        function saveState(state) {
+            try {
+                GM_setValue(STORAGE_KEY, state);
+                return;
+            } catch (e) {
+                try {
+                    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+                } catch (_) {
+                    console.warn(LOG_PREFIX, 'Failed to save state:', e);
+                }
+            }
+        }
+
+        function setSectionVisible(value, visible) {
+            const selector = '.' + safeCssClass(value);
+            document.querySelectorAll(selector).forEach(el => {
+                el.style.display = visible ? '' : 'none';
+            });
+        }
+
+        function getToggleBoxes() {
+            return Array.from(document.querySelectorAll('input[type="checkbox"][name="toggleperk"]'));
+        }
+
+        function applyMemory() {
+            if (!isQtPerksPage()) return false;
+
+            const boxes = getToggleBoxes();
+            if (!boxes.length) return false;
+
+            const state = loadState();
+            let applied = 0;
+
+            boxes.forEach(box => {
+                if (box.dataset.ugQtMemoryBound === '1') return;
+
+                const value = String(box.value || '').trim();
+                if (!value) return;
+
+                if (Object.prototype.hasOwnProperty.call(state, value)) {
+                    box.checked = !!state[value];
+                    applied++;
+                }
+
+                setSectionVisible(value, box.checked);
+
+                box.addEventListener('change', () => {
+                    const latest = loadState();
+                    latest[value] = !!box.checked;
+                    saveState(latest);
+                    setSectionVisible(value, box.checked);
+                    console.log(`${LOG_PREFIX} ${value} = ${box.checked ? 'shown' : 'hidden'}`);
+                });
+
+                box.dataset.ugQtMemoryBound = '1';
+            });
+
+            if (applied || boxes.length) {
+                console.log(`${LOG_PREFIX} applied to ${boxes.length} checkbox(es), restored ${applied} saved state(s).`);
+            }
+            return true;
+        }
+
+        function scheduleInit() {
+            if (!isQtPerksPage()) return;
+
+            const tries = [0, 100, 300, 750, 1500, 3000];
+            tries.forEach(delay => setTimeout(applyMemory, delay));
+
+            const observer = new MutationObserver(() => applyMemory());
+            const startObserver = () => {
+                if (document.body) {
+                    observer.observe(document.body, { childList: true, subtree: true });
+                }
+            };
+
+            if (document.body) startObserver();
+            else document.addEventListener('DOMContentLoaded', startObserver, { once: true });
+        }
+
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', scheduleInit, { once: true });
+        } else {
+            scheduleInit();
+        }
+        window.addEventListener('load', applyMemory, { once: true });
+    })();
+
+    // =========================================================================
+    // PERKS SORT TOOLBAR
+    // =========================================================================
+    // Standalone page enhancer for ?p=perks. Kept outside the main onload bot
+    // init so it can attach even if the main bot is paused/blocked or the page
+    // content finishes rendering after the normal load handler.
+    (function ugPerksSortToolbar() {
+        'use strict';
+
+        const SAVE_URL = 'a/perk-order.php';
+        const STYLE_ID = 'ug-perk-sort-style';
+        const TOOLBAR_ID = 'ug-perk-sort-toolbar';
+
+        function isPerksPage() {
+            return /(?:\?|&)p=perks(?:&|$)/.test(location.search || '') || !!document.querySelector('.sortable-table tr.sortable-row');
+        }
+
+        function getTables() {
+            const seen = new Set();
+            const tables = Array.from(document.querySelectorAll(
+                '.sortable-table, #perk-action-form .colcon table[data-table-id], #perk-action-form .colcon table'
+            ));
+
+            return tables.filter(table => {
+                if (!table || seen.has(table)) return false;
+                seen.add(table);
+
+                // Consumables uses .sortable-table.  Other tabs can still be
+                // sortable/savable as long as their rows/table carry data IDs.
+                return table.matches('.sortable-table') ||
+                    !!table.getAttribute('data-table-id') ||
+                    !!table.querySelector('tbody tr.sortable-row, tbody tr[data-id]');
+            });
+        }
+
+        function getRows(table) {
+            return Array.from(table.querySelectorAll('tbody tr.sortable-row, tbody tr[data-id]'))
+                .filter(row => rowId(row));
+        }
+
+        function getTableId(table) {
+            return table.getAttribute('data-table-id') ||
+                (table.dataset && table.dataset.tableId) ||
+                '';
+        }
+
+        function rowId(row) {
+            return row.getAttribute('data-id') || '';
+        }
+
+        function getPerkName(row) {
+            const el = row.querySelector('td:first-child .lm') || row.querySelector('td:first-child');
+            return el ? el.textContent.trim() : '';
+        }
+
+        function getPerkNameClean(row) {
+            return getPerkName(row).replace(/\s+/g, ' ').trim().toLowerCase();
+        }
+
+        function parseFirstNumber(text) {
+            if (!text) return 0;
+            const match = String(text).replace(/,/g, '').match(/-?\d+(\.\d+)?/);
+            return match ? Number(match[0]) : 0;
+        }
+
+        function getPerkAmount(row) {
+            return parseFirstNumber(getPerkName(row));
+        }
+
+        function getExpires(row) {
+            const cells = row.querySelectorAll('td');
+            if (!cells[2]) return 0;
+            const text = cells[2].textContent.trim();
+            if (/preview|view|select all|action/i.test(text)) return 0;
+            return parseFirstNumber(text);
+        }
+
+        function getForSalePrice(row) {
+            const cells = row.querySelectorAll('td');
+            if (!cells[1]) return 0;
+            const text = cells[1].textContent.trim();
+            if (/^no$/i.test(text)) return 0;
+            return parseFirstNumber(text);
+        }
+
+        function saveOrder(table) {
+            const tableId = getTableId(table);
+            const order = getRows(table).map(rowId).filter(Boolean);
+            if (!tableId || !order.length) {
+                console.warn('[UG Perks Sort] Could not save order: missing table/order.');
+                return;
+            }
+
+            const body = new URLSearchParams();
+            order.forEach(id => body.append('order[]', id));
+            body.append('table_id', tableId);
+
+            fetch(SAVE_URL, {
+                method: 'POST',
+                credentials: 'same-origin',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                    'X-Requested-With': 'XMLHttpRequest'
+                },
+                body: body.toString()
+            })
+                .then(res => {
+                    if (!res.ok) throw new Error('HTTP ' + res.status);
+                    console.log('[UG Perks Sort] Sorted and saved.');
+                })
+                .catch(err => {
+                    console.warn('[UG Perks Sort] Sorted visually, but save failed:', err);
+                });
+        }
+
+        function refreshJquerySortable(table) {
+            try {
+                if (window.jQuery && jQuery.fn && jQuery.fn.sortable) {
+                    jQuery(table).find('tbody').sortable('refresh');
+                }
+            } catch (_) {}
+        }
+
+        function compareValues(a, b, direction) {
+            if (typeof a === 'string' || typeof b === 'string') {
+                const result = String(a).localeCompare(String(b), undefined, {
+                    numeric: true,
+                    sensitivity: 'base'
+                });
+                return direction === 'asc' ? result : -result;
+            }
+            if (a === b) return 0;
+            return direction === 'asc' ? a - b : b - a;
+        }
+
+        function sortTable(table, getter, direction) {
+            const tbody = table.querySelector('tbody');
+            const rows = getRows(table);
+            if (!tbody || rows.length < 2) return;
+
+            rows.sort((a, b) => {
+                const result = compareValues(getter(a), getter(b), direction);
+                if (result !== 0) return result;
+                return rowId(a).localeCompare(rowId(b), undefined, { numeric: true });
+            });
+
+            rows.forEach(row => tbody.appendChild(row));
+            refreshJquerySortable(table);
+            saveOrder(table);
+        }
+
+        function sortAllTables(getter, direction) {
+            const tables = getTables().filter(table => getRows(table).length >= 2);
+            if (!tables.length) {
+                console.warn('[UG Perks Sort] No sortable perk/card tables found on this tab.');
+                return;
+            }
+            tables.forEach(table => sortTable(table, getter, direction));
+        }
+
+        function addExtraStyle() {
+            if (document.getElementById(STYLE_ID)) return;
+            const style = document.createElement('style');
+            style.id = STYLE_ID;
+            style.textContent = `
+                #perk-action-form > .ug-perk-selected-box,
+                #perk-action-form > #${TOOLBAR_ID} {
+                    display: inline-block !important;
+                    vertical-align: top !important;
+                    float: none !important;
+                    clear: none !important;
+                    width: calc(50% - 8px) !important;
+                    max-width: calc(50% - 8px) !important;
+                    box-sizing: border-box !important;
+                    margin: 4px !important;
+                }
+
+                #${TOOLBAR_ID} {
+                    padding: 0 !important;
+                }
+
+                #ug-perk-table-side-layout {
+                    display: flex !important;
+                    gap: 8px !important;
+                    align-items: flex-start !important;
+                    width: 100% !important;
+                    box-sizing: border-box !important;
+                    clear: both !important;
+                    margin: 6px 0 !important;
+                }
+
+                #ug-perk-table-side-layout > .colcon {
+                    flex: 1 1 calc(50% - 4px) !important;
+                    width: calc(50% - 4px) !important;
+                    max-width: calc(50% - 4px) !important;
+                    min-width: 0 !important;
+                    box-sizing: border-box !important;
+                    column-count: 1 !important;
+                    column-gap: 0 !important;
+                }
+
+                #ug-perk-table-side-layout > #${TOOLBAR_ID}.ug-perk-table-side {
+                    flex: 1 1 calc(50% - 4px) !important;
+                    width: calc(50% - 4px) !important;
+                    max-width: calc(50% - 4px) !important;
+                    min-width: 0 !important;
+                    box-sizing: border-box !important;
+                    margin: 2px 0 0 0 !important;
+                    clear: none !important;
+                }
+
+                #${TOOLBAR_ID}.ug-perk-no-selected {
+                    display: block !important;
+                    clear: both !important;
+                    width: 100% !important;
+                    max-width: 100% !important;
+                    box-sizing: border-box !important;
+                    margin: 6px 0 !important;
+                }
+
+                #${TOOLBAR_ID} .ug-sort-inner {
+                    padding: 6px;
+                    box-sizing: border-box;
+                }
+
+                #${TOOLBAR_ID} .ug-sort-grid {
+                    display: grid;
+                    grid-template-columns: repeat(2, minmax(0, 1fr));
+                    gap: 6px;
+                    width: 100%;
+                    box-sizing: border-box;
+                }
+
+                #${TOOLBAR_ID} input[type="button"] {
+                    width: 100%;
+                    max-width: 100%;
+                    box-sizing: border-box;
+                    margin: 0;
+                    padding: 4px 5px;
+                    white-space: normal;
+                    line-height: 1.2;
+                    min-height: 30px;
+                    cursor: pointer;
+                }
+
+                #perk-action-form > .colcon {
+                    display: block !important;
+                    clear: both !important;
+                    width: 100% !important;
+                }
+
+                @media (max-width: 700px) {
+                    #perk-action-form > .ug-perk-selected-box,
+                    #perk-action-form > #${TOOLBAR_ID} {
+                        display: block !important;
+                        width: 100% !important;
+                        max-width: 100% !important;
+                        margin: 6px 0 !important;
+                    }
+
+                    #ug-perk-table-side-layout {
+                        display: block !important;
+                    }
+
+                    #ug-perk-table-side-layout > .colcon,
+                    #ug-perk-table-side-layout > #${TOOLBAR_ID}.ug-perk-table-side {
+                        display: block !important;
+                        width: 100% !important;
+                        max-width: 100% !important;
+                        margin: 6px 0 !important;
+                    }
+
+                    #${TOOLBAR_ID} .ug-sort-grid {
+                        grid-template-columns: repeat(2, minmax(0, 1fr));
+                    }
+                }
+
+                @media (max-width: 420px) {
+                    #${TOOLBAR_ID} .ug-sort-grid {
+                        grid-template-columns: 1fr;
+                    }
+                }
+            `;
+            (document.head || document.documentElement).appendChild(style);
+        }
+
+        function makeInputButton(value, onClick) {
+            const input = document.createElement('input');
+            input.type = 'button';
+            input.value = value;
+            input.setAttribute('data-role', 'none');
+            input.addEventListener('click', onClick);
+            return input;
+        }
+
+        function getSelectedPerksPanel(form) {
+            if (!form) return null;
+            const children = Array.from(form.children);
+
+            // Consumables says "Selected Perks".  Other tabs can use different
+            // wording, so prefer any direct top action panel before .colcon.
+            return children.find(el =>
+                el.tagName === 'DIV' &&
+                el.classList.contains('bgd') &&
+                /Selected\s+(Perks|Profile|Profiles|Patterns|Cards|Blackjack)/i.test(el.textContent || '')
+            ) || children.find(el =>
+                el.tagName === 'DIV' &&
+                el.classList.contains('bgd') &&
+                !el.classList.contains('colcon') &&
+                !!el.querySelector('input[type="submit"], select, #bulk_selected_count')
+            ) || null;
+        }
+
+        function addToolbar() {
+            if (!isPerksPage()) return false;
+            if (document.getElementById(TOOLBAR_ID)) return true;
+
+            const form = document.querySelector('#perk-action-form');
+            const colcon = form
+                ? form.querySelector('.colcon')
+                : document.querySelector('#maincen .colcon, #maincenc .colcon, .colcon');
+            const selectedPanel = form ? getSelectedPerksPanel(form) : null;
+
+            // Consumables has #perk-action-form + Selected Perks.  Profile
+            // Patterns and Blackjack Cards do not have that selected panel/form;
+            // they only have the tab tools and the sortable .colcon table.
+            if (!selectedPanel && !colcon) return false;
+
+            addExtraStyle();
+
+            const wrapper = document.createElement('div');
+            wrapper.id = TOOLBAR_ID;
+            wrapper.className = 'bgd i wb mb';
+
+            const title = document.createElement('div');
+            title.className = 'bgd myc';
+            title.textContent = 'Sort Perks';
+
+            const inner = document.createElement('div');
+            inner.className = 'bgl ug-sort-inner';
+
+            const grid = document.createElement('div');
+            grid.className = 'ug-sort-grid';
+
+            grid.appendChild(makeInputButton('Name: A → Z', () => sortAllTables(getPerkNameClean, 'asc')));
+            grid.appendChild(makeInputButton('Name: Z → A', () => sortAllTables(getPerkNameClean, 'desc')));
+            grid.appendChild(makeInputButton('Amount: High → Low', () => sortAllTables(getPerkAmount, 'desc')));
+            grid.appendChild(makeInputButton('Amount: Low → High', () => sortAllTables(getPerkAmount, 'asc')));
+            grid.appendChild(makeInputButton('Expires: High → Low', () => sortAllTables(getExpires, 'desc')));
+            grid.appendChild(makeInputButton('Expires: Low → High', () => sortAllTables(getExpires, 'asc')));
+            grid.appendChild(makeInputButton('Sale: High → Low', () => sortAllTables(getForSalePrice, 'desc')));
+            grid.appendChild(makeInputButton('Sale: Low → High', () => sortAllTables(getForSalePrice, 'asc')));
+
+            inner.appendChild(grid);
+            wrapper.appendChild(title);
+            wrapper.appendChild(inner);
+
+            if (selectedPanel) {
+                selectedPanel.classList.add('ug-perk-selected-box');
+                selectedPanel.insertAdjacentElement('afterend', wrapper);
+                console.log('[UG Perks Sort] Toolbar added beside Selected panel.');
+            } else if (colcon) {
+                // Profile Patterns and Blackjack Cards do not have the Selected
+                // Perks action panel, so pair the toolbar beside their main
+                // sortable table area instead.
+                wrapper.classList.add('ug-perk-table-side');
+
+                let layout = document.getElementById('ug-perk-table-side-layout');
+                if (!layout) {
+                    layout = document.createElement('div');
+                    layout.id = 'ug-perk-table-side-layout';
+                    colcon.insertAdjacentElement('beforebegin', layout);
+                    layout.appendChild(colcon);
+                }
+
+                if (!layout.contains(wrapper)) {
+                    layout.appendChild(wrapper);
+                }
+                console.log('[UG Perks Sort] Toolbar added beside sortable tab table.');
+            }
+
+            return true;
+        }
+
+        function scheduleInit() {
+            if (!isPerksPage()) return;
+
+            const tries = [0, 250, 750, 1500, 3000];
+            tries.forEach(delay => setTimeout(addToolbar, delay));
+
+            const observer = new MutationObserver(() => {
+                if (document.getElementById(TOOLBAR_ID)) {
+                    observer.disconnect();
+                    return;
+                }
+                addToolbar();
+            });
+
+            const startObserver = () => {
+                if (document.body) {
+                    observer.observe(document.body, { childList: true, subtree: true });
+                }
+            };
+
+            if (document.body) startObserver();
+            else document.addEventListener('DOMContentLoaded', startObserver, { once: true });
+        }
+
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', scheduleInit, { once: true });
+        } else {
+            scheduleInit();
+        }
+        window.addEventListener('load', addToolbar, { once: true });
+    })();
+
 })();
