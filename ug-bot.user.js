@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Full UG Bot
 // @namespace    ug-bot
-// @version      2.10.0
+// @version      2.10.1
 // @description  Auto-runs crimes, GTA, melting, repair, missions, drug running with Swiss Bank management, live log, session stats, action checkboxes, jail handling, runtime tracking, melt pagination, repair cycles, automatic CTC solving, and point-spending features.
 // @match        *://www.underworldgangsters.com/*
 // @match        *://underworldgangsters.com/*
@@ -605,7 +605,7 @@
     // BOT CONFIG
     // =========================================================================
 
-    const SCRIPT_VERSION = '2.10.0';
+    const SCRIPT_VERSION = '2.10.1';
 
     const CRIME_DEFS = [
         { id: 'gang', name: 'Gang Activities' },
@@ -6320,7 +6320,7 @@
             //   pb=Bullets, pc=Cars, pcv=Bullet value, pd=Double cash, pib=Always bust,
             //   pmd=Double melts, pm=Cash/Money, pn=Always successful, ps=Rare cars, px=Double XP, ppbot=BG
             const extendChecks = [
-                { enabled: state.extendBgs,          sel: 'table.ppbot', label: 'BG',            threshold: null },
+                { enabled: state.extendBgs,          sel: 'table.ppbot tr.sortable-row, table.pbot', label: 'BG',            threshold: null },
                 { enabled: state.extendCars,          sel: 'table.pc',    label: 'Cars',          threshold: null },
                 { enabled: state.extendBullets,       sel: 'table.pb',    label: 'Bullets',       threshold: state.extendBulletsThreshold },
                 { enabled: state.extendBulletValue,   sel: 'table.pcv',   label: 'Bullet value',  threshold: state.extendBulletValueThreshold },
@@ -6443,7 +6443,7 @@ async function doQTPerkRedeem() {
 
             // 3. BGs — always redeem all
             if (state.redeemBg) {
-                await redeemIds(getRows('table.ppbot').map(r => r.dataset.id).filter(Boolean), 'BGs');
+                await redeemIds(getRows('table.ppbot tr.sortable-row, table.pbot').map(r => r.dataset.id).filter(Boolean), 'BGs');
             }
 
             // 4. Double cash — redeem all if crimes enabled
