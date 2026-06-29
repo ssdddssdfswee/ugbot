@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Full UG Bot
 // @namespace    ug-bot
-// @version      2.10.1
+// @version      2.10.4
 // @description  Auto-runs crimes, GTA, melting, repair, missions, drug running with Swiss Bank management, live log, session stats, action checkboxes, jail handling, runtime tracking, melt pagination, repair cycles, automatic CTC solving, and point-spending features.
 // @match        *://www.underworldgangsters.com/*
 // @match        *://underworldgangsters.com/*
@@ -605,7 +605,7 @@
     // BOT CONFIG
     // =========================================================================
 
-    const SCRIPT_VERSION = '2.10.1';
+    const SCRIPT_VERSION = '2.10.4';
 
     const CRIME_DEFS = [
         { id: 'gang', name: 'Gang Activities' },
@@ -1568,6 +1568,10 @@
         set securityVerificationRefreshCount(v) { setSetting('securityVerificationRefreshCount', Math.max(0, Number(v) || 0)); },
         get securityVerificationLastLogAt()  { return Number(getSetting('securityVerificationLastLogAt', 0)); },
         set securityVerificationLastLogAt(v) { setSetting('securityVerificationLastLogAt', Number(v) || 0); },
+        get securityVerificationHoldActive()  { return !!getSetting('securityVerificationHoldActive', false); },
+        set securityVerificationHoldActive(v) { setSetting('securityVerificationHoldActive', !!v); },
+        get securityVerificationLastReloadAt()  { return Number(getSetting('securityVerificationLastReloadAt', 0)); },
+        set securityVerificationLastReloadAt(v) { setSetting('securityVerificationLastReloadAt', Number(v) || 0); },
 
         get nextMeltReadyAt()      { return Number(getSetting('nextMeltReadyAt', 0)); },
         set nextMeltReadyAt(v)     { setSetting('nextMeltReadyAt', Number(v)); },
@@ -1716,6 +1720,8 @@
     let loopBusy         = false;
     let autoBuyGunBusy   = false;
     let reloadPending    = false;
+    let reloadPendingStartedAt = 0;
+    let securityHoldTimersPaused = false;
     let heartbeatHandle  = null;
     let nextReloadHandle = null;
     let jailObserver     = null;
@@ -2095,17 +2101,31 @@
             .replaceAll('>', '&gt;');
     }
 
+    function markReloadPending(reason = '') {
+        reloadPending = true;
+        reloadPendingStartedAt = now();
+        if (reason) setSetting('reloadPendingReason', reason);
+    }
+
+    function clearReloadPending(reason = '') {
+        const wasPending = reloadPending;
+        reloadPending = false;
+        reloadPendingStartedAt = 0;
+        if (reason && wasPending) addLiveLog(reason);
+        setSetting('reloadPendingReason', '');
+    }
+
     function clearScheduledReload() {
         if (nextReloadHandle) {
             clearTimeout(nextReloadHandle);
             nextReloadHandle = null;
         }
-        reloadPending = false;
+        clearReloadPending();
     }
 
     function scheduleReload(ms) {
         if (reloadPending) return;
-        reloadPending = true;
+        markReloadPending('scheduled-reload');
         addLiveLog(`Reload scheduled in ${Math.round(ms / 1000)}s`);
         nextReloadHandle = setTimeout(() => window.location.reload(), ms);
     }
@@ -2153,9 +2173,9 @@
         return CTC.isVisible();
     }
 
-    const SECURITY_VERIFICATION_FIRST_WAIT_MS = 12000;
-    const SECURITY_VERIFICATION_RETRY_WAIT_MS = 25000;
-    const SECURITY_VERIFICATION_MAX_WAIT_MS   = 60000;
+    const SECURITY_VERIFICATION_FIRST_WAIT_MS = 15000;
+    const SECURITY_VERIFICATION_RETRY_WAITS_MS = [25000, 45000, 90000, 180000];
+    const SECURITY_VERIFICATION_RELOAD_STUCK_MS = 15000;
 
     function pageTextWithoutBotPanel() {
         try {
@@ -2192,18 +2212,71 @@
         ].some(phrase => txt.includes(phrase));
     }
 
+    function clearSecurityHoldTimersOnly() {
+        if (bgCrimeTimer)       { clearTimeout(bgCrimeTimer);       bgCrimeTimer = null; }
+        if (diceJoinTimer)      { clearTimeout(diceJoinTimer);      diceJoinTimer = null; }
+        if (qtSniperTimer)      { clearTimeout(qtSniperTimer);      qtSniperTimer = null; }
+        if (qtPerkExtendTimer)  { clearTimeout(qtPerkExtendTimer);  qtPerkExtendTimer = null; }
+        if (qtPerkRedeemTimer)  { clearTimeout(qtPerkRedeemTimer);  qtPerkRedeemTimer = null; }
+        if (bgSpamTimer)        { clearTimeout(bgSpamTimer);        bgSpamTimer = null; }
+        if (qtAuctionTimer)     { clearTimeout(qtAuctionTimer);     qtAuctionTimer = null; }
+        if (qtCarScanTimer)     { clearTimeout(qtCarScanTimer);     qtCarScanTimer = null; }
+        if (noReloadBustTimer)  { clearTimeout(noReloadBustTimer);  noReloadBustTimer = null; }
+        if (autoBuyBgTimer)     { clearTimeout(autoBuyBgTimer);     autoBuyBgTimer = null; }
+        if (protectedRecheckHandle) { clearTimeout(protectedRecheckHandle); protectedRecheckHandle = null; }
+    }
+
+    function pauseSecurityHoldModules() {
+        if (securityHoldTimersPaused) return;
+        securityHoldTimersPaused = true;
+        clearSecurityHoldTimersOnly();
+        bgCrimeToken = null;
+        bgCrimeNextPageFetchAt = Date.now() + 10000;
+        stopBustObserver();
+        addLiveLog('Security hold: paused background modules while verification is visible');
+    }
+
+    function resumeSecurityHoldModules() {
+        if (!securityHoldTimersPaused) return;
+        securityHoldTimersPaused = false;
+        addLiveLog('Security verification cleared — resuming paused modules');
+
+        if (bgCrimeActive)        scheduleBgCrimePoll();
+        if (diceJoinActive)       scheduleDiceJoin();
+        if (qtSniperActive)       scheduleQTSniperPoll();
+        if (qtPerkExtendActive)   scheduleQTPerkExtend();
+        if (qtPerkRedeemActive)   scheduleQTPerkRedeem();
+        if (bgSpamActive)         scheduleBgSpam();
+        if (qtAuctionActive)      scheduleQTAuctionScan();
+        if (qtCarScanActive)      scheduleQTCarScan();
+        if (noReloadBustActive)   scheduleNoReloadBustPoll();
+        if (autoBuyBgActive)      scheduleAutoBuyBg();
+    }
+
     function clearSecurityVerificationState() {
-        if (
+        const hadSecurityState = !!(
             state.securityVerificationFirstSeenAt ||
             state.securityVerificationNextRefreshAt ||
             state.securityVerificationRefreshCount ||
-            state.securityVerificationLastLogAt
-        ) {
-            state.securityVerificationFirstSeenAt  = 0;
+            state.securityVerificationLastLogAt ||
+            state.securityVerificationHoldActive ||
+            state.securityVerificationLastReloadAt
+        );
+
+        if (hadSecurityState) {
+            state.securityVerificationFirstSeenAt   = 0;
             state.securityVerificationNextRefreshAt = 0;
-            state.securityVerificationRefreshCount = 0;
-            state.securityVerificationLastLogAt    = 0;
+            state.securityVerificationRefreshCount  = 0;
+            state.securityVerificationLastLogAt     = 0;
+            state.securityVerificationHoldActive    = false;
+            state.securityVerificationLastReloadAt  = 0;
         }
+        resumeSecurityHoldModules();
+    }
+
+    function getSecurityRetryWaitMs(attempts) {
+        const idx = Math.max(0, Math.min(SECURITY_VERIFICATION_RETRY_WAITS_MS.length - 1, attempts));
+        return SECURITY_VERIFICATION_RETRY_WAITS_MS[idx];
     }
 
     async function maybeHandleSecurityVerificationPage() {
@@ -2213,15 +2286,32 @@
         }
 
         const nowMs = now();
+        if (!state.securityVerificationHoldActive) state.securityVerificationHoldActive = true;
+        pauseSecurityHoldModules();
+        updatePanel();
+
+        if (state.jailReleasesAt > 0 && nowMs >= state.jailReleasesAt) {
+            const lastLog = state.securityVerificationLastLogAt || 0;
+            if (nowMs - lastLog > 15000) {
+                state.securityVerificationLastLogAt = nowMs;
+                addLiveLog('Security watchdog: jail timer expired during verification — will leave jail when the game page is usable');
+            }
+        }
+
         let firstSeen = state.securityVerificationFirstSeenAt;
         if (!firstSeen) {
             firstSeen = nowMs;
             state.securityVerificationFirstSeenAt = firstSeen;
             state.securityVerificationNextRefreshAt = nowMs + SECURITY_VERIFICATION_FIRST_WAIT_MS;
             state.securityVerificationRefreshCount = 0;
+            state.securityVerificationLastReloadAt = 0;
             state.securityVerificationLastLogAt = nowMs;
-            addLiveLog(`Security verification detected — waiting ${Math.round(SECURITY_VERIFICATION_FIRST_WAIT_MS / 1000)}s for auto-check`);
+            addLiveLog(`Security verification detected — hold mode active, waiting ${Math.round(SECURITY_VERIFICATION_FIRST_WAIT_MS / 1000)}s for auto-check`);
             return true;
+        }
+
+        if (reloadPending && state.securityVerificationLastReloadAt && nowMs - state.securityVerificationLastReloadAt > SECURITY_VERIFICATION_RELOAD_STUCK_MS) {
+            clearReloadPending('Security watchdog: reload did not unload page — clearing reloadPending and keeping heartbeat alive');
         }
 
         const nextRefreshAt = state.securityVerificationNextRefreshAt || (firstSeen + SECURITY_VERIFICATION_FIRST_WAIT_MS);
@@ -2229,23 +2319,25 @@
             const lastLog = state.securityVerificationLastLogAt || 0;
             if (nowMs - lastLog > 30000) {
                 state.securityVerificationLastLogAt = nowMs;
-                addLiveLog(`Security verification still loading — waiting ${Math.max(1, Math.ceil((nextRefreshAt - nowMs) / 1000))}s`);
+                addLiveLog(`Security verification still loading — hold mode waiting ${Math.max(1, Math.ceil((nextRefreshAt - nowMs) / 1000))}s`);
             }
             return true;
         }
 
         const attempts = state.securityVerificationRefreshCount || 0;
-        const waitMs = Math.min(
-            SECURITY_VERIFICATION_MAX_WAIT_MS,
-            SECURITY_VERIFICATION_RETRY_WAIT_MS * Math.max(1, attempts + 1)
-        );
+        const waitMs = getSecurityRetryWaitMs(attempts);
         state.securityVerificationRefreshCount = attempts + 1;
         state.securityVerificationNextRefreshAt = nowMs + waitMs;
         state.securityVerificationLastLogAt = nowMs;
-        addLiveLog(`Security verification still visible — refreshing current page, then waiting ${Math.round(waitMs / 1000)}s`);
+        state.securityVerificationLastReloadAt = nowMs;
+        addLiveLog(`Security verification still visible — refreshing once, then holding ${Math.round(waitMs / 1000)}s`);
         await wait(rand(500, 1000));
-        reloadPending = true;
-        navigateToUrl(window.location.href);
+        markReloadPending('security-verification-refresh');
+        try {
+            window.location.reload();
+        } catch (_) {
+            navigateToUrl(window.location.href);
+        }
         return true;
     }
 
@@ -2270,7 +2362,7 @@
 
         saveScrollPositions();
         clearScheduledReload();
-        reloadPending = true;
+        markReloadPending(`goto:${pageName}`);
         const url = new URL(window.location.href);
         url.searchParams.set('p', pageName);
 
@@ -7864,6 +7956,11 @@ async function doQTPerkRedeem() {
     }
 
     async function doBgCrimePoll() {
+        if (state.securityVerificationHoldActive || hasSecurityVerificationPage()) {
+            bgCrimeNextPageFetchAt = Date.now() + 10000;
+            scheduleBgCrimePoll();
+            return;
+        }
         if (!bgCrimeActive || !state.bgCrimeEnabled || !state.enabled || crimePaused) { scheduleBgCrimePoll(); return; }
         // BG Crime uses AJAX and should keep committing while Kill/BG Farm is
         // merely waiting/searching/verifying. In v47 this was blocked by
@@ -9113,6 +9210,7 @@ async function doQTPerkRedeem() {
     }
 
     async function doNoReloadBustPoll() {
+        if (state.securityVerificationHoldActive || hasSecurityVerificationPage()) { scheduleNoReloadBustPoll(); return; }
         if (!noReloadBustActive) return;
         try {
             const resp = await fetch('/a/jailn.php', {
@@ -11341,7 +11439,12 @@ async function doQTPerkRedeem() {
                         clearStaleBgRelation(expectedVerifiedBg, target, `fresh verify found ${bgName} instead`);
                     }
 
-                    if (tIdx !== -1) { players[tIdx].bodyguard = bgName; saveKillPlayers(players); }
+                    if (tIdx !== -1) {
+                        players[tIdx].bodyguard = bgName;
+                        players[tIdx].lastBgCheck = now();
+                        delete players[tIdx].bgFarmWaitUntil;
+                        saveKillPlayers(players);
+                    }
 
                     // Add BG to kill list if not already there
                     const bgIdx = players.findIndex(p => p.name.toLowerCase() === bgName.toLowerCase());
@@ -13082,7 +13185,15 @@ async function doQTPerkRedeem() {
     // =========================================================================
 
     async function tick() {
-        if (loopBusy || reloadPending) return;
+        if (loopBusy) return;
+        if (reloadPending) {
+            const pendingFor = reloadPendingStartedAt ? now() - reloadPendingStartedAt : 0;
+            if (!nextReloadHandle && pendingFor > SECURITY_VERIFICATION_RELOAD_STUCK_MS) {
+                clearReloadPending('Navigation watchdog: reload/navigation did not unload page — clearing reloadPending');
+            } else {
+                return;
+            }
+        }
 
         // ── Auto account creation — runs even when bot is paused ──────────────
         // Death navigates to the login page regardless of bot state, so this
@@ -13162,6 +13273,41 @@ async function doQTPerkRedeem() {
                 gotoPage('crimes');
             } finally { loopBusy = false; }
             return;
+        }
+
+        // If a BG Farm BG shot is blocked by kill penalty, park only the real
+        // BG kill action and free the normal BG Farm interval checks. Penalty
+        // can last a long time, so the original target must still be re-checked
+        // every configured BG Check interval in case they swap/drop BG.
+        const penaltyBlockedBgFarmShot = state.pendingKillAction;
+        if (penaltyBlockedBgFarmShot &&
+            penaltyBlockedBgFarmShot.stage === 'bg_shoot' &&
+            penaltyBlockedBgFarmShot.bgFor &&
+            isPlayerBgFarmEnabled(penaltyBlockedBgFarmShot.bgFor) &&
+            isKillPenaltyTooHigh()) {
+            const bgName = penaltyBlockedBgFarmShot.targetName;
+            const bgFor  = penaltyBlockedBgFarmShot.bgFor;
+            const parkedPenaltyAction = buildPenaltyDeferredAction(stripBgFarmVerification({
+                stage: 'bg_shoot',
+                targetName: bgName,
+                bgFor,
+                shootAfterBg: penaltyBlockedBgFarmShot.shootAfterBg
+            }));
+            if (parkedPenaltyAction) state.killPenaltyPendingAction = parkedPenaltyAction;
+            state.pendingKillAction = null;
+            state.killLoopActive = false;
+            state.killBgSpamPaused = false;
+            state.killBgWaitUntil = 0;
+
+            if (state.penaltyDropsAt && state.penaltyDropsAt > now()) {
+                addLiveLog(`Kill loop: BG shot for ${bgName} paused by penalty — BG Farm checks for ${bgFor} will continue`);
+            } else if (!state.pendingPenaltyPage && !isKillPenaltyPage()) {
+                addLiveLog(`Kill loop: BG shot for ${bgName} paused by penalty — calculating drop time; BG Farm checks for ${bgFor} will continue`);
+                state.pendingPenaltyPage = true;
+                await wait(navRand());
+                gotoPage('kill-penalty');
+                return;
+            }
         }
 
         // Pending Swiss Bank actions are transactional and must take priority
@@ -13550,6 +13696,7 @@ async function doQTPerkRedeem() {
             const players = getKillPlayers();
             const nowMs = now();
             const globalWaitExpired = !(state.killBgWaitUntil > nowMs);
+            let dueBgFarmIntervalPlayer = null;
             const hasBgFarmPending = players.some(p => {
                 if (!isPlayerBgFarmEnabled(p.name)) return false;
                 if (p.status !== KILL_STATUS.ALIVE) return false;
@@ -13566,7 +13713,10 @@ async function doQTPerkRedeem() {
                 if (originalTargetStillPending) return false;
                 // BG Farm interval checks must run even while a known BG is still being searched,
                 // because the original player may swap to a different BG before the old BG is found.
-                if (dueMs <= 0) return true;
+                if (dueMs <= 0) {
+                    dueBgFarmIntervalPlayer = p;
+                    return true;
+                }
                 // bgFarmWaitUntil only suppresses non-interval readiness checks; the interval above wins.
                 if (p.bgFarmWaitUntil && p.bgFarmWaitUntil > nowMs && !globalWaitExpired) return false;
                 // BG is found and ready to shoot
@@ -13606,22 +13756,32 @@ async function doQTPerkRedeem() {
                 return false;
             });
             if (hasBgFarmPending && !(state.killLoopCooldownUntil > Date.now())) {
-                const foundNamesOnPage = new Set(
-                    [...document.querySelectorAll('.bgl.i.wb .bgm.chs:not(.pd) a[href*="?p=profile&u="]')]
-                        .map(a => { try { return new URL(a.getAttribute('href'), window.location.href).searchParams.get('u').toLowerCase(); } catch(_){ return ''; } })
-                        .filter(Boolean)
-                );
-                const schedulerBgQueueResult = queueFoundBgFarmVerificationFromPage(players, foundNamesOnPage, 'BG Farm scheduler saw found BG');
-                if (schedulerBgQueueResult === 'defer_interval') {
-                    // Already checked recently and only the BG kill is waiting
-                    // for bullets. Leave normal BG Farm timing in charge.
-                } else if (!schedulerBgQueueResult) {
-                    state.killLoopActive    = true;
-                    state.killBgSpamPaused  = true;
-                    state.pendingKillAction = { stage: 'bgcheck' };
+                if (dueBgFarmIntervalPlayer) {
+                    addLiveLog(`Kill loop: BG Farm interval due for ${dueBgFarmIntervalPlayer.name} — queuing fresh BG check`);
+                    queueBgFarmCheck(
+                        dueBgFarmIntervalPlayer.name,
+                        isPlayerShootEnabled(dueBgFarmIntervalPlayer.name),
+                        { force: true }
+                    );
                     stopBgSpam();
                 } else {
-                    stopBgSpam();
+                    const foundNamesOnPage = new Set(
+                        [...document.querySelectorAll('.bgl.i.wb .bgm.chs:not(.pd) a[href*="?p=profile&u="]')]
+                            .map(a => { try { return new URL(a.getAttribute('href'), window.location.href).searchParams.get('u').toLowerCase(); } catch(_){ return ''; } })
+                            .filter(Boolean)
+                    );
+                    const schedulerBgQueueResult = queueFoundBgFarmVerificationFromPage(players, foundNamesOnPage, 'BG Farm scheduler saw found BG');
+                    if (schedulerBgQueueResult === 'defer_interval') {
+                        // Already checked recently and only the BG kill is waiting
+                        // for bullets. Leave normal BG Farm timing in charge.
+                    } else if (!schedulerBgQueueResult) {
+                        state.killLoopActive    = true;
+                        state.killBgSpamPaused  = true;
+                        state.pendingKillAction = { stage: 'bgcheck' };
+                        stopBgSpam();
+                    } else {
+                        stopBgSpam();
+                    }
                 }
             }
         }
