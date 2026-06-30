@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Full UG Bot
 // @namespace    ug-bot
-// @version      2.10.4
+// @version      3.0.6
 // @description  Auto-runs crimes, GTA, melting, repair, missions, drug running with Swiss Bank management, live log, session stats, action checkboxes, jail handling, runtime tracking, melt pagination, repair cycles, automatic CTC solving, and point-spending features.
 // @match        *://www.underworldgangsters.com/*
 // @match        *://underworldgangsters.com/*
@@ -9,7 +9,9 @@
 // @grant        GM_setValue
 // @grant        GM_getTab
 // @grant        GM_saveTab
+// @grant        unsafeWindow
 // @run-at       document-start
+// @require      https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js
 // @updateURL    https://raw.githubusercontent.com/ssdddssdfswee/ugbot/main/ug-bot.user.js
 // @downloadURL  https://raw.githubusercontent.com/ssdddssdfswee/ugbot/main/ug-bot.user.js
 // ==/UserScript==
@@ -605,7 +607,39 @@
     // BOT CONFIG
     // =========================================================================
 
-    const SCRIPT_VERSION = '2.10.4';
+    const SCRIPT_VERSION = '3.0.6';
+
+
+    // =========================================================================
+    // SHARED KILL PLAYER LIST SYNC
+    // =========================================================================
+    // Username-only Supabase sync for the Kill Player List.
+    // This uploads/downloads names only. It never uploads per-player settings,
+    // checkboxes, timers, pending kill actions, BG flags, or local status data.
+    const KILL_SHARED_SYNC = {
+        enabled: true,
+        playerId: 'player2', // Your friend should use 'player2'
+        intervalMs: 2 * 60 * 1000,
+        tableName: 'shared_kill_players',
+        deadTableName: 'shared_kill_dead_players',
+        supabaseUrl: 'https://vphqofqlrjplbsthhfvv.supabase.co',
+        supabaseKey: 'sb_publishable_LdG4Ud1lJyV6pzVgEOjyHA_OaxGT11o',
+
+        // Exact usernames that should never be uploaded to Supabase or
+        // downloaded back into the local Player List. Edit this list if
+        // staff/unkillable names change. Names are matched case-insensitively.
+        excludedNames: [
+            'Crisy',
+            'Aphotic',
+            'Cosmic'
+        ],
+
+        uploadBatchSize: 500,
+        deleteBatchSize: 500,
+        downloadPageSize: 1000,
+        maxDownloadNames: 20000,
+        maxDeadDownloadNames: 50000
+    };
 
     const CRIME_DEFS = [
         { id: 'gang', name: 'Gang Activities' },
@@ -834,6 +868,13 @@
         killSearchEnabled:      false,
         killProtectedRecheckEnabled:  false,
         killProtectedRecheckMins:     5,
+
+        // Kill player finder settings — searches /a/find.php by prefix and
+        // adds newly discovered alive usernames to the Player List.
+        killPlayerFinderEnabled:      false,
+        killPlayerFinderMode:         'all', // first | second | all
+        killPlayerFinderDelayMs:      200,
+        killPlayerFinderRunEveryMins: 360,
 
         // Kill BG check / shoot loop settings
         killBgCheckEnabled:      false,  // Global BG check loop toggle
@@ -1401,6 +1442,27 @@
         get killProtectedRecheckMins()    { return Number(getSetting('killProtectedRecheckMins', DEFAULTS.killProtectedRecheckMins)) || DEFAULTS.killProtectedRecheckMins; },
         set killProtectedRecheckMins(v)   { setSetting('killProtectedRecheckMins', Number(v)); },
 
+        get killPlayerFinderEnabled() { return !!getSetting('killPlayerFinderEnabled', DEFAULTS.killPlayerFinderEnabled); },
+        set killPlayerFinderEnabled(v){ setSetting('killPlayerFinderEnabled', !!v); },
+        get killPlayerFinderMode() {
+            const mode = String(getSetting('killPlayerFinderMode', DEFAULTS.killPlayerFinderMode) || DEFAULTS.killPlayerFinderMode).toLowerCase();
+            return ['first', 'second', 'all'].includes(mode) ? mode : DEFAULTS.killPlayerFinderMode;
+        },
+        set killPlayerFinderMode(v) {
+            const mode = String(v || DEFAULTS.killPlayerFinderMode).toLowerCase();
+            setSetting('killPlayerFinderMode', ['first', 'second', 'all'].includes(mode) ? mode : DEFAULTS.killPlayerFinderMode);
+        },
+        get killPlayerFinderDelayMs() {
+            return Math.max(100, Math.min(5000, Number(getSetting('killPlayerFinderDelayMs', DEFAULTS.killPlayerFinderDelayMs)) || DEFAULTS.killPlayerFinderDelayMs));
+        },
+        set killPlayerFinderDelayMs(v) { setSetting('killPlayerFinderDelayMs', Math.max(100, Math.min(5000, Number(v) || DEFAULTS.killPlayerFinderDelayMs))); },
+        get killPlayerFinderRunEveryMins() {
+            return Math.max(5, Math.min(1440, Number(getSetting('killPlayerFinderRunEveryMins', DEFAULTS.killPlayerFinderRunEveryMins)) || DEFAULTS.killPlayerFinderRunEveryMins));
+        },
+        set killPlayerFinderRunEveryMins(v) { setSetting('killPlayerFinderRunEveryMins', Math.max(5, Math.min(1440, Number(v) || DEFAULTS.killPlayerFinderRunEveryMins))); },
+        get killPlayerFinderState() { return getSetting('killPlayerFinderState', null); },
+        set killPlayerFinderState(v) { setSetting('killPlayerFinderState', v); },
+
         get killSearchLoopActive()    { return !!getSetting('killSearchLoopActive', false); },
         set killSearchLoopActive(v)   { setSetting('killSearchLoopActive', !!v); },
 
@@ -1855,6 +1917,11 @@
     let killScanOnlineInput         = null;
     let killScanIntervalEl          = null;
     let killSearchInput             = null;
+    let killPlayerFinderInput       = null;
+    let killPlayerFinderModeEl      = null;
+    let killPlayerFinderDelayEl     = null;
+    let killPlayerFinderRunEveryEl  = null;
+    let killPlayerFinderStatusEl    = null;
     let killBgCheckInput            = null;
     let killBgSpamInput             = null;
     let killBgSpamIntervalEl        = null;
@@ -2157,6 +2224,7 @@
         stopAutoBuyBg();
         stopBonusPointsSpender();
         stopBustObserver();
+        pauseKillPlayerFinderForBotPause();
         clearScheduledReload();
         state.gtaResetLoopActive   = false;
         state.meltResetLoopActive  = false;
@@ -4891,7 +4959,9 @@
 
     // Saves the player list back to GM storage, removing dead players.
     function saveKillPlayers(players) {
-        state.killPlayers = players.filter(p => p.status !== KILL_STATUS.DEAD);
+        const list = Array.isArray(players) ? players : [];
+        rememberKillSharedDeadPlayersFromList(list);
+        state.killPlayers = list.filter(p => p.status !== KILL_STATUS.DEAD);
     }
 
     // Adds new players from Players Online to the list.
@@ -4915,8 +4985,809 @@
         }
 
         // Remove dead players when saving
+        rememberKillSharedDeadPlayersFromList(existing);
         state.killPlayers = existing.filter(p => p.status !== KILL_STATUS.DEAD);
         return added;
+    }
+
+
+    // -------------------------------------------------------------------------
+    // Shared Kill Player List Sync (Supabase, usernames only)
+    // -------------------------------------------------------------------------
+
+    let killSharedSyncClient = null;
+    let killSharedSyncTimer = null;
+    let killSharedSyncRunning = false;
+    let killSharedSyncConfigWarned = false;
+    let killSharedSyncLibraryWarned = false;
+
+    function cleanKillSharedSyncName(rawName) {
+        const name = String(rawName || '').replace(/\s+/g, ' ').trim();
+        if (!name || name.length > 50) return '';
+        if (/[\u0000-\u001F\u007F<>]/.test(name)) return '';
+        return name;
+    }
+
+    function getKillSharedSyncNameKey(name) {
+        return cleanKillSharedSyncName(name).toLowerCase();
+    }
+
+    function isKillSharedSyncExcludedName(rawName) {
+        const key = getKillSharedSyncNameKey(rawName);
+        if (!key) return false;
+
+        const excludedNames = Array.isArray(KILL_SHARED_SYNC.excludedNames)
+            ? KILL_SHARED_SYNC.excludedNames
+            : [];
+
+        return excludedNames.some(excluded => getKillSharedSyncNameKey(excluded) === key);
+    }
+
+    function getKillSharedDeadPendingKey() {
+        return 'killSharedDeadNamesPending';
+    }
+
+    function getPendingKillSharedDeadNames() {
+        const raw = getSetting(getKillSharedDeadPendingKey(), []);
+        const source = Array.isArray(raw) ? raw : [];
+        const map = new Map();
+
+        for (const rawName of source) {
+            const name = cleanKillSharedSyncName(rawName);
+            const key = getKillSharedSyncNameKey(name);
+            if (!name || !key || isKillSharedSyncExcludedName(name)) continue;
+            if (!map.has(key)) map.set(key, name);
+        }
+
+        return [...map.values()];
+    }
+
+    function setPendingKillSharedDeadNames(names) {
+        const map = new Map();
+        for (const rawName of names || []) {
+            const name = cleanKillSharedSyncName(rawName);
+            const key = getKillSharedSyncNameKey(name);
+            if (!name || !key || isKillSharedSyncExcludedName(name)) continue;
+            if (!map.has(key)) map.set(key, name);
+        }
+        setSetting(getKillSharedDeadPendingKey(), [...map.values()]);
+    }
+
+    function rememberKillSharedDeadPlayers(names) {
+        const existing = getPendingKillSharedDeadNames();
+        const map = new Map(existing.map(name => [getKillSharedSyncNameKey(name), name]));
+        let added = 0;
+
+        for (const rawName of names || []) {
+            const name = cleanKillSharedSyncName(rawName);
+            const key = getKillSharedSyncNameKey(name);
+            if (!name || !key || isKillSharedSyncExcludedName(name) || map.has(key)) continue;
+            map.set(key, name);
+            added++;
+        }
+
+        if (added > 0) setSetting(getKillSharedDeadPendingKey(), [...map.values()]);
+        return added;
+    }
+
+    function rememberKillSharedDeadPlayersFromList(players) {
+        const deadNames = [];
+        for (const player of players || []) {
+            if (player && player.status === KILL_STATUS.DEAD) deadNames.push(player.name);
+        }
+        return rememberKillSharedDeadPlayers(deadNames);
+    }
+
+    function buildKillSharedDeadKeySet(names) {
+        const set = new Set();
+        for (const rawName of names || []) {
+            const key = getKillSharedSyncNameKey(rawName);
+            if (key && !isKillSharedSyncExcludedName(rawName)) set.add(key);
+        }
+        return set;
+    }
+
+    function getLocalKillPlayerNamesOnly(deadNameKeys = null) {
+        const map = new Map();
+        for (const player of getKillPlayers()) {
+            const name = cleanKillSharedSyncName(player && player.name);
+            const key = getKillSharedSyncNameKey(name);
+            if (!name || !key || isKillSharedSyncExcludedName(name)) continue;
+            if (deadNameKeys && deadNameKeys.has(key)) continue;
+            if (!map.has(key)) map.set(key, name);
+        }
+        return [...map.values()];
+    }
+
+    function isKillSharedSyncConfigured() {
+        if (!KILL_SHARED_SYNC.enabled) return false;
+        const url = String(KILL_SHARED_SYNC.supabaseUrl || '').trim();
+        const key = String(KILL_SHARED_SYNC.supabaseKey || '').trim();
+        if (!url || !key) return false;
+        if (url.includes('PASTE_YOUR_') || key.includes('PASTE_YOUR_')) return false;
+        if (!/^https:\/\/[^\s]+\.supabase\.co\/?$/i.test(url)) return false;
+        return true;
+    }
+
+    function getKillSharedSyncPlayerId() {
+        const id = String(KILL_SHARED_SYNC.playerId || '').trim().toLowerCase();
+        if (/^player\d+$/.test(id)) return id;
+        return 'player1';
+    }
+
+    function getKillSharedSyncClient() {
+        if (!isKillSharedSyncConfigured()) {
+            if (!killSharedSyncConfigWarned) {
+                killSharedSyncConfigWarned = true;
+                addLiveLog('Kill Sync: Supabase URL/key not configured yet — sync disabled');
+            }
+            return null;
+        }
+
+        if (killSharedSyncClient) return killSharedSyncClient;
+
+        const SupabaseLib =
+            window.supabase ||
+            globalThis.supabase ||
+            (typeof supabase !== 'undefined' ? supabase : null);
+
+        if (!SupabaseLib || typeof SupabaseLib.createClient !== 'function') {
+            if (!killSharedSyncLibraryWarned) {
+                killSharedSyncLibraryWarned = true;
+                addLiveLog('Kill Sync: Supabase library did not load — check @require/CDN');
+            }
+            return null;
+        }
+
+        killSharedSyncClient = SupabaseLib.createClient(
+            String(KILL_SHARED_SYNC.supabaseUrl).trim().replace(/\/$/, ''),
+            String(KILL_SHARED_SYNC.supabaseKey).trim()
+        );
+
+        return killSharedSyncClient;
+    }
+
+    async function uploadKillPlayerNamesToSharedList(deadNameKeys = null) {
+        const client = getKillSharedSyncClient();
+        if (!client) return { ok: false, uploaded: 0 };
+
+        const names = getLocalKillPlayerNamesOnly(deadNameKeys);
+        if (!names.length) return { ok: true, uploaded: 0 };
+
+        let uploaded = 0;
+        const batchSize = Math.max(1, Number(KILL_SHARED_SYNC.uploadBatchSize) || 500);
+        const playerId = getKillSharedSyncPlayerId();
+        const nowIso = new Date().toISOString();
+
+        for (let i = 0; i < names.length; i += batchSize) {
+            const batch = names.slice(i, i + batchSize).map(name => ({
+                name_key: getKillSharedSyncNameKey(name),
+                name,
+                last_seen_at: nowIso,
+                last_seen_by: playerId
+            })).filter(row => row.name_key && row.name);
+
+            if (!batch.length) continue;
+
+            const { error } = await client
+                .from(KILL_SHARED_SYNC.tableName)
+                .upsert(batch, {
+                    onConflict: 'name_key',
+                    ignoreDuplicates: false
+                });
+
+            if (error) {
+                addLiveLog(`Kill Sync: upload failed — ${error.message || error}`);
+                return { ok: false, uploaded };
+            }
+
+            uploaded += batch.length;
+        }
+
+        return { ok: true, uploaded };
+    }
+
+    async function uploadPendingKillSharedDeadPlayers() {
+        const client = getKillSharedSyncClient();
+        if (!client) return { ok: false, uploaded: 0, names: getPendingKillSharedDeadNames() };
+
+        const names = getPendingKillSharedDeadNames();
+        if (!names.length) return { ok: true, uploaded: 0, names: [] };
+
+        let uploaded = 0;
+        const batchSize = Math.max(1, Number(KILL_SHARED_SYNC.uploadBatchSize) || 500);
+        const playerId = getKillSharedSyncPlayerId();
+        const nowIso = new Date().toISOString();
+
+        for (let i = 0; i < names.length; i += batchSize) {
+            const batch = names.slice(i, i + batchSize).map(name => ({
+                name_key: getKillSharedSyncNameKey(name),
+                name,
+                last_dead_at: nowIso,
+                reported_by: playerId
+            })).filter(row => row.name_key && row.name);
+
+            if (!batch.length) continue;
+
+            const { error } = await client
+                .from(KILL_SHARED_SYNC.deadTableName)
+                .upsert(batch, {
+                    onConflict: 'name_key',
+                    ignoreDuplicates: false
+                });
+
+            if (error) {
+                addLiveLog(`Kill Sync: dead upload failed — ${error.message || error}`);
+                return { ok: false, uploaded, names };
+            }
+
+            uploaded += batch.length;
+        }
+
+        setPendingKillSharedDeadNames([]);
+        return { ok: true, uploaded, names };
+    }
+
+    async function downloadSharedKillDeadNameKeys() {
+        const client = getKillSharedSyncClient();
+        if (!client) return new Set();
+
+        const keys = new Set();
+        const pageSize = Math.max(1, Number(KILL_SHARED_SYNC.downloadPageSize) || 1000);
+        const maxNames = Math.max(pageSize, Number(KILL_SHARED_SYNC.maxDeadDownloadNames) || 50000);
+
+        for (let from = 0; from < maxNames; from += pageSize) {
+            const to = Math.min(from + pageSize - 1, maxNames - 1);
+            const { data, error } = await client
+                .from(KILL_SHARED_SYNC.deadTableName)
+                .select('name_key,name')
+                .order('name_key', { ascending: true })
+                .range(from, to);
+
+            if (error) {
+                addLiveLog(`Kill Sync: dead list download failed — ${error.message || error}`);
+                return keys;
+            }
+
+            const rows = data || [];
+            for (const row of rows) {
+                const key = cleanKillSharedSyncName(row && row.name_key).toLowerCase() || getKillSharedSyncNameKey(row && row.name);
+                if (key) keys.add(key);
+            }
+
+            if (rows.length < pageSize) break;
+        }
+
+        return keys;
+    }
+
+    async function deleteDeadNamesFromActiveSharedList(deadNameKeys) {
+        const client = getKillSharedSyncClient();
+        if (!client || !deadNameKeys || !deadNameKeys.size) return { ok: true, deleted: 0 };
+
+        const keys = [...deadNameKeys].filter(Boolean);
+        const batchSize = Math.max(1, Number(KILL_SHARED_SYNC.deleteBatchSize) || 500);
+        let deleted = 0;
+
+        for (let i = 0; i < keys.length; i += batchSize) {
+            const batch = keys.slice(i, i + batchSize);
+            const { error } = await client
+                .from(KILL_SHARED_SYNC.tableName)
+                .delete()
+                .in('name_key', batch);
+
+            if (error) {
+                addLiveLog(`Kill Sync: active dead cleanup failed — ${error.message || error}`);
+                return { ok: false, deleted };
+            }
+
+            deleted += batch.length;
+        }
+
+        return { ok: true, deleted };
+    }
+
+    function removeSharedDeadPlayersFromLocalList(deadNameKeys) {
+        if (!deadNameKeys || !deadNameKeys.size) return 0;
+
+        const players = state.killPlayers || [];
+        const kept = [];
+        let removed = 0;
+
+        for (const player of players) {
+            const key = getKillSharedSyncNameKey(player && player.name);
+            if (key && deadNameKeys.has(key)) {
+                removed++;
+                continue;
+            }
+            kept.push(player);
+        }
+
+        if (removed > 0) {
+            state.killPlayers = kept;
+            if (document.querySelector('#ug-bot-kill-list')) renderKillList();
+        }
+
+        return removed;
+    }
+
+    async function downloadSharedKillPlayerNames(deadNameKeys = null) {
+        const client = getKillSharedSyncClient();
+        if (!client) return [];
+
+        const names = [];
+        const pageSize = Math.max(1, Number(KILL_SHARED_SYNC.downloadPageSize) || 1000);
+        const maxNames = Math.max(pageSize, Number(KILL_SHARED_SYNC.maxDownloadNames) || 20000);
+
+        for (let from = 0; from < maxNames; from += pageSize) {
+            const to = Math.min(from + pageSize - 1, maxNames - 1);
+            const { data, error } = await client
+                .from(KILL_SHARED_SYNC.tableName)
+                .select('name')
+                .order('name_key', { ascending: true })
+                .range(from, to);
+
+            if (error) {
+                addLiveLog(`Kill Sync: download failed — ${error.message || error}`);
+                return [];
+            }
+
+            const rows = data || [];
+            for (const row of rows) {
+                const name = cleanKillSharedSyncName(row && row.name);
+                const key = getKillSharedSyncNameKey(name);
+                if (name && key && !isKillSharedSyncExcludedName(name) && !(deadNameKeys && deadNameKeys.has(key))) names.push(name);
+            }
+
+            if (rows.length < pageSize) break;
+        }
+
+        return names;
+    }
+
+    function mergeSharedKillNamesIntoLocalList(sharedNames, deadNameKeys = null) {
+        const players = getKillPlayers();
+        const existing = new Set(
+            players
+                .map(p => getKillSharedSyncNameKey(p && p.name))
+                .filter(Boolean)
+        );
+
+        let added = 0;
+
+        for (const rawName of sharedNames || []) {
+            const name = cleanKillSharedSyncName(rawName);
+            const key = getKillSharedSyncNameKey(name);
+            if (!name || !key || isKillSharedSyncExcludedName(name) || (deadNameKeys && deadNameKeys.has(key)) || existing.has(key)) continue;
+
+            players.push({
+                name,
+                status: KILL_STATUS.UNKNOWN,
+                lastChecked: 0,
+                firstSeen: now(),
+                searchCount: 0,
+                sharedSync: true
+            });
+
+            existing.add(key);
+            added++;
+        }
+
+        if (added > 0) {
+            saveKillPlayers(players);
+            if (document.querySelector('#ug-bot-kill-list')) renderKillList();
+            if (state.killSearchEnabled) state.killSearchLoopActive = true;
+        }
+
+        return added;
+    }
+
+    async function runKillSharedPlayerListSync() {
+        if (!KILL_SHARED_SYNC.enabled || killSharedSyncRunning) return;
+
+        killSharedSyncRunning = true;
+        try {
+            const pendingDeadNames = getPendingKillSharedDeadNames();
+            const pendingDeadKeys = buildKillSharedDeadKeySet(pendingDeadNames);
+            const deadUpload = await uploadPendingKillSharedDeadPlayers();
+
+            const downloadedDeadKeys = await downloadSharedKillDeadNameKeys();
+            const deadNameKeys = new Set([...pendingDeadKeys, ...downloadedDeadKeys]);
+
+            const removedLocalDead = removeSharedDeadPlayersFromLocalList(deadNameKeys);
+            const activeDeadCleanup = await deleteDeadNamesFromActiveSharedList(pendingDeadKeys);
+
+            const upload = await uploadKillPlayerNamesToSharedList(deadNameKeys);
+            if (!upload.ok) return;
+
+            const sharedNames = await downloadSharedKillPlayerNames(deadNameKeys);
+            const added = mergeSharedKillNamesIntoLocalList(sharedNames, deadNameKeys);
+
+            addLiveLog(`Kill Sync: uploaded ${upload.uploaded} active username(s), dead synced ${deadUpload.uploaded}, dead known ${deadNameKeys.size}, active cleanup ${activeDeadCleanup.deleted}, downloaded ${sharedNames.length}, added ${added} missing${removedLocalDead ? `, removed ${removedLocalDead} local dead` : ''}`);
+        } catch (e) {
+            addLiveLog(`Kill Sync: failed — ${e && e.message ? e.message : e}`);
+        } finally {
+            killSharedSyncRunning = false;
+        }
+    }
+
+    function startKillSharedPlayerListSync() {
+        if (!KILL_SHARED_SYNC.enabled) return;
+        if (killSharedSyncTimer) return;
+
+        // Run once soon after page load, then repeat every few minutes.
+        setTimeout(runKillSharedPlayerListSync, 5000);
+        killSharedSyncTimer = setInterval(
+            runKillSharedPlayerListSync,
+            Math.max(30000, Number(KILL_SHARED_SYNC.intervalMs) || (2 * 60 * 1000))
+        );
+
+        const mins = Math.round((Math.max(30000, Number(KILL_SHARED_SYNC.intervalMs) || (2 * 60 * 1000)) / 60000) * 10) / 10;
+        addLiveLog(`Kill Sync: started username-only sync every ${mins} minute(s)`);
+    }
+
+    function stopKillSharedPlayerListSync() {
+        if (killSharedSyncTimer) {
+            clearInterval(killSharedSyncTimer);
+            killSharedSyncTimer = null;
+        }
+    }
+
+
+
+    // -------------------------------------------------------------------------
+    // Kill Player Searcher (AJAX prefix finder)
+    // -------------------------------------------------------------------------
+
+    const KILL_PLAYER_FINDER_ROOTS_FIRST  = 'abcdefghijklm01234'.split('');
+    const KILL_PLAYER_FINDER_ROOTS_SECOND = 'nopqrstuvwxyz56789'.split('');
+    const KILL_PLAYER_FINDER_ROOTS_ALL    = 'abcdefghijklmnopqrstuvwxyz0123456789'.split('');
+    const KILL_PLAYER_FINDER_EXPAND_CHARS = 'abcdefghijklmnopqrstuvwxyz0123456789 '.split('');
+    const KILL_PLAYER_FINDER_MAX_PREFIX_LEN = 20;
+    const KILL_PLAYER_FINDER_FETCH_TIMEOUT_MS = 15000;
+    const KILL_PLAYER_FINDER_MAX_RETRIES = 3;
+
+    let killPlayerFinderTimer = null;
+    let killPlayerFinderRunning = false;
+    let killPlayerFinderDeadKeyCache = new Set();
+    let killPlayerFinderDeadKeyCacheAt = 0;
+
+    function getKillPlayerFinderBlankState(mode = state.killPlayerFinderMode) {
+        return {
+            running: false,
+            mode,
+            queue: [],
+            searched: 0,
+            found: 0,
+            added: 0,
+            deadSeen: 0,
+            errors: 0,
+            lastPrefix: '',
+            startedAt: 0,
+            completedAt: 0,
+            nextRunAt: 0,
+            lastSummaryAt: 0
+        };
+    }
+
+    function getKillPlayerFinderState() {
+        const raw = state.killPlayerFinderState;
+        const source = isPlainObject(raw) ? raw : getKillPlayerFinderBlankState();
+        const out = getKillPlayerFinderBlankState(source.mode || state.killPlayerFinderMode);
+        out.running = !!source.running;
+        out.mode = ['first', 'second', 'all'].includes(String(source.mode || '').toLowerCase()) ? String(source.mode).toLowerCase() : state.killPlayerFinderMode;
+        out.queue = Array.isArray(source.queue) ? source.queue.map(p => String(p || '')).filter(Boolean) : [];
+        out.searched = Math.max(0, Number(source.searched) || 0);
+        out.found = Math.max(0, Number(source.found) || 0);
+        out.added = Math.max(0, Number(source.added) || 0);
+        out.deadSeen = Math.max(0, Number(source.deadSeen) || 0);
+        out.errors = Math.max(0, Number(source.errors) || 0);
+        out.lastPrefix = String(source.lastPrefix || '');
+        out.startedAt = Number(source.startedAt) || 0;
+        out.completedAt = Number(source.completedAt) || 0;
+        out.nextRunAt = Number(source.nextRunAt) || 0;
+        out.lastSummaryAt = Number(source.lastSummaryAt) || 0;
+        return out;
+    }
+
+    function setKillPlayerFinderState(nextState) {
+        state.killPlayerFinderState = nextState;
+        updateKillPlayerFinderStatusEl();
+    }
+
+    function getKillPlayerFinderRootPrefixes(mode = state.killPlayerFinderMode) {
+        if (mode === 'first') return KILL_PLAYER_FINDER_ROOTS_FIRST.slice();
+        if (mode === 'second') return KILL_PLAYER_FINDER_ROOTS_SECOND.slice();
+        return KILL_PLAYER_FINDER_ROOTS_ALL.slice();
+    }
+
+    function resetKillPlayerFinderProgress(mode = state.killPlayerFinderMode, startNow = false) {
+        const nextState = getKillPlayerFinderBlankState(mode);
+        nextState.queue = getKillPlayerFinderRootPrefixes(mode);
+        nextState.running = !!startNow;
+        nextState.startedAt = startNow ? now() : 0;
+        nextState.nextRunAt = startNow ? 0 : now() + (state.killPlayerFinderRunEveryMins * 60 * 1000);
+        setKillPlayerFinderState(nextState);
+        return nextState;
+    }
+
+    function getKillPlayerFinderStatusText() {
+        if (!state.killPlayerFinderEnabled) return 'off';
+        if (!state.enabled) return 'bot paused';
+        const st = getKillPlayerFinderState();
+        if (st.running) {
+            const prefix = st.lastPrefix ? st.lastPrefix : '—';
+            return `${st.mode} - ${st.searched} searched - ${st.added} added - ${prefix} - queue ${st.queue.length}`;
+        }
+        if (st.nextRunAt > now()) {
+            const mins = Math.max(1, Math.ceil((st.nextRunAt - now()) / 60000));
+            return `next ${mins}m · ${st.added} added last`;
+        }
+        if (st.completedAt) return `complete · ${st.added} added last`;
+        return 'ready';
+    }
+
+    function updateKillPlayerFinderStatusEl() {
+        const el = killPlayerFinderStatusEl || document.querySelector('#ug-bot-kill-player-finder-status');
+        if (el) el.textContent = getKillPlayerFinderStatusText();
+    }
+
+    function pauseKillPlayerFinderForBotPause() {
+        try {
+            const st = getKillPlayerFinderState();
+            if (st.running) {
+                st.running = false;
+                setKillPlayerFinderState(st);
+            } else {
+                updateKillPlayerFinderStatusEl();
+            }
+        } catch (_) {}
+    }
+
+    function isKillPlayerFinderDue() {
+        if (!state.killPlayerFinderEnabled || !state.enabled) return false;
+        const st = getKillPlayerFinderState();
+        if (st.running) return true;
+        return !st.nextRunAt || st.nextRunAt <= now();
+    }
+
+    function maybeStartKillPlayerFinderRun() {
+        if (!state.killPlayerFinderEnabled || !state.enabled) return false;
+        let st = getKillPlayerFinderState();
+        const modeChanged = st.mode !== state.killPlayerFinderMode;
+        if (modeChanged) st = resetKillPlayerFinderProgress(state.killPlayerFinderMode, false);
+        if (st.running) return true;
+        if (st.nextRunAt && st.nextRunAt > now()) return false;
+        if (st.queue && st.queue.length) {
+            st.running = true;
+            if (!st.startedAt) st.startedAt = now();
+            setKillPlayerFinderState(st);
+            addLiveLog(`Player Searcher: resumed ${st.mode} mode with ${st.queue.length} queued prefix(es)`);
+            return true;
+        }
+        st = resetKillPlayerFinderProgress(state.killPlayerFinderMode, true);
+        addLiveLog(`Player Searcher: started ${st.mode} mode with ${st.queue.length} root prefix(es)`);
+        return true;
+    }
+
+    function syncKillPlayerFinderScheduler() {
+        if (!state.killPlayerFinderEnabled) {
+            if (killPlayerFinderTimer) {
+                clearInterval(killPlayerFinderTimer);
+                killPlayerFinderTimer = null;
+            }
+            updateKillPlayerFinderStatusEl();
+            return;
+        }
+
+        if (!state.enabled) {
+            pauseKillPlayerFinderForBotPause();
+        }
+
+        if (!killPlayerFinderTimer) {
+            killPlayerFinderTimer = setInterval(processKillPlayerFinderTick, 5000);
+            setTimeout(processKillPlayerFinderTick, 7000);
+        }
+        updateKillPlayerFinderStatusEl();
+    }
+
+    function isLikelySecurityHtml(html) {
+        const txt = String(html || '').replace(/\s+/g, ' ').toLowerCase();
+        return txt.includes('verify you are human') ||
+               txt.includes("verify you're human") ||
+               txt.includes('checking if the site connection is secure') ||
+               txt.includes('review the security of your connection') ||
+               txt.includes('cloudflare ray id') ||
+               txt.includes('cf-turnstile') ||
+               txt.includes('challenges.cloudflare.com');
+    }
+
+    async function fetchWithTimeout(url, options = {}, timeoutMs = KILL_PLAYER_FINDER_FETCH_TIMEOUT_MS) {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), timeoutMs);
+        try {
+            return await fetch(url, { ...options, signal: controller.signal });
+        } finally {
+            clearTimeout(timer);
+        }
+    }
+
+    async function searchKillPlayerFinderPrefix(prefix) {
+        const response = await fetchWithTimeout(`/a/find.php?u=${encodeURIComponent(prefix)}`, { credentials: 'include' });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const html = await response.text();
+        if (isLikelySecurityHtml(html)) throw new Error('security verification page returned');
+
+        const doc = new DOMParser().parseFromString(html, 'text/html');
+        const rows = [...doc.querySelectorAll('table tr')].slice(2);
+        return rows.map(row => {
+            const nameEl = row.querySelector('td a');
+            const statusEl = row.querySelector('td span');
+            if (!nameEl) return null;
+            const name = cleanKillSharedSyncName(nameEl.textContent);
+            if (!name) return null;
+            return {
+                name,
+                dead: !!(statusEl && /dead/i.test(statusEl.textContent || ''))
+            };
+        }).filter(Boolean);
+    }
+
+    function mergeKillPlayerFinderNamesIntoLocalList(names, deadNameKeys = null) {
+        const players = getKillPlayers();
+        const existing = new Set(players.map(p => getKillSharedSyncNameKey(p && p.name)).filter(Boolean));
+        let added = 0;
+
+        for (const rawName of names || []) {
+            const name = cleanKillSharedSyncName(rawName);
+            const key = getKillSharedSyncNameKey(name);
+            if (!name || !key || isKillSharedSyncExcludedName(name) || existing.has(key)) continue;
+            if (deadNameKeys && deadNameKeys.has(key)) continue;
+
+            players.push({
+                name,
+                status: KILL_STATUS.UNKNOWN,
+                lastChecked: 0,
+                firstSeen: now(),
+                searchCount: 0,
+                playerFinder: true
+            });
+            existing.add(key);
+            added++;
+        }
+
+        if (added > 0) {
+            saveKillPlayers(players);
+            if (document.querySelector('#ug-bot-kill-list')) renderKillList();
+            if (state.killSearchEnabled) state.killSearchLoopActive = true;
+        }
+
+        return added;
+    }
+
+    async function refreshKillPlayerFinderDeadKeyCache(force = false) {
+        if (!force && killPlayerFinderDeadKeyCacheAt && (now() - killPlayerFinderDeadKeyCacheAt) < 10 * 60 * 1000) {
+            return killPlayerFinderDeadKeyCache;
+        }
+        try {
+            killPlayerFinderDeadKeyCache = await downloadSharedKillDeadNameKeys();
+            killPlayerFinderDeadKeyCacheAt = now();
+        } catch (_) {
+            killPlayerFinderDeadKeyCache = new Set();
+            killPlayerFinderDeadKeyCacheAt = now();
+        }
+        return killPlayerFinderDeadKeyCache;
+    }
+
+    async function processKillPlayerFinderTick() {
+        if (killPlayerFinderRunning || !state.killPlayerFinderEnabled) return;
+        if (!state.enabled) {
+            pauseKillPlayerFinderForBotPause();
+            return;
+        }
+        if (hasSecurityVerificationPage && hasSecurityVerificationPage()) return;
+        if (!maybeStartKillPlayerFinderRun()) return;
+
+        const st = getKillPlayerFinderState();
+        if (!st.running || !st.queue.length) {
+            st.running = false;
+            st.completedAt = now();
+            st.nextRunAt = now() + (state.killPlayerFinderRunEveryMins * 60 * 1000);
+            setKillPlayerFinderState(st);
+            return;
+        }
+
+        killPlayerFinderRunning = true;
+        try {
+            await refreshKillPlayerFinderDeadKeyCache(false);
+            const delayMs = state.killPlayerFinderDelayMs;
+
+            // Process a small chunk per tick so the rest of the bot/UI stays responsive.
+            const maxPerTick = 25;
+            for (let i = 0; i < maxPerTick; i++) {
+                if (!state.killPlayerFinderEnabled || !state.enabled) {
+                    pauseKillPlayerFinderForBotPause();
+                    break;
+                }
+                if (hasSecurityVerificationPage && hasSecurityVerificationPage()) break;
+
+                const cur = getKillPlayerFinderState();
+                if (!cur.running || !cur.queue.length) {
+                    cur.running = false;
+                    cur.completedAt = now();
+                    cur.nextRunAt = now() + (state.killPlayerFinderRunEveryMins * 60 * 1000);
+                    setKillPlayerFinderState(cur);
+                    addLiveLog(`Player Searcher: complete — searched ${cur.searched}, added ${cur.added}, dead skipped ${cur.deadSeen}`);
+                    break;
+                }
+
+                const prefix = cur.queue[0];
+                cur.lastPrefix = prefix;
+                setKillPlayerFinderState(cur);
+
+                let results = null;
+                let lastError = null;
+                for (let attempt = 1; attempt <= KILL_PLAYER_FINDER_MAX_RETRIES; attempt++) {
+                    try {
+                        results = await searchKillPlayerFinderPrefix(prefix);
+                        lastError = null;
+                        break;
+                    } catch (e) {
+                        lastError = e;
+                        await wait(Math.min(10000, 1500 * attempt));
+                    }
+                }
+
+                const nextState = getKillPlayerFinderState();
+                if (lastError) {
+                    nextState.errors++;
+                    nextState.running = false;
+                    nextState.nextRunAt = now() + Math.min(15 * 60 * 1000, 30000 * Math.max(1, nextState.errors));
+                    setKillPlayerFinderState(nextState);
+                    addLiveLog(`Player Searcher: paused on "${prefix}" after error — ${lastError.message || lastError}`);
+                    break;
+                }
+
+                nextState.queue.shift();
+                nextState.searched++;
+                nextState.errors = 0;
+
+                const aliveNames = [];
+                const deadNames = [];
+                for (const item of results || []) {
+                    const key = getKillSharedSyncNameKey(item.name);
+                    if (!key || isKillSharedSyncExcludedName(item.name)) continue;
+                    if (item.dead) deadNames.push(item.name);
+                    else if (!killPlayerFinderDeadKeyCache.has(key)) aliveNames.push(item.name);
+                }
+
+                // Player Searcher is only for discovering alive usernames.
+                // Dead results from /a/find.php are skipped only; they are NOT queued
+                // for shared dead sync, otherwise the dead table would grow with every
+                // historical account seen during broad prefix crawling.
+                if (deadNames.length) {
+                    nextState.deadSeen += deadNames.length;
+                }
+
+                const added = mergeKillPlayerFinderNamesIntoLocalList(aliveNames, killPlayerFinderDeadKeyCache);
+                nextState.found += aliveNames.length;
+                nextState.added += added;
+
+                if ((results || []).length === 25 && prefix.length < KILL_PLAYER_FINDER_MAX_PREFIX_LEN) {
+                    for (const c of KILL_PLAYER_FINDER_EXPAND_CHARS) nextState.queue.push(prefix + c);
+                }
+
+                // Normal progress is displayed in the Player Searcher status row.
+                // Keep the main live log for start/complete/error events only.
+                nextState.lastSummaryAt = now();
+
+                setKillPlayerFinderState(nextState);
+                await wait(delayMs);
+            }
+        } finally {
+            killPlayerFinderRunning = false;
+            updateKillPlayerFinderStatusEl();
+        }
     }
 
     // Returns the next player to search based on priority:
@@ -4976,13 +5847,22 @@
         if (idx === -1) return;
 
         if (status === KILL_STATUS.DEAD) {
+            const deadName = cleanKillSharedSyncName(players[idx].name || name) || name;
+
+            // Queue confirmed dead players for shared dead sync before removing them.
+            // Previously this branch spliced the player out immediately, so the later
+            // Supabase sync could not see that the name had died and would re-add it
+            // from the active shared list as UNKNOWN.
+            const queuedDeadSync = rememberKillSharedDeadPlayers([deadName]);
+            if (queuedDeadSync > 0) addLiveLog(`Kill Sync: queued ${deadName} as dead for shared sync`);
+
             // Remove dead players entirely
             players.splice(idx, 1);
             addLiveLog(`Kill scanner: ${name} is dead — removed from list`);
             // Add to permanent dead list so syncKillExpiryFromPage never re-adds them
             const dead = state.killDeadPlayers || [];
-            if (!dead.some(n => n.toLowerCase() === name.toLowerCase())) {
-                dead.push(name);
+            if (!dead.some(n => n.toLowerCase() === deadName.toLowerCase())) {
+                dead.push(deadName);
                 state.killDeadPlayers = dead;
             }
         } else {
@@ -15043,6 +15923,11 @@ async function doQTPerkRedeem() {
         state.killScanOnlineEnabled  = killScanOnlineInput   ? killScanOnlineInput.checked   : state.killScanOnlineEnabled;
         state.killScanOnlineInterval = killScanIntervalEl    ? Number(killScanIntervalEl.value) : state.killScanOnlineInterval;
         state.killSearchEnabled      = killSearchInput       ? killSearchInput.checked       : state.killSearchEnabled;
+        state.killPlayerFinderEnabled = killPlayerFinderInput ? killPlayerFinderInput.checked : state.killPlayerFinderEnabled;
+        state.killPlayerFinderMode    = killPlayerFinderModeEl ? killPlayerFinderModeEl.value : state.killPlayerFinderMode;
+        state.killPlayerFinderDelayMs = killPlayerFinderDelayEl ? Number(String(killPlayerFinderDelayEl.value).replace(/[^0-9]/g, '')) : state.killPlayerFinderDelayMs;
+        state.killPlayerFinderRunEveryMins = killPlayerFinderRunEveryEl ? Number(String(killPlayerFinderRunEveryEl.value).replace(/[^0-9]/g, '')) : state.killPlayerFinderRunEveryMins;
+        syncKillPlayerFinderScheduler();
         state.killBgCheckEnabled     = killBgCheckInput      ? killBgCheckInput.checked      : state.killBgCheckEnabled;
         if (killBgSpamInput)       state.killBgSpamEnabled      = killBgSpamInput.checked;
         if (killBgSpamIntervalEl)  state.killBgSpamIntervalSecs = Number(killBgSpamIntervalEl.value) || 2;
@@ -15550,6 +16435,10 @@ async function doQTPerkRedeem() {
                             </select></td></tr>
 
                         <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-kill-search" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">Search players</td></tr>
+
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-kill-player-finder" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">Player Searcher</td><td colspan="2" style="vertical-align:middle;white-space:nowrap;padding:3px 0;width:1px;"><select id="ug-bot-kill-player-finder-mode" data-role="none" class="ug-compact-select"><option value="first">1st half</option><option value="second">2nd half</option><option value="all">All</option></select></td></tr>
+                        <tr><td></td><td colspan="3" style="color:#666;font-size:10px;padding:1px 0 1px 0;vertical-align:middle;white-space:nowrap;"><span style="margin-right:3px;">Delay</span><input id="ug-bot-kill-player-finder-delay" type="text" inputmode="numeric" class="ug-compact-input-sm" style="width:42px!important;max-width:42px!important;" placeholder="200" /><span style="margin:0 8px 0 3px;">ms</span><span style="margin-right:3px;">Every</span><input id="ug-bot-kill-player-finder-every" type="text" inputmode="numeric" class="ug-compact-input-sm" style="width:42px!important;max-width:42px!important;" placeholder="360" /><span style="margin-left:3px;">min</span></td></tr>
+                        <tr><td></td><td colspan="3" style="font-size:10px;color:#666;padding:0 0 4px 0;"><span id="ug-bot-kill-player-finder-status" style="color:#888;"></span></td></tr>
 
                         <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-kill-protected-recheck" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">Search protected</td><td style="vertical-align:middle;white-space:nowrap;padding:3px 0;width:1px;"><select id="ug-bot-kill-protected-recheck-mins" data-role="none" class="ug-compact-select">
                                 <option value="1">1 min</option>
@@ -16524,6 +17413,11 @@ async function doQTPerkRedeem() {
         killScanOnlineInput      = document.querySelector('#ug-bot-kill-scan-online');
         killScanIntervalEl       = document.querySelector('#ug-bot-kill-scan-interval');
         killSearchInput          = document.querySelector('#ug-bot-kill-search');
+        killPlayerFinderInput    = document.querySelector('#ug-bot-kill-player-finder');
+        killPlayerFinderModeEl   = document.querySelector('#ug-bot-kill-player-finder-mode');
+        killPlayerFinderDelayEl  = document.querySelector('#ug-bot-kill-player-finder-delay');
+        killPlayerFinderRunEveryEl = document.querySelector('#ug-bot-kill-player-finder-every');
+        killPlayerFinderStatusEl = document.querySelector('#ug-bot-kill-player-finder-status');
         killBgCheckInput         = document.querySelector('#ug-bot-kill-bgcheck');
         killBgSpamInput          = document.querySelector('#ug-bot-kill-bg-spam');
         killBgSpamIntervalEl     = document.querySelector('#ug-bot-kill-bg-spam-interval');
@@ -16893,6 +17787,11 @@ async function doQTPerkRedeem() {
             if (searchLabel) searchLabel.style.opacity = bgLoopCurrentlyOn ? '0.4' : '';
             if (searchLabel) searchLabel.style.cursor  = bgLoopCurrentlyOn ? 'default' : '';
         }
+        if (killPlayerFinderInput)      killPlayerFinderInput.checked = state.killPlayerFinderEnabled;
+        if (killPlayerFinderModeEl)     killPlayerFinderModeEl.value = state.killPlayerFinderMode;
+        if (killPlayerFinderDelayEl)    killPlayerFinderDelayEl.value = String(state.killPlayerFinderDelayMs);
+        if (killPlayerFinderRunEveryEl) killPlayerFinderRunEveryEl.value = String(state.killPlayerFinderRunEveryMins);
+        updateKillPlayerFinderStatusEl();
         if (killBgCheckInput)     killBgCheckInput.checked    = state.killBgCheckEnabled;
         if (killBgSpamInput)      killBgSpamInput.checked         = state.killBgSpamEnabled;
         if (killBgSpamIntervalEl) killBgSpamIntervalEl.value      = String(state.killBgSpamIntervalSecs);
@@ -16970,6 +17869,7 @@ async function doQTPerkRedeem() {
                 state.pausedReason = '';
                 clearScheduledReload();
                 updatePanel();
+                syncKillPlayerFinderScheduler();
                 startHeartbeat();
             }
         }
@@ -18218,6 +19118,11 @@ async function doQTPerkRedeem() {
         killScanOnlineInput     = document.querySelector('#ug-bot-kill-scan-online');
         killScanIntervalEl      = document.querySelector('#ug-bot-kill-scan-interval');
         killSearchInput         = document.querySelector('#ug-bot-kill-search');
+        killPlayerFinderInput   = document.querySelector('#ug-bot-kill-player-finder');
+        killPlayerFinderModeEl  = document.querySelector('#ug-bot-kill-player-finder-mode');
+        killPlayerFinderDelayEl = document.querySelector('#ug-bot-kill-player-finder-delay');
+        killPlayerFinderRunEveryEl = document.querySelector('#ug-bot-kill-player-finder-every');
+        killPlayerFinderStatusEl = document.querySelector('#ug-bot-kill-player-finder-status');
         killBgCheckInput        = document.querySelector('#ug-bot-kill-bgcheck');
         killBgSpamInput          = document.querySelector('#ug-bot-kill-bg-spam');
         killBgSpamIntervalEl     = document.querySelector('#ug-bot-kill-bg-spam-interval');
@@ -18383,8 +19288,81 @@ async function doQTPerkRedeem() {
 
         CTC.attachObserver(handleCTCMessage);
 
+        startKillSharedPlayerListSync();
+        syncKillPlayerFinderScheduler();
+
+        // Expose console-accessible helper functions on the real page window.
+        // Tampermonkey runs scripts in a sandbox when GM_* grants are used, so
+        // assigning only to the sandboxed `window` will not show up in F12 console.
+        const ugConsoleWindow = (typeof unsafeWindow !== 'undefined' && unsafeWindow) ? unsafeWindow : window;
+
+        ugConsoleWindow.ugbotKillSyncNow = async function() {
+            await runKillSharedPlayerListSync();
+            console.log('[UG Bot] Manual Kill Sync finished. Check the live log for details.');
+        };
+
+        ugConsoleWindow.ugbotKillSyncPendingDead = function() {
+            const pending = getPendingKillSharedDeadNames();
+            console.log('[UG Bot] Pending dead names for sync:', pending);
+            return pending;
+        };
+
+        ugConsoleWindow.ugbotKillSyncMarkDead = function(name) {
+            const cleanName = cleanKillSharedSyncName(name);
+            const key = getKillSharedSyncNameKey(cleanName);
+
+            if (!cleanName || !key) {
+                console.warn('[UG Bot] Provide a valid username, e.g. ugbotKillSyncMarkDead("Idea Ran")');
+                return { ok: false, reason: 'invalid_name' };
+            }
+
+            const queued = rememberKillSharedDeadPlayers([cleanName]);
+
+            const dead = state.killDeadPlayers || [];
+            if (!dead.some(n => getKillSharedSyncNameKey(n) === key)) {
+                dead.push(cleanName);
+                state.killDeadPlayers = dead;
+            }
+
+            const players = state.killPlayers || [];
+            const kept = players.filter(p => getKillSharedSyncNameKey(p && p.name) !== key);
+            const removedLocal = players.length - kept.length;
+
+            if (removedLocal > 0) {
+                state.killPlayers = kept;
+                if (document.querySelector('#ug-bot-kill-list')) renderKillList();
+            }
+
+            console.log(`[UG Bot] Marked ${cleanName} as dead for shared sync. queued=${queued > 0}, removedLocal=${removedLocal}`);
+            addLiveLog(`Kill Sync: manually marked ${cleanName} as dead for shared sync`);
+
+            return { ok: true, name: cleanName, queued: queued > 0, removedLocal };
+        };
+
+        ugConsoleWindow.ugbotPlayerFinderNow = function(mode = state.killPlayerFinderMode) {
+            state.killPlayerFinderMode = mode;
+            state.killPlayerFinderEnabled = true;
+            resetKillPlayerFinderProgress(state.killPlayerFinderMode, true);
+            syncKillPlayerFinderScheduler();
+            console.log(state.enabled
+                ? '[UG Bot] Player Searcher queued to run now:'
+                : '[UG Bot] Player Searcher queued, but the main bot is paused. It will run when the bot is started:',
+                state.killPlayerFinderMode);
+        };
+
+        ugConsoleWindow.ugbotPlayerFinderReset = function(mode = state.killPlayerFinderMode) {
+            resetKillPlayerFinderProgress(mode, false);
+            console.log('[UG Bot] Player Searcher progress reset:', mode);
+        };
+
+        ugConsoleWindow.ugbotPlayerFinderState = function() {
+            const st = getKillPlayerFinderState();
+            console.log('[UG Bot] Player Searcher state:', st);
+            return st;
+        };
+
         // Expose a console-accessible reset function
-        window.ugbotResetPersonality = function() {
+        ugConsoleWindow.ugbotResetPersonality = function() {
             setStoredDupeMode(getStoredDupeMode(PERSONALITY.dupeMode));
             writeStoredValue(PERSONALITY_STORAGE_KEY, null);
             console.log('[UG Bot] Personality reset — reload the page to generate a new one. Dupe mode has been preserved.');
