@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Full UG Bot
 // @namespace    ug-bot
-// @version      3.0.6
+// @version      3.0.13
 // @description  Auto-runs crimes, GTA, melting, repair, missions, drug running with Swiss Bank management, live log, session stats, action checkboxes, jail handling, runtime tracking, melt pagination, repair cycles, automatic CTC solving, and point-spending features.
 // @match        *://www.underworldgangsters.com/*
 // @match        *://underworldgangsters.com/*
@@ -607,7 +607,7 @@
     // BOT CONFIG
     // =========================================================================
 
-    const SCRIPT_VERSION = '3.0.6';
+    const SCRIPT_VERSION = '3.0.13';
 
 
     // =========================================================================
@@ -4473,6 +4473,16 @@
         return !!name && isPlayerShootEnabled(name);
     }
 
+    // A BG Check-only target should only discover/record the bodyguard.
+    // Do not shoot that bodyguard unless the original target has Kill enabled,
+    // BG Farm enabled, or this pending action explicitly requested a follow-up shot.
+    function shouldShootDiscoveredBodyguard(targetName, pendingAction = null) {
+        const target = String(targetName || '').trim();
+        if (!target) return false;
+        if (pendingAction && pendingAction.shootAfterBg) return true;
+        return isPlayerShootEnabled(target) || isPlayerBgFarmEnabled(target);
+    }
+
     function clearKillWakeBlockersForPlayer(name, opts = {}) {
         const players = state.killPlayers || [];
         const lower = String(name || '').toLowerCase();
@@ -6328,7 +6338,7 @@
         if (fromKillLoop && state.killBgCheckEnabled && !isKillPenaltyTooHigh()) for (const p of players) {
             if (!p.isBg || !p.bgFor) continue;
             if (p.status !== KILL_STATUS.ALIVE) continue;
-            if (!isPlayerShootEnabled(p.bgFor) && !isPlayerBgFarmEnabled(p.bgFor)) continue;
+            if (!shouldShootDiscoveredBodyguard(p.bgFor)) continue;
             // Verify this BG is still the stored bodyguard for their target.
             // If the target has a different BG stored, this player's flags are stale — detach them.
             const bgForPlayer = players.find(pl => pl.name.toLowerCase() === p.bgFor.toLowerCase());
@@ -6341,6 +6351,13 @@
                 saveKillPlayers(players);
                 continue;
             }
+            // If another BG Farm verify→shoot chain is already active, do not let this
+            // found-BG scanner steal/replace it. This fixes the loop where two BG Farm
+            // targets alternated between "verifying original" and "stale verify flag"
+            // without ever reaching the approved BG shot.
+            const activeBgFarmChainForThisBg = hasMatchingBgFarmCriticalChain(p.bgFor, p.name);
+            if (hasActiveBgFarmCriticalChain() && !activeBgFarmChainForThisBg) continue;
+
             // Check combined bullet cost — need enough for BG shot AND original target
             // Target cost must account for penalty increasing after killing BG (+0.1x)
             const bgBullets      = p.requiredBullets || 0;
@@ -6389,6 +6406,10 @@
             const bgForPlayerFlag = players.find(pl => pl.name.toLowerCase() === p.bgFor?.toLowerCase());
             if (bgForPlayerFlag?.bgVerifyInFlight) {
                 if (hasMatchingBgFarmCriticalChain(p.bgFor, p.name)) continue;
+                // A different BG Farm chain is active. Leave this flag alone and let the
+                // current chain finish; otherwise two active farm targets can keep
+                // clobbering each other and never fire the BG shot.
+                if (hasActiveBgFarmCriticalChain()) continue;
                 addLiveLog(`Kill loop: stale BG verify flag for ${p.bgFor}/${p.name} cleared — no active verify→shoot chain`);
                 delete bgForPlayerFlag.bgVerifyInFlight;
                 saveKillPlayers(players);
@@ -12517,6 +12538,41 @@ async function doQTPerkRedeem() {
                         clearStaleBgRelationsForOwner(target, bgName, `fresh check found ${bgName}`);
                         const players = state.killPlayers || [];
                         const existingIdx = players.findIndex(p => p.name.toLowerCase() === bgName.toLowerCase());
+                        const shouldShootBg = shouldShootDiscoveredBodyguard(target, pending);
+
+                        if (!shouldShootBg) {
+                            const tIdxCheckOnly = players.findIndex(p => p.name.toLowerCase() === target.toLowerCase());
+                            if (tIdxCheckOnly !== -1) {
+                                players[tIdxCheckOnly].bodyguard = bgName;
+                                players[tIdxCheckOnly].lastBgCheck = now();
+                                delete players[tIdxCheckOnly].bgVerifyInFlight;
+                            }
+                            if (existingIdx === -1) {
+                                players.push({
+                                    name:        bgName,
+                                    status:      KILL_STATUS.UNKNOWN,
+                                    lastChecked: 0,
+                                    firstSeen:   now(),
+                                    searchCount: 0,
+                                    isBg:        true,
+                                    bgFor:       target
+                                });
+                            } else {
+                                players[existingIdx].isBg  = true;
+                                players[existingIdx].bgFor = target;
+                                delete players[existingIdx].bgShootQueued;
+                            }
+                            saveKillPlayers(players);
+                            renderKillList();
+                            addLiveLog(`Kill loop: ${target} has bodyguard ${bgName} — BG Check only, not shooting bodyguard`);
+                            state.pendingKillAction    = null;
+                            state.killLoopActive       = false;
+                            state.killSearchLoopActive = false;
+                            state.killBgWaitUntil      = 0;
+                            await wait(navRand());
+                            gotoPage('crimes');
+                            return;
+                        }
 
                         if (existingIdx === -1) {
                             // Not in list — add as unknown, trigger search
@@ -12948,6 +13004,25 @@ async function doQTPerkRedeem() {
         if (pendingNow && pendingNow.stage === 'bg_shoot') {
             const bgName = pendingNow.targetName;
             const bgFor  = pendingNow.bgFor;
+
+            if (bgFor && !shouldShootDiscoveredBodyguard(bgFor, pendingNow)) {
+                addLiveLog(`Kill loop: ${bgName} is a BG for ${bgFor}, but ${bgFor} is BG Check only — aborting BG shot`);
+                const relPlayers = state.killPlayers || [];
+                const bgIdx = relPlayers.findIndex(p => p.name && p.name.toLowerCase() === String(bgName || '').toLowerCase());
+                if (bgIdx !== -1) {
+                    delete relPlayers[bgIdx].bgShootQueued;
+                    relPlayers[bgIdx].isBg = true;
+                    relPlayers[bgIdx].bgFor = bgFor;
+                    saveKillPlayers(relPlayers);
+                    renderKillList();
+                }
+                state.pendingKillAction = null;
+                state.killLoopActive = false;
+                state.killBgShootPending = null;
+                await wait(navRand());
+                gotoPage('crimes');
+                return;
+            }
 
             // Strict stale-BG guard: old stored bgFor/bodyguard state is never enough to fire a BG shot.
             // If this BG shot is for a BG Farm target and it was not created by the current 1-bullet
@@ -19612,6 +19687,883 @@ async function doQTPerkRedeem() {
             scheduleInit();
         }
         window.addEventListener('load', applyMemory, { once: true });
+    })();
+
+    // =========================================================================
+    // BETTING TOTAL BET TAB
+    // =========================================================================
+    // Adds a local "Total Bet" tab beside My Bets. Opening it scans all My Bets
+    // pages and renders a compact total view without submitting anything.
+    (function ugBettingTotalBetTab() {
+        'use strict';
+
+        const VIEW_PARAM = 'total-bet';
+        const PANEL_ID = 'ug-betting-total-bet-view';
+        const TAB_ID = 'ug-betting-total-bet-tab';
+        const STYLE_ID = 'ug-betting-total-bet-style';
+        const ORIGINAL_DISPLAY_ATTR = 'data-ug-bet-original-display';
+        let scanRunId = 0;
+
+        function cleanText(text) {
+            return String(text || '').replace(/\s+/g, ' ').trim();
+        }
+
+        function parseMoney(text) {
+            const match = String(text || '').match(/\$\s*([\d,]+)/);
+            if (!match) return 0;
+            return Number(match[1].replace(/,/g, '')) || 0;
+        }
+
+        function formatMoney(value) {
+            const num = Number(value || 0);
+            const sign = num < 0 ? '-' : '';
+            return sign + '$' + Math.abs(num).toLocaleString('en-US');
+        }
+
+        function getBettingView() {
+            try {
+                const params = new URLSearchParams(location.search || '');
+                return String(params.get('v') || '').trim().toLowerCase();
+            } catch (_) {
+                return '';
+            }
+        }
+
+        function isBettingPage() {
+            try {
+                const params = new URLSearchParams(location.search || '');
+                return params.get('p') === 'betting';
+            } catch (_) {}
+
+            return false;
+        }
+
+        function cleanupNonBettingPage() {
+            if (isBettingPage()) return;
+            document.getElementById(TAB_ID)?.remove();
+            document.getElementById(PANEL_ID)?.remove();
+        }
+
+        function isTotalBetView() {
+            return getBettingView() === VIEW_PARAM || location.hash === '#ug-total-bet';
+        }
+
+        function getDirectRows(table) {
+            const rows = [];
+            if (table.tHead) rows.push(...Array.from(table.tHead.rows));
+            for (const body of Array.from(table.tBodies || [])) {
+                rows.push(...Array.from(body.rows));
+            }
+            if (table.tFoot) rows.push(...Array.from(table.tFoot.rows));
+            return rows;
+        }
+
+        function findMyBetsTable(root = document) {
+            const tables = Array.from(root.querySelectorAll('table'));
+            for (const table of tables) {
+                const rows = getDirectRows(table);
+                const hasHeader = rows.some(row => {
+                    const cells = Array.from(row.cells).map(cell => cleanText(cell.textContent).toLowerCase());
+                    return cells.length === 3 &&
+                        cells[0] === 'username' &&
+                        cells[1] === 'bet' &&
+                        cells[2] === 'outcome';
+                });
+                if (hasHeader) return table;
+            }
+            return null;
+        }
+
+        function createEmptyStats() {
+            return {
+                won: { count: 0, amount: 0 },
+                lost: { count: 0, amount: 0 },
+                active: { count: 0, amount: 0 },
+                other: { count: 0, amount: 0 },
+                rows: 0,
+                pagesFound: 0
+            };
+        }
+
+        function addToStats(stats, type, amount) {
+            const key = stats[type] ? type : 'other';
+            stats[key].count += 1;
+            stats[key].amount += Number(amount || 0);
+            stats.rows += 1;
+        }
+
+        function mergeStats(target, source) {
+            for (const key of ['won', 'lost', 'active', 'other']) {
+                target[key].count += source[key].count;
+                target[key].amount += source[key].amount;
+            }
+            target.rows += source.rows;
+            target.pagesFound += source.pagesFound || 0;
+            return target;
+        }
+
+        function classifyOutcome(outcomeCell, outcomeText) {
+            if (/\bwon\b/i.test(outcomeText) || outcomeCell.querySelector('.cg')) return 'won';
+            if (/\blost\b/i.test(outcomeText) || outcomeCell.querySelector('.cred')) return 'lost';
+            if (/\b(active|pending|open|live|accepted|unsettled|waiting)\b/i.test(outcomeText)) return 'active';
+            if (outcomeText.includes('$')) return 'active';
+            return 'other';
+        }
+
+        function parseBetRows(root = document) {
+            const table = findMyBetsTable(root);
+            const stats = createEmptyStats();
+
+            if (!table) {
+                return { found: false, stats };
+            }
+
+            stats.pagesFound = 1;
+
+            for (const row of getDirectRows(table)) {
+                const cells = Array.from(row.cells);
+                if (cells.length !== 3) continue;
+
+                const usernameText = cleanText(cells[0].textContent);
+                const betText = cleanText(cells[1].textContent);
+                const outcomeText = cleanText(cells[2].textContent);
+
+                if (!usernameText || !betText || !outcomeText) continue;
+                if (usernameText.toLowerCase() === 'username') continue;
+
+                const type = classifyOutcome(cells[2], outcomeText);
+                let amount = parseMoney(outcomeText);
+
+                if (!amount) amount = parseMoney(betText);
+                if (!amount && type === 'active') amount = parseMoney(row.textContent);
+                if (!amount) continue;
+
+                addToStats(stats, type, amount);
+            }
+
+            return { found: true, stats };
+        }
+
+        function detectTotalPages(root = document) {
+            const text = cleanText(root.body ? root.body.textContent : root.textContent);
+            const pageTextMatch = text.match(/Page\s+(\d+)\s+of\s+(\d+)/i);
+            if (pageTextMatch) return Number(pageTextMatch[2]) || 1;
+
+            let maxPage = 1;
+            const links = Array.from(root.querySelectorAll('a[href*="p=betting"][href*="v=my"]'));
+            for (const link of links) {
+                try {
+                    const url = new URL(link.getAttribute('href'), location.href);
+                    const page = Number(url.searchParams.get('page')) || 1;
+                    if (page > maxPage) maxPage = page;
+                } catch (_) {}
+            }
+
+            const html = root.body ? root.body.innerHTML : '';
+            const legacyMatch = html.match(/Page\s*<u>\s*\d+\s*<\/u>\s*of\s*<u>\s*([\d,]+)\s*<\/u>/i);
+            if (legacyMatch) {
+                const page = Number(legacyMatch[1].replace(/,/g, '')) || 1;
+                if (page > maxPage) maxPage = page;
+            }
+
+            return maxPage;
+        }
+
+        function buildMyBetsUrl(pageNumber) {
+            const url = new URL(location.href);
+            url.searchParams.set('p', 'betting');
+            url.searchParams.set('v', 'my');
+            url.searchParams.set('page', String(pageNumber));
+            url.hash = '';
+            return url.href;
+        }
+
+        function buildTotalBetUrl() {
+            const url = new URL(location.href);
+            url.searchParams.set('p', 'betting');
+            url.searchParams.set('v', VIEW_PARAM);
+            url.hash = '';
+            return url.href;
+        }
+
+        function injectStyle() {
+            if (document.getElementById(STYLE_ID)) return;
+            const style = document.createElement('style');
+            style.id = STYLE_ID;
+            style.textContent = `
+                #${PANEL_ID} {
+                    margin: 6px 0 8px 0;
+                    clear: both;
+                }
+
+                #${PANEL_ID} .ug-bt-inner {
+                    padding: 7px;
+                    box-sizing: border-box;
+                }
+
+                #${PANEL_ID} .ug-bt-grid {
+                    display: grid;
+                    grid-template-columns: repeat(3, minmax(0, 1fr));
+                    gap: 6px;
+                    margin-bottom: 7px;
+                }
+
+                #${PANEL_ID} .ug-bt-card {
+                    border: 1px solid rgba(255,255,255,0.18);
+                    background: rgba(0,0,0,0.18);
+                    padding: 6px;
+                    text-align: center;
+                    box-sizing: border-box;
+                }
+
+                #${PANEL_ID} .ug-bt-label {
+                    font-size: 11px;
+                    color: #aaa;
+                    margin-bottom: 2px;
+                }
+
+                #${PANEL_ID} .ug-bt-value {
+                    font-size: 15px;
+                    font-weight: bold;
+                }
+
+                #${PANEL_ID} .ug-bt-meta {
+                    font-size: 10px;
+                    color: #999;
+                    margin-top: 2px;
+                }
+
+                #${PANEL_ID} .ug-bt-active { color: #ffae42; }
+
+                #${PANEL_ID} .ug-bt-table {
+                    width: 100%;
+                    border-collapse: collapse;
+                    margin-top: 4px;
+                }
+
+                #${PANEL_ID} .ug-bt-table td {
+                    padding: 3px 5px;
+                    border-bottom: 1px solid rgba(255,255,255,0.08);
+                }
+
+                #${PANEL_ID} .ug-bt-table td:last-child {
+                    text-align: right;
+                    font-weight: bold;
+                    white-space: nowrap;
+                }
+
+                #${PANEL_ID} .ug-bt-actions {
+                    text-align: center;
+                    margin-top: 7px;
+                }
+
+                #${PANEL_ID} .ug-bt-actions input {
+                    margin: 2px;
+                    cursor: pointer;
+                }
+
+                #${PANEL_ID} .ug-bt-status {
+                    text-align: center;
+                    font-size: 11px;
+                    color: #aaa;
+                    margin-top: 5px;
+                }
+
+                #${TAB_ID}.ug-total-bet-active,
+                #${TAB_ID}.ug-total-bet-active * {
+                    font-weight: bold;
+                }
+
+                @media (max-width: 700px) {
+                    #${PANEL_ID} .ug-bt-grid {
+                        grid-template-columns: 1fr;
+                    }
+                }
+            `;
+            (document.head || document.documentElement).appendChild(style);
+        }
+
+        function findShowGames() {
+            return document.getElementById('show-games') ||
+                Array.from(document.querySelectorAll('table, div')).find(el =>
+                    el.querySelector && el.querySelector('a[href*="p=betting"][href*="v=my"]')
+                ) || null;
+        }
+
+        function findMyBetsLink(showGames) {
+            if (!showGames) return null;
+            return Array.from(showGames.querySelectorAll('a[href*="p=betting"]')).find(link => {
+                const text = cleanText(link.textContent).toLowerCase();
+                const href = link.getAttribute('href') || '';
+                return text.includes('my bets') || /(?:\?|&)v=my(?:&|$)/.test(href);
+            }) || null;
+        }
+
+        function removeDuplicateIds(root) {
+            if (!root) return;
+            if (root.id) root.removeAttribute('id');
+            root.querySelectorAll('[id]').forEach(el => el.removeAttribute('id'));
+        }
+
+        function getDirectShowGamesRows(showGames) {
+            if (!showGames || !showGames.tBodies || !showGames.tBodies[0]) return [];
+            return Array.from(showGames.tBodies[0].children).filter(el => el && el.tagName === 'TR');
+        }
+
+        function updateBettingColspans(showGames) {
+            const rows = getDirectShowGamesRows(showGames);
+            const tabCount = rows[0] ? rows[0].children.length : 0;
+            if (!tabCount) return;
+
+            rows.slice(1).forEach(row => {
+                Array.from(row.children).forEach(cell => {
+                    if (cell.hasAttribute('colspan') && Number(cell.colSpan || 0) < tabCount) {
+                        cell.colSpan = tabCount;
+                    }
+                });
+            });
+        }
+
+        function setShowGamesContentRowsHidden(showGames, hidden) {
+            getDirectShowGamesRows(showGames).slice(1).forEach(row => {
+                if (hidden) {
+                    if (!row.hasAttribute(ORIGINAL_DISPLAY_ATTR)) {
+                        row.setAttribute(ORIGINAL_DISPLAY_ATTR, row.style.display || '');
+                    }
+                    row.style.display = 'none';
+                } else if (row.hasAttribute(ORIGINAL_DISPLAY_ATTR)) {
+                    row.style.display = row.getAttribute(ORIGINAL_DISPLAY_ATTR) || '';
+                    row.removeAttribute(ORIGINAL_DISPLAY_ATTR);
+                }
+            });
+        }
+
+        function setTabText(tab, text) {
+            const link = tab.matches('a') ? tab : tab.querySelector('a');
+            if (link) {
+                link.textContent = text;
+                return;
+            }
+
+            const target = tab.querySelector('div, span') || tab;
+            target.textContent = text;
+        }
+
+        function openTotalBetTab(event) {
+            if (event) event.preventDefault();
+            try {
+                history.pushState(null, '', buildTotalBetUrl());
+            } catch (_) {}
+
+            const showGames = findShowGames();
+            const tab = document.getElementById(TAB_ID);
+            if (showGames) updateBettingColspans(showGames);
+            if (tab) tab.classList.add('ug-total-bet-active', 'active');
+            renderTotalBetView(true);
+        }
+
+        function bindTotalBetTab(tab) {
+            if (!tab) return;
+
+            const link = tab.matches('a') ? tab : tab.querySelector('a');
+            if (link) {
+                link.href = buildTotalBetUrl();
+                link.removeAttribute('onclick');
+            }
+
+            tab.style.cursor = 'pointer';
+            if (tab.dataset.ugTotalBetBound === '1') return;
+
+            tab.addEventListener('click', openTotalBetTab);
+            tab.dataset.ugTotalBetBound = '1';
+        }
+
+        function ensureTotalBetTab() {
+            if (!isBettingPage()) return null;
+
+            injectStyle();
+
+            const existing = document.getElementById(TAB_ID);
+            if (existing) {
+                const showGames = findShowGames();
+                if (showGames) updateBettingColspans(showGames);
+                bindTotalBetTab(existing);
+                existing.classList.toggle('ug-total-bet-active', isTotalBetView());
+                existing.classList.toggle('active', isTotalBetView());
+                existing.classList.toggle('none', !isTotalBetView());
+                return existing;
+            }
+
+            const showGames = findShowGames();
+            if (!showGames) return null;
+
+            const myBetsLink = findMyBetsLink(showGames);
+            let tab;
+
+            if (myBetsLink) {
+                const source = myBetsLink.closest('td, th, .bgm, .bgl, .chs, div') || myBetsLink;
+                tab = source.cloneNode(true);
+                removeDuplicateIds(tab);
+
+                setTabText(tab, 'Total Bet');
+
+                if (source.parentNode) {
+                    source.insertAdjacentElement('afterend', tab);
+                } else {
+                    showGames.appendChild(tab);
+                }
+            } else {
+                tab = document.createElement('span');
+                tab.innerHTML = `<a href="${buildTotalBetUrl()}">Total Bet</a>`;
+                showGames.appendChild(tab);
+            }
+
+            tab.id = TAB_ID;
+            tab.classList.toggle('ug-total-bet-active', isTotalBetView());
+            tab.classList.toggle('active', isTotalBetView());
+            tab.classList.toggle('none', !isTotalBetView());
+            bindTotalBetTab(tab);
+            updateBettingColspans(showGames);
+
+            return tab;
+        }
+
+        function getMainContainer() {
+            return document.querySelector('#maincen') ||
+                document.querySelector('#maincenc') ||
+                document.querySelector('#tabcen') ||
+                document.body;
+        }
+
+        function setOriginalBettingContentHidden(hidden) {
+            const showGames = findShowGames();
+            const main = getMainContainer();
+            if (!showGames || !main) return;
+
+            setShowGamesContentRowsHidden(showGames, hidden);
+
+            let seenTabs = false;
+            for (const child of Array.from(main.children)) {
+                if (child === showGames || child.contains(showGames)) {
+                    seenTabs = true;
+                    continue;
+                }
+                if (!seenTabs || child.id === PANEL_ID) continue;
+
+                if (hidden) {
+                    if (!child.hasAttribute(ORIGINAL_DISPLAY_ATTR)) {
+                        child.setAttribute(ORIGINAL_DISPLAY_ATTR, child.style.display || '');
+                    }
+                    child.style.display = 'none';
+                } else if (child.hasAttribute(ORIGINAL_DISPLAY_ATTR)) {
+                    child.style.display = child.getAttribute(ORIGINAL_DISPLAY_ATTR) || '';
+                    child.removeAttribute(ORIGINAL_DISPLAY_ATTR);
+                }
+            }
+        }
+
+        function createPanel() {
+            let panel = document.getElementById(PANEL_ID);
+            if (panel) return panel;
+
+            const showGames = findShowGames();
+            if (!showGames || !showGames.parentNode) return null;
+
+            panel = document.createElement('div');
+            panel.id = PANEL_ID;
+            panel.className = 'bgd mb';
+            panel.innerHTML = `
+                <div class="bgd myc">Total Bet</div>
+                <div class="bgl ug-bt-inner">
+                    <div id="ug-bt-results">
+                        <div class="ug-bt-status">Scanning all My Bets pages...</div>
+                    </div>
+                    <div class="ug-bt-actions">
+                        <input type="button" data-role="none" id="ug-bt-rescan" value="Rescan all pages">
+                        <input type="button" data-role="none" id="ug-bt-back-my-bets" value="Open My Bets">
+                    </div>
+                    <div class="ug-bt-status" id="ug-bt-status"></div>
+                </div>
+            `;
+
+            showGames.insertAdjacentElement('afterend', panel);
+
+            panel.querySelector('#ug-bt-rescan')?.addEventListener('click', () => scanAllPages(true));
+            panel.querySelector('#ug-bt-back-my-bets')?.addEventListener('click', () => {
+                location.href = buildMyBetsUrl(1);
+            });
+
+            return panel;
+        }
+
+        function setStatus(message) {
+            const status = document.querySelector(`#${PANEL_ID} #ug-bt-status`);
+            if (status) status.textContent = message || '';
+        }
+
+        function renderStats(stats, totalPages) {
+            const settledNet = stats.won.amount - stats.lost.amount;
+            const worstCaseNet = settledNet - stats.active.amount;
+            const netClass = settledNet >= 0 ? 'cg' : 'cred';
+            const worstClass = worstCaseNet >= 0 ? 'cg' : 'cred';
+            const resultBox = document.querySelector(`#${PANEL_ID} #ug-bt-results`);
+            if (!resultBox) return;
+
+            const otherRow = stats.other.count > 0
+                ? `<tr><td>Other / unclear (${stats.other.count})</td><td>${formatMoney(stats.other.amount)}</td></tr>`
+                : '';
+
+            resultBox.innerHTML = `
+                <div class="ug-bt-grid">
+                    <div class="ug-bt-card">
+                        <div class="ug-bt-label">Won total</div>
+                        <div class="ug-bt-value cg">${formatMoney(stats.won.amount)}</div>
+                        <div class="ug-bt-meta">${stats.won.count} bet${stats.won.count === 1 ? '' : 's'}</div>
+                    </div>
+                    <div class="ug-bt-card">
+                        <div class="ug-bt-label">Lost total</div>
+                        <div class="ug-bt-value cred">${formatMoney(stats.lost.amount)}</div>
+                        <div class="ug-bt-meta">${stats.lost.count} bet${stats.lost.count === 1 ? '' : 's'}</div>
+                    </div>
+                    <div class="ug-bt-card">
+                        <div class="ug-bt-label">Active total</div>
+                        <div class="ug-bt-value ug-bt-active">${formatMoney(stats.active.amount)}</div>
+                        <div class="ug-bt-meta">${stats.active.count} bet${stats.active.count === 1 ? '' : 's'}</div>
+                    </div>
+                </div>
+                <table class="ug-bt-table">
+                    <tr><td>Settled net</td><td class="${netClass}">${settledNet >= 0 ? '+' : ''}${formatMoney(settledNet)}</td></tr>
+                    <tr><td>Net if active loses</td><td class="${worstClass}">${worstCaseNet >= 0 ? '+' : ''}${formatMoney(worstCaseNet)}</td></tr>
+                    <tr><td>Total rows scanned</td><td>${stats.rows.toLocaleString('en-US')}</td></tr>
+                    <tr><td>Pages scanned</td><td>${stats.pagesFound || totalPages} / ${totalPages}</td></tr>
+                    ${otherRow}
+                </table>
+            `;
+        }
+
+        async function fetchDocument(url) {
+            const html = await fetch(url, {
+                credentials: 'include',
+                cache: 'no-store'
+            }).then(res => res.text());
+            return new DOMParser().parseFromString(html, 'text/html');
+        }
+
+        async function scanAllPages(force) {
+            const panel = createPanel();
+            if (!panel) return;
+
+            const runId = ++scanRunId;
+            const rescanButton = panel.querySelector('#ug-bt-rescan');
+            const resultBox = panel.querySelector('#ug-bt-results');
+            if (rescanButton) rescanButton.disabled = true;
+            if (resultBox) resultBox.innerHTML = '<div class="ug-bt-status">Scanning all My Bets pages...</div>';
+
+            try {
+                setStatus('Loading My Bets page 1...');
+                const firstDoc = await fetchDocument(buildMyBetsUrl(1));
+                if (runId !== scanRunId) return;
+
+                const totalPages = Math.max(1, detectTotalPages(firstDoc));
+                const aggregate = createEmptyStats();
+                const firstResult = parseBetRows(firstDoc);
+                if (firstResult.found) mergeStats(aggregate, firstResult.stats);
+
+                renderStats(aggregate, totalPages);
+
+                for (let page = 2; page <= totalPages; page++) {
+                    if (runId !== scanRunId) return;
+                    setStatus(`Scanning page ${page} of ${totalPages}...`);
+
+                    const doc = await fetchDocument(buildMyBetsUrl(page));
+                    const result = parseBetRows(doc);
+                    if (result.found) mergeStats(aggregate, result.stats);
+                    renderStats(aggregate, totalPages);
+
+                    await new Promise(resolve => setTimeout(resolve, 150));
+                }
+
+                setStatus(`Finished scanning ${totalPages} page${totalPages === 1 ? '' : 's'}.`);
+            } catch (err) {
+                console.warn('[UG Total Bet] Scan failed:', err);
+                if (resultBox) resultBox.innerHTML = '<div class="ug-bt-status">Scan failed. Try again or check the console.</div>';
+                setStatus('Scan failed.');
+            } finally {
+                if (rescanButton) rescanButton.disabled = false;
+            }
+        }
+
+        function renderTotalBetView(autoScan) {
+            ensureTotalBetTab();
+            injectStyle();
+            setOriginalBettingContentHidden(true);
+            createPanel();
+            if (autoScan) scanAllPages(true);
+        }
+
+        function scheduleInit() {
+            cleanupNonBettingPage();
+            if (!isBettingPage()) return;
+            const tries = [0, 150, 500, 1200, 2500];
+            tries.forEach(delay => setTimeout(() => {
+                ensureTotalBetTab();
+                if (isTotalBetView()) renderTotalBetView(delay === 0);
+            }, delay));
+        }
+
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', scheduleInit, { once: true });
+        } else {
+            scheduleInit();
+        }
+        window.addEventListener('load', () => {
+            cleanupNonBettingPage();
+            if (!isBettingPage()) return;
+            ensureTotalBetTab();
+            if (isTotalBetView()) renderTotalBetView(true);
+        }, { once: true });
+    })();
+
+    // =========================================================================
+    // PERK HEADER TOTALS
+    // =========================================================================
+    // Adds consumable totals directly into each normal ?p=perks table header.
+    // Profile Patterns and Blackjack Cards are intentionally ignored because
+    // those pages count sets, not stackable numeric consumables.
+    (function ugPerkHeaderTotals() {
+        'use strict';
+
+        const CONFIG = {
+            oldSummaryBoxId: 'ug-perk-totals-box',
+            topTotalClass: 'ug-perk-top-total',
+            topMetaClass: 'ug-perk-top-meta',
+            headerChipClass: 'ug-perk-total-chip',
+            recalcDelayMs: 150,
+            observeChanges: true
+        };
+
+        let recalcTimer = null;
+        let observer = null;
+        let isRendering = false;
+
+        function normaliseSpaces(text) {
+            return String(text || '').replace(/\s+/g, ' ').trim();
+        }
+
+        function isPerksPage() {
+            try {
+                const url = new URL(window.location.href);
+                if (url.searchParams.get('p') === 'perks') {
+                    const view = String(url.searchParams.get('v') || 'con').trim().toLowerCase();
+                    return view !== 'profile' && view !== 'mbj';
+                }
+            } catch (_) {}
+
+            const activeTab = normaliseSpaces(document.querySelector('#show-games td.active')?.textContent || '').toLowerCase();
+            if (activeTab.includes('profile pattern') || activeTab.includes('blackjack card')) return false;
+
+            return Boolean(document.querySelector('#show-games') && document.querySelector('.sortable-table'));
+        }
+
+        function injectStyles() {
+            if (document.getElementById('ug-perk-totals-style')) return;
+
+            const style = document.createElement('style');
+            style.id = 'ug-perk-totals-style';
+            style.textContent = `
+                .${CONFIG.headerChipClass} {
+                    display: inline;
+                    margin-left: 8px;
+                    font: inherit;
+                    font-size: inherit;
+                    font-weight: inherit;
+                    color: inherit;
+                    opacity: 1;
+                    white-space: nowrap;
+                }
+            `;
+            document.head.appendChild(style);
+        }
+
+        function parseNumber(text) {
+            const raw = String(text || '').replace(/,/g, '');
+            const value = Number(raw);
+            return Number.isFinite(value) ? value : 0;
+        }
+
+        function formatNumber(value) {
+            return Number(value || 0).toLocaleString('en-GB');
+        }
+
+        function normaliseUnit(unit) {
+            const cleaned = normaliseSpaces(unit).replace(/[.]+$/g, '');
+            const lower = cleaned.toLowerCase();
+
+            if (!cleaned) return 'items';
+            if (/^bullets?$/.test(lower)) return 'bullets';
+            if (/^cars?$/.test(lower)) return 'cars';
+            if (/^(mins?|minutes?)$/.test(lower)) return 'mins';
+            if (/^points?$/.test(lower)) return 'points';
+            return cleaned;
+        }
+
+        function parsePerkAmount(text) {
+            const clean = normaliseSpaces(text);
+            const match = clean.match(/^([\d,]+(?:\.\d+)?)\s*(.*)$/i);
+            if (!match) return null;
+
+            const amount = parseNumber(match[1]);
+            const unit = normaliseUnit(match[2]);
+            if (!amount) return null;
+
+            return { amount, unit, raw: clean };
+        }
+
+        function getTopToggleInputs() {
+            return Array.from(document.querySelectorAll('input[name="toggleperk"]'));
+        }
+
+        function getTableKey(table, toggleInputs) {
+            const values = new Set(toggleInputs.map(input => String(input.value || '').trim()).filter(Boolean));
+            return Array.from(table.classList).find(className => values.has(className)) || '';
+        }
+
+        function getTableTitle(table) {
+            const th = table.querySelector('tr:first-child th');
+            if (!th) return 'Unknown';
+
+            const clone = th.cloneNode(true);
+            clone.querySelectorAll(`.${CONFIG.headerChipClass}`).forEach(el => el.remove());
+            return normaliseSpaces(clone.textContent) || 'Unknown';
+        }
+
+        function getPerkText(row) {
+            const lm = row.querySelector('.lm');
+            if (lm) return normaliseSpaces(lm.textContent);
+
+            const firstCell = row.querySelector('td');
+            if (!firstCell) return '';
+
+            const clone = firstCell.cloneNode(true);
+            clone.querySelectorAll('a').forEach(el => el.remove());
+            return normaliseSpaces(clone.textContent);
+        }
+
+        function summariseTable(table, toggleInputs) {
+            const rows = Array.from(table.querySelectorAll('tr.sortable-row'));
+            const units = new Map();
+            let parsedRows = 0;
+
+            for (const row of rows) {
+                const parsed = parsePerkAmount(getPerkText(row));
+                if (parsed) {
+                    parsedRows++;
+                    units.set(parsed.unit, (units.get(parsed.unit) || 0) + parsed.amount);
+                }
+            }
+
+            return {
+                table,
+                tableKey: getTableKey(table, toggleInputs),
+                title: getTableTitle(table),
+                count: rows.length,
+                parsedRows,
+                units
+            };
+        }
+
+        function formatUnitSummary(summary) {
+            if (!summary.units || !summary.units.size) return 'No numeric total found';
+
+            return Array.from(summary.units.entries())
+                .sort((a, b) => String(a[0]).localeCompare(String(b[0])))
+                .map(([unit, total]) => `${formatNumber(total)} ${unit}`)
+                .join(' + ');
+        }
+
+        function updateTableHeader(summary) {
+            const th = summary.table.querySelector('tr:first-child th');
+            if (!th) return;
+
+            th.querySelectorAll(`.${CONFIG.headerChipClass}`).forEach(el => el.remove());
+
+            const chip = document.createElement('span');
+            chip.className = CONFIG.headerChipClass;
+            chip.textContent = `- Total: ${formatUnitSummary(summary)}`;
+            th.appendChild(chip);
+        }
+
+        function cleanupOldSummaryBox() {
+            const oldBox = document.getElementById(CONFIG.oldSummaryBoxId);
+            if (oldBox) oldBox.remove();
+        }
+
+        function cleanupRemovedTopTotals() {
+            document.querySelectorAll(`.${CONFIG.topTotalClass}, .${CONFIG.topMetaClass}`).forEach(el => el.remove());
+        }
+
+        function recalc() {
+            if (isRendering) return;
+            if (!isPerksPage()) return;
+
+            isRendering = true;
+            try {
+                injectStyles();
+                cleanupOldSummaryBox();
+                cleanupRemovedTopTotals();
+
+                const toggleInputs = getTopToggleInputs();
+                const tables = Array.from(document.querySelectorAll('table.sortable-table'));
+                if (!tables.length || !toggleInputs.length) return;
+
+                tables.map(table => summariseTable(table, toggleInputs)).forEach(updateTableHeader);
+            } finally {
+                isRendering = false;
+            }
+        }
+
+        function scheduleRecalc() {
+            clearTimeout(recalcTimer);
+            recalcTimer = setTimeout(recalc, CONFIG.recalcDelayMs);
+        }
+
+        function startObserver() {
+            if (!CONFIG.observeChanges || observer) return;
+
+            const target = document.querySelector('#maincen') || document.body;
+            observer = new MutationObserver((mutations) => {
+                if (isRendering) return;
+
+                const important = mutations.some(mutation => {
+                    const targetEl = mutation.target && mutation.target.nodeType === 1 ? mutation.target : null;
+                    if (targetEl && targetEl.closest && targetEl.closest(`.${CONFIG.headerChipClass}`)) return false;
+                    if (targetEl && targetEl.closest && targetEl.closest(`#${CONFIG.oldSummaryBoxId}`)) return false;
+                    return true;
+                });
+
+                if (important) scheduleRecalc();
+            });
+
+            observer.observe(target, {
+                childList: true,
+                subtree: true,
+                characterData: true
+            });
+        }
+
+        function init() {
+            if (!isPerksPage()) return;
+            recalc();
+            startObserver();
+            window.ugPerkTotalsRecalc = recalc;
+        }
+
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', init, { once: true });
+        } else {
+            init();
+        }
+        window.addEventListener('load', recalc, { once: true });
     })();
 
     // =========================================================================
