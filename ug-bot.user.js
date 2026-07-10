@@ -618,7 +618,7 @@
     // checkboxes, timers, pending kill actions, BG flags, or local status data.
     const KILL_SHARED_SYNC = {
         enabled: true,
-        playerId: 'player2', // Your friend should use 'player2'
+        playerId: 'player3', // Your friend should use 'player2'
         intervalMs: 2 * 60 * 1000,
         tableName: 'shared_kill_players',
         deadTableName: 'shared_kill_dead_players',
