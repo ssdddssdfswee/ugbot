@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Full UG Bot
 // @namespace    ug-bot
-// @version      3.0.13
+// @version      3.0.21
 // @description  Auto-runs crimes, GTA, melting, repair, missions, drug running with Swiss Bank management, live log, session stats, action checkboxes, jail handling, runtime tracking, melt pagination, repair cycles, automatic CTC solving, and point-spending features.
 // @match        *://www.underworldgangsters.com/*
 // @match        *://underworldgangsters.com/*
@@ -470,7 +470,7 @@
                 return { solved: false, choice: winner.index + 1, similarity: winner.similarity, message: 'CTC no longer active before click — aborted' };
             }
 
-            humanClick(winner.el);
+            humanClickForPageLoad(winner.el, 'ctc-choice-submit');
 
             return {
                 solved: true,
@@ -522,7 +522,7 @@
                     if (consecutiveSkips >= MAX_SKIPS_BEFORE_RELOAD) {
                         consecutiveSkips = 0;
                         logFn('CTC: too many failed attempts — reloading page for fresh CTC');
-                        location.reload();
+                        reloadCurrentPage('ctc-solver-refresh');
                         return { attempted: true, solved: false, message: result.message };
                     }
                 }
@@ -607,7 +607,7 @@
     // BOT CONFIG
     // =========================================================================
 
-    const SCRIPT_VERSION = '3.0.13';
+    const SCRIPT_VERSION = '3.0.21';
 
 
     // =========================================================================
@@ -618,7 +618,7 @@
     // checkboxes, timers, pending kill actions, BG flags, or local status data.
     const KILL_SHARED_SYNC = {
         enabled: true,
-        playerId: 'player3', // Your friend should use 'player2'
+        playerId: 'player2', // Your friend should use 'player2'
         intervalMs: 2 * 60 * 1000,
         tableName: 'shared_kill_players',
         deadTableName: 'shared_kill_dead_players',
@@ -630,8 +630,6 @@
         // staff/unkillable names change. Names are matched case-insensitively.
         excludedNames: [
             'Crisy',
-            'Aphotic',
-            'Cosmic'
         ],
 
         uploadBatchSize: 500,
@@ -886,6 +884,7 @@
         maxLiveLogEntries: 1000,
 
         // Human page visit settings
+        humanPageVisitsEnabled: false, // Independent opt-in; remains unchanged when personality is reset
         humanPageVisitChance: 0.08,  // 8% chance per natural pause point
         humanPageVisitMinMs: 3000,
         humanPageVisitMaxMs: 8000,
@@ -1144,6 +1143,7 @@
     // Call this at natural pause points — occasionally navigates to a human page
     async function maybeVisitHumanPage() {
         if (!state.enabled) return false;
+        if (!state.humanPageVisitsEnabled) return false;
         if (state.bgCrimeEnabled) return false; // bg crimes already randomises behaviour
         const minGapMs = 3 * 60 * 1000; // at least 3 mins between human visits
         if (Date.now() - lastHumanVisitAt < minGapMs) return false;
@@ -1243,6 +1243,12 @@
         set meltResetLoopActive(v) { setSetting('meltResetLoopActive', !!v); },
         get bgCrimeEnabled()       { return !!getSetting('bgCrimeEnabled', DEFAULTS.bgCrimeEnabled); },
         set bgCrimeEnabled(v)      { setSetting('bgCrimeEnabled', !!v); },
+        get bgCrimeCtcPending()    { return !!getSetting('bgCrimeCtcPending', false); },
+        set bgCrimeCtcPending(v)   { setSetting('bgCrimeCtcPending', !!v); },
+        get bgCrimeCtcDetectedAt() { return Number(getSetting('bgCrimeCtcDetectedAt', 0)); },
+        set bgCrimeCtcDetectedAt(v){ setSetting('bgCrimeCtcDetectedAt', Math.max(0, Number(v) || 0)); },
+        get humanPageVisitsEnabled()  { return !!getSetting('humanPageVisitsEnabled', DEFAULTS.humanPageVisitsEnabled); },
+        set humanPageVisitsEnabled(v) { setSetting('humanPageVisitsEnabled', !!v); },
         get diceJoinEnabled()      { return !!getSetting('diceJoinEnabled', DEFAULTS.diceJoinEnabled); },
         set diceJoinEnabled(v)     { setSetting('diceJoinEnabled', !!v); },
         get disableCrimesAtGb()    { return !!getSetting('disableCrimesAtGb', false); },
@@ -1783,6 +1789,9 @@
     let autoBuyGunBusy   = false;
     let reloadPending    = false;
     let reloadPendingStartedAt = 0;
+    let reloadPendingTargetUrl = '';
+    let reloadPendingReason = '';
+    let reloadRecoveryIssued = false;
     let securityHoldTimersPaused = false;
     let heartbeatHandle  = null;
     let nextReloadHandle = null;
@@ -2096,6 +2105,65 @@
         el.dispatchEvent(ev);
     }
 
+    // Central page-transition guard for bot actions that submit a normal form,
+    // follow a URL, or explicitly reload the page. Marking the transition before
+    // the action prevents the heartbeat from re-entering the old page and firing
+    // the same action again while the browser/server is still navigating.
+    function beginPageLoadTransition(reason = 'page-action', targetUrl = '') {
+        if (reloadPending) return false;
+        saveScrollPositions();
+        clearScheduledReload();
+        markReloadPending(reason, targetUrl || window.location.href);
+        return true;
+    }
+
+    function humanClickForPageLoad(el, reason = 'page-action') {
+        if (!el || reloadPending) return false;
+        if (!beginPageLoadTransition(reason)) return false;
+        try {
+            humanClick(el);
+            return true;
+        } catch (error) {
+            clearReloadPending();
+            throw error;
+        }
+    }
+
+    function submitFormForPageLoad(form, reason = 'form-submit') {
+        if (!form || reloadPending) return false;
+        if (!beginPageLoadTransition(reason)) return false;
+        try {
+            form.submit();
+            return true;
+        } catch (error) {
+            clearReloadPending();
+            throw error;
+        }
+    }
+
+    function nativeClickForPageLoad(el, reason = 'page-action') {
+        if (!el || reloadPending) return false;
+        if (!beginPageLoadTransition(reason)) return false;
+        try {
+            el.click();
+            return true;
+        } catch (error) {
+            clearReloadPending();
+            throw error;
+        }
+    }
+
+    function reloadCurrentPage(reason = 'page-reload') {
+        if (!reloadPending) beginPageLoadTransition(reason);
+        try {
+            window.location.reload();
+            return true;
+        } catch (error) {
+            clearReloadPending();
+            throw error;
+        }
+    }
+
     function rand(min, max) {
         let lo = toFiniteNumber(min);
         let hi = toFiniteNumber(max);
@@ -2124,6 +2192,70 @@
     }
 
     function now() { return Date.now(); }
+
+    // Foreground action readiness guard. The userscript starts after the normal page load,
+    // but slow game scripts can still add forms/buttons immediately afterwards. Seed the
+    // first complete signature immediately, then require only a short stable window. If the
+    // actionable DOM changes during late rendering, the window resets automatically.
+    const FOREGROUND_PAGE_MIN_AGE_MS = 150;
+    const FOREGROUND_PAGE_STABLE_MS  = 250;
+    const foregroundPageLoadedAt     = now();
+    let foregroundPageSignature      = '';
+    let foregroundPageStableSince    = 0;
+
+    function getForegroundPageActionSignature() {
+        if (document.readyState !== 'complete' || !document.body) return '';
+        if (hasSecurityVerificationPage() || hasCTCChallenge()) return 'special-page-ready';
+
+        const main = document.querySelector('#maincen, #maincenc, #tabcen');
+        const hasGameShell = !!document.querySelector('#nav') || !!main;
+        const hasAccountShell = isLoginPage() || isUsernamePage() || isRulesPage() || isTutorialPage();
+        if (!hasGameShell && !hasAccountShell) return '';
+
+        return [
+            currentPage(),
+            main ? main.childElementCount : -1,
+            document.forms.length,
+            document.querySelectorAll('input, button, select, textarea').length
+        ].join('|');
+    }
+
+    function seedForegroundPageActionSignature() {
+        const signature = getForegroundPageActionSignature();
+        if (!signature) return;
+        foregroundPageSignature = signature;
+        foregroundPageStableSince = now();
+    }
+
+    if (document.readyState === 'complete') {
+        seedForegroundPageActionSignature();
+    } else {
+        window.addEventListener('load', seedForegroundPageActionSignature, { once: true });
+    }
+
+    function isForegroundPageStableForActions() {
+        if (reloadPending) return false;
+        // CTC/security handling must remain available even while those special pages
+        // are still changing their own DOM.
+        if (hasSecurityVerificationPage() || hasCTCChallenge()) return true;
+        if (document.readyState !== 'complete' || !document.body) return false;
+        if ((now() - foregroundPageLoadedAt) < FOREGROUND_PAGE_MIN_AGE_MS) return false;
+
+        const signature = getForegroundPageActionSignature();
+        if (!signature) {
+            foregroundPageSignature = '';
+            foregroundPageStableSince = 0;
+            return false;
+        }
+
+        if (signature !== foregroundPageSignature) {
+            foregroundPageSignature = signature;
+            foregroundPageStableSince = now();
+            return false;
+        }
+
+        return (now() - foregroundPageStableSince) >= FOREGROUND_PAGE_STABLE_MS;
+    }
 
     function recentlyActed(extraBuffer = 0) {
         return now() - state.lastActionAt < extraBuffer;
@@ -2168,9 +2300,14 @@
             .replaceAll('>', '&gt;');
     }
 
-    function markReloadPending(reason = '') {
+    const PAGE_TRANSITION_RECOVERY_MS = 60000;
+
+    function markReloadPending(reason = '', targetUrl = '') {
         reloadPending = true;
         reloadPendingStartedAt = now();
+        reloadPendingTargetUrl = targetUrl || window.location.href;
+        reloadPendingReason = reason || '';
+        reloadRecoveryIssued = false;
         if (reason) setSetting('reloadPendingReason', reason);
     }
 
@@ -2178,6 +2315,9 @@
         const wasPending = reloadPending;
         reloadPending = false;
         reloadPendingStartedAt = 0;
+        reloadPendingTargetUrl = '';
+        reloadPendingReason = '';
+        reloadRecoveryIssued = false;
         if (reason && wasPending) addLiveLog(reason);
         setSetting('reloadPendingReason', '');
     }
@@ -2187,14 +2327,32 @@
             clearTimeout(nextReloadHandle);
             nextReloadHandle = null;
         }
+        // Do not clear an active form/navigation action lock. Several observers call
+        // this helper while a page is changing; clearing that lock would let the old
+        // page submit the same action again. Only a merely scheduled future reload is
+        // cancelled here.
+        if (reloadPending && reloadPendingReason === 'scheduled-reload') {
+            clearReloadPending();
+        }
+    }
+
+    function clearAllReloadState() {
+        if (nextReloadHandle) {
+            clearTimeout(nextReloadHandle);
+            nextReloadHandle = null;
+        }
         clearReloadPending();
     }
 
     function scheduleReload(ms) {
         if (reloadPending) return;
-        markReloadPending('scheduled-reload');
+        markReloadPending('scheduled-reload', window.location.href);
         addLiveLog(`Reload scheduled in ${Math.round(ms / 1000)}s`);
-        nextReloadHandle = setTimeout(() => window.location.reload(), ms);
+        nextReloadHandle = setTimeout(() => {
+            nextReloadHandle = null;
+            reloadPendingStartedAt = now();
+            window.location.reload();
+        }, ms);
     }
 
     function isRunValid(token) {
@@ -2225,7 +2383,7 @@
         stopBonusPointsSpender();
         stopBustObserver();
         pauseKillPlayerFinderForBotPause();
-        clearScheduledReload();
+        clearAllReloadState();
         state.gtaResetLoopActive   = false;
         state.meltResetLoopActive  = false;
         state.bustLoopActive       = false;
@@ -2282,6 +2440,10 @@
 
     function clearSecurityHoldTimersOnly() {
         if (bgCrimeTimer)       { clearTimeout(bgCrimeTimer);       bgCrimeTimer = null; }
+        if (bgCrimeAbortController) {
+            bgCrimeAbortController.abort();
+            bgCrimeAbortController = null;
+        }
         if (diceJoinTimer)      { clearTimeout(diceJoinTimer);      diceJoinTimer = null; }
         if (qtSniperTimer)      { clearTimeout(qtSniperTimer);      qtSniperTimer = null; }
         if (qtPerkExtendTimer)  { clearTimeout(qtPerkExtendTimer);  qtPerkExtendTimer = null; }
@@ -2378,9 +2540,8 @@
             return true;
         }
 
-        if (reloadPending && state.securityVerificationLastReloadAt && nowMs - state.securityVerificationLastReloadAt > SECURITY_VERIFICATION_RELOAD_STUCK_MS) {
-            clearReloadPending('Security watchdog: reload did not unload page — clearing reloadPending and keeping heartbeat alive');
-        }
+        // The central page-transition guard owns reload recovery. Never clear the
+        // lock here, because doing so could re-run the action that led to verification.
 
         const nextRefreshAt = state.securityVerificationNextRefreshAt || (firstSeen + SECURITY_VERIFICATION_FIRST_WAIT_MS);
         if (nowMs < nextRefreshAt) {
@@ -2419,18 +2580,21 @@
     }
     window.addEventListener('beforeunload', saveScrollPositions);
 
-    function navigateToUrl(rawUrl) {
+    function navigateToUrl(rawUrl, reason = 'navigate-url') {
         // Do not attach bot identity to the URL. The active bot window is tracked
         // with Tampermonkey per-tab storage instead, so normal navigation and
-        // copied links stay clean.
-        window.location.href = String(rawUrl);
+        // copied links stay clean. Direct URL navigation uses the same page-load
+        // lock as gotoPage() so the old page cannot keep acting during lag.
+        const targetUrl = String(rawUrl);
+        if (!reloadPending) beginPageLoadTransition(reason, targetUrl);
+        else reloadPendingTargetUrl = targetUrl;
+        window.location.href = targetUrl;
+        return true;
     }
 
     function gotoPage(pageName, extraParams = {}) {
 
-        saveScrollPositions();
-        clearScheduledReload();
-        markReloadPending(`goto:${pageName}`);
+        if (reloadPending) return false;
         const url = new URL(window.location.href);
         url.searchParams.set('p', pageName);
 
@@ -2451,7 +2615,8 @@
         }
 
         addLiveLog(`Navigating to ${pageName}${extraParams.page ? ' page ' + extraParams.page : ''}`);
-        navigateToUrl(url.toString());
+        navigateToUrl(url.toString(), `goto:${pageName}`);
+        return true;
     }
 
     function gotoCleanMeltPage(pageNum = 1) {
@@ -2663,6 +2828,17 @@
         return isMeltEnabled() && !isMeltLocked() && !isGTALocked();
     }
     function isDrugsEnabled() { return state.autoDrugsEnabled; }
+
+    // While a Bullet Factory cycle is pending, it owns travel, cash and page
+    // routing. Drug Running remains enabled but does not start any new work
+    // until the Bullet Factory clears pendingBulletRun.
+    function isDrugRunPausedByBulletFactory() {
+        return !!state.pendingBulletRun;
+    }
+
+    function isDrugRunUsableNow() {
+        return isDrugsEnabled() && !isDrugRunPausedByBulletFactory();
+    }
 
     function isInternalGTAReady() { return now() >= state.nextGTAReadyAt; }
 
@@ -2901,7 +3077,7 @@
         const freshBtn = getGTAResetButton();
         if (!freshBtn) return false;
 
-        humanClick(freshBtn);
+        humanClickForPageLoad(freshBtn, 'gta-reset-submit');
 
         updateStats(s => {
             s.gtaResets     += 1;
@@ -2951,7 +3127,7 @@
         const freshBtn = getMeltResetButton();
         if (!freshBtn) return false;
 
-        humanClick(freshBtn);
+        humanClickForPageLoad(freshBtn, 'melt-reset-submit');
 
         updateStats(s => {
             s.meltResets    += 1;
@@ -3120,12 +3296,11 @@
         if (!freshInput || !freshAction) return false;
 
         freshInput.value = String(Math.floor(amount));
-        humanClick(freshAction);
-        return true;
+        return humanClickForPageLoad(freshAction, `swiss-bank-${isDeposit ? 'deposit' : 'withdraw'}`);
     }
 
     function shouldDoSwissDeposit() {
-        if (!isDrugsEnabled()) return false;
+        if (!isDrugRunUsableNow()) return false;
 
         const capacity = state.drugCapacityCache;
         if (capacity <= 0) return false;
@@ -3220,6 +3395,10 @@
                 // Initial withdraw confirmed — now advance stage to travel
                 if (state.pendingBulletRun) state.pendingBulletRun = { ...state.pendingBulletRun, stage: 'travel' };
                 gotoPage('cars');
+            } else if (isDrugRunPausedByBulletFactory()) {
+                // A drug withdrawal may have completed just as Bullet Factory
+                // took control. Do not resume Drug Running until that run ends.
+                gotoPage('crimes');
             } else {
                 gotoPage('drugs');
             }
@@ -3425,7 +3604,7 @@
         const freshSell = getDrugSellButton();
         if (!freshSell) return false;
 
-        humanClick(freshSell);
+        humanClickForPageLoad(freshSell, 'drug-sell-submit');
         addLiveLog('Drug run: Sell submitted');
         return true;
     }
@@ -3454,7 +3633,7 @@
 
         freshSelect.value  = drugOption.value;
         freshAmount.value  = String(amount);
-        humanClick(freshBuy);
+        humanClickForPageLoad(freshBuy, 'drug-buy-submit');
 
         addLiveLog(`Drug run: buy submitted — ${amount} units of ${drugOption.name}`);
         return true;
@@ -3485,7 +3664,7 @@
         if (!freshSelect || !freshGo) return false;
 
         freshSelect.value = locationValue;
-        humanClick(freshGo);
+        humanClickForPageLoad(freshGo, `drug-drive-${destinationName}`);
 
         // Set a pessimistic placeholder so the bot doesn't think drive is ready
         // immediately on the next page load. The tick sync will correct this.
@@ -3497,6 +3676,13 @@
 
     async function handleDrugsPage() {
         stopJailObserver();
+
+        if (isDrugRunPausedByBulletFactory()) {
+            addLiveLog('Drug run: paused while Bullet Factory cycle is active');
+            await wait(navRand());
+            gotoPage('crimes');
+            return;
+        }
 
         // BG Spam takes priority — suppress drug run travel
         if (state.killBgSpamEnabled && state.killBgSpamTarget && state.killBgCheckEnabled) {
@@ -3543,12 +3729,12 @@
                 if (/match the letters|captcha/i.test(text)) {
                     addLiveLog('Drug comp: CTC in response — reloading page to solve');
                     await wait(rand(500, 900));
-                    location.reload();
+                    reloadCurrentPage('drug-comp-ctc-refresh');
                     return;
                 }
 
                 await wait(rand(150, 300));
-                location.reload();
+                reloadCurrentPage('drug-comp-next-unit-refresh');
                 return;
             }
 
@@ -3757,6 +3943,13 @@
             return;
         }
 
+        if (isDrugRunPausedByBulletFactory()) {
+            addLiveLog('Drug run: car-page work paused while Bullet Factory cycle is active');
+            await wait(navRand());
+            gotoPage('crimes');
+            return;
+        }
+
         if (!isDrugsEnabled()) {
             addLiveLog('Car page: drug running off — returning to crimes');
             await wait(navRand());
@@ -3786,7 +3979,7 @@
             const freshRepair = getCarPageRepairButton();
             if (!freshRepair) return;
 
-            humanClick(freshRepair);
+            humanClickForPageLoad(freshRepair, 'drug-car-repair-submit');
             addLiveLog('Drug run: repair button clicked');
             return;
         }
@@ -6951,7 +7144,7 @@
         state.killSearchWaitLogAt = 0;
         addLiveLog(`Kill scanner: searching ${target.name} (status: ${target.status})`);
 
-        humanClick(freshSearchBtn);
+        humanClickForPageLoad(freshSearchBtn, `kill-search-${target.name}`);
         // Page reloads — result handled on next load
     }
 
@@ -8695,6 +8888,8 @@ async function doQTPerkRedeem() {
     }
     let bgCrimeTimer  = null;
     let bgCrimeActive = false;
+    let bgCrimeInFlight = false;
+    let bgCrimeAbortController = null;
     let bgCrimeToken  = null;
     let bgCrimeCooldowns = {};
     let bgCrimeNextPageFetchAt = 0;
@@ -8707,6 +8902,10 @@ async function doQTPerkRedeem() {
     const BG_CRIME_FETCH_BACKOFF_MIN   = 5000;
     const BG_CRIME_FETCH_BACKOFF_MAX   = 60000;
     const BG_CRIME_JAIL_FALLBACK_MS    = 30000;
+    const BG_CRIME_FETCH_TIMEOUT_MS          = 15000;
+    const BG_CRIME_CTC_RECHECK_MS            = 5000;
+    const BG_CRIME_CTC_SURFACE_WAIT_MS       = 3000;
+    const BG_CRIME_CTC_NO_WIDGET_BACKOFF_MS  = 15000;
 
     function getBgCrimeIds() {
         const gangText = (document.querySelector('#player-gang')?.textContent || '').trim().toLowerCase();
@@ -8730,7 +8929,110 @@ async function doQTPerkRedeem() {
     function getActiveBgCrimeIds() {
         const ids = getBgCrimeIds();
         const enabled = ids.filter(id => state.enabledActions.includes(id));
-        return enabled.length > 0 ? enabled : ids;
+        const configured = enabled.length > 0 ? enabled : ids;
+
+        // A prestige can leave high-rank crimes selected but greyed out in the UI.
+        // Keep those selections so they reactivate after ranking up, but never let a
+        // rank-locked crime enter the Background Crimes request queue.
+        return configured.filter(id => !isCrimeLocked(id));
+    }
+
+    function getBgCrimeControllerScript(doc) {
+        const scripts = [...doc.querySelectorAll('script')];
+
+        // A live Crimes page may contain a previous /a/crime.php result inside
+        // #showmessi. That fragment can contain its own token and one timing entry.
+        // Prefer the complete page controller containing the full timing array.
+        return scripts.find(script => {
+            const source = script.textContent || '';
+            return /var\s+timing\s*=\s*\[\s*\]/.test(source) &&
+                   /a\/crime\.php/.test(source) &&
+                   /unluckykidda/.test(source);
+        }) || [...scripts].reverse().find(script =>
+            (script.textContent || '').includes('unluckykidda')
+        ) || null;
+    }
+
+    function getBgCrimeUnlockedIdsFromPage(doc) {
+        const unlocked = new Set();
+        doc.querySelectorAll('#crimebox input[type="button"].crime[data]').forEach(button => {
+            const id = String(button.getAttribute('data') || '').trim();
+            if (id) unlocked.add(id);
+        });
+        return unlocked;
+    }
+
+    function bgCrimeResponseHasCTC(html, allowEmbeddedFragmentMarkup = false) {
+        const source = String(html || '');
+        if (!source) return false;
+
+        try {
+            const doc = new DOMParser().parseFromString(source, 'text/html');
+
+            // Full UG pages contain CTC-related JavaScript and selector strings even
+            // when no challenge is active. Only count real rendered challenge markup.
+            const candidates = [
+                ...doc.querySelectorAll('#ctcbox, td.veg.lettuce.centd')
+            ];
+
+            for (const box of candidates) {
+                const refImg = box.querySelector('img[src*="text.php"]');
+                const choices = box.querySelectorAll('input[type="image"]');
+                const instruction = /match\s+the(?:\s+\d+)?\s+letters?/i.test(box.textContent || '');
+                if (refImg && choices.length >= 4 && instruction) return true;
+            }
+
+            // Some responses omit the usual wrapper. In that case, anchor detection
+            // on an actual reference image element and inspect its nearest container.
+            for (const refImg of doc.querySelectorAll('img[src*="text.php"]')) {
+                const box = refImg.closest('#ctcbox, td, div, form, table') || refImg.parentElement;
+                if (!box) continue;
+                const choices = box.querySelectorAll('input[type="image"]');
+                const instruction = /match\s+the(?:\s+\d+)?\s+letters?/i.test(box.textContent || '');
+                if (choices.length >= 4 && instruction) return true;
+            }
+        } catch (_) {}
+
+        // /a/crime.php may return a small JavaScript/HTML fragment rather than a
+        // complete document. Permit a raw fallback only for that response type and
+        // require several challenge-specific markers together. Never use this for a
+        // complete Crimes page because its normal scripts contain CTC wording.
+        if (allowEmbeddedFragmentMarkup && !/<(?:!doctype|html|head|body)\b/i.test(source)) {
+            const hasInstruction = /match\s+the(?:\s+\d+)?\s+letters?/i.test(source);
+            const hasReference   = /text\.php/i.test(source);
+            const hasContainer   = /id=["']ctcbox["']/i.test(source);
+            const imageInputs    = (source.match(/<input\b[^>]*\btype=["']image["'][^>]*>/gi) || []).length;
+            if (hasInstruction && hasReference && (hasContainer || imageInputs >= 4)) return true;
+            if (/\bcaptcha\b/i.test(source) && hasReference && (hasContainer || imageInputs >= 4)) return true;
+        }
+
+        return false;
+    }
+
+    function noteBgCrimeCtcDetected(sourceLabel = 'crime response') {
+        const wasPending = state.bgCrimeCtcPending;
+        if (!wasPending) state.bgCrimeCtcDetectedAt = Date.now();
+        state.bgCrimeCtcPending = true;
+        bgCrimeToken = null;
+        bgCrimeNextPageFetchAt = Date.now() + BG_CRIME_CTC_RECHECK_MS;
+        if (!wasPending) {
+            addLiveLog(`BG Crime: CTC detected in ${sourceLabel} — pausing requests and opening Crimes page`);
+        }
+    }
+
+    async function bgCrimeFetchText(url, options = {}) {
+        const controller = new AbortController();
+        bgCrimeAbortController = controller;
+        const timer = setTimeout(() => controller.abort(), BG_CRIME_FETCH_TIMEOUT_MS);
+        try {
+            const response = await fetch(url, { ...options, signal: controller.signal });
+            const text = await response.text();
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            return text;
+        } finally {
+            clearTimeout(timer);
+            if (bgCrimeAbortController === controller) bgCrimeAbortController = null;
+        }
     }
 
     function getBgCrimeJailDelayMs(doc = document) {
@@ -8787,6 +9089,10 @@ async function doQTPerkRedeem() {
     function getBgCrimeScheduleDelayMs() {
         const nowMs = Date.now();
 
+        if (state.bgCrimeCtcPending) return BG_CRIME_CTC_RECHECK_MS;
+        if (hasCTCChallenge()) return 1000;
+        if (bgCrimeInFlight) return 1000;
+
         if (bgCrimeJailPauseUntil > nowMs) {
             return Math.max(1000, bgCrimeJailPauseUntil - nowMs);
         }
@@ -8842,12 +9148,18 @@ async function doQTPerkRedeem() {
     function stopBgCrime() {
         bgCrimeActive = false;
         if (bgCrimeTimer) { clearTimeout(bgCrimeTimer); bgCrimeTimer = null; }
+        if (bgCrimeAbortController) {
+            bgCrimeAbortController.abort();
+            bgCrimeAbortController = null;
+        }
         bgCrimeToken = null;
         bgCrimeCooldowns = {};
         bgCrimeNextPageFetchAt = 0;
         bgCrimeFetchBackoffMs = BG_CRIME_FETCH_BACKOFF_MIN;
         bgCrimeJailPauseUntil = 0;
         bgCrimeJailPauseLogged = false;
+        state.bgCrimeCtcPending = false;
+        state.bgCrimeCtcDetectedAt = 0;
     }
 
     function scheduleBgCrimePoll() {
@@ -8857,32 +9169,43 @@ async function doQTPerkRedeem() {
     }
 
     async function doBgCrimePoll() {
-        if (state.securityVerificationHoldActive || hasSecurityVerificationPage()) {
-            bgCrimeNextPageFetchAt = Date.now() + 10000;
-            scheduleBgCrimePoll();
-            return;
-        }
-        if (!bgCrimeActive || !state.bgCrimeEnabled || !state.enabled || crimePaused) { scheduleBgCrimePoll(); return; }
-        // BG Crime uses AJAX and should keep committing while Kill/BG Farm is
-        // merely waiting/searching/verifying. In v47 this was blocked by
-        // hasActiveBgFarmCriticalChain(), which meant a stored BG shot waiting
-        // for bullets could pause background crimes entirely after the initial
-        // due burst. Only CTC/jail/crime settle windows should pause it here.
-        if (hasCTCChallenge()) { scheduleBgCrimePoll(); return; }
-
-        if (isLikelyJailPage()) {
-            noteBgCrimeJailPause(document);
+        if (bgCrimeInFlight) {
             scheduleBgCrimePoll();
             return;
         }
 
-        if (bgCrimeJailPauseUntil > Date.now()) { scheduleBgCrimePoll(); return; }
-        bgCrimeJailPauseLogged = false;
-
-        const activeIds = getActiveBgCrimeIds();
-        if (!activeIds.length) { scheduleBgCrimePoll(); return; }
-
+        bgCrimeInFlight = true;
         try {
+            if (state.securityVerificationHoldActive || hasSecurityVerificationPage()) {
+                bgCrimeNextPageFetchAt = Date.now() + 10000;
+                return;
+            }
+            if (!bgCrimeActive || !state.bgCrimeEnabled || !state.enabled || crimePaused) return;
+            if (state.bgCrimeCtcPending) return;
+
+            // Never launch a background action while the foreground page is still
+            // assembling after a slow load. This also prevents overlapping work when
+            // game scripts add their forms/buttons late.
+            if (!isForegroundPageStableForActions()) return;
+
+            // A visible CTC is handled by the foreground heartbeat. Keep Background
+            // Crimes paused and preserve the pending flag across the solver reload.
+            if (hasCTCChallenge()) {
+                bgCrimeToken = null;
+                return;
+            }
+
+            if (isLikelyJailPage()) {
+                noteBgCrimeJailPause(document);
+                return;
+            }
+
+            if (bgCrimeJailPauseUntil > Date.now()) return;
+            bgCrimeJailPauseLogged = false;
+
+            let activeIds = getActiveBgCrimeIds();
+            if (!activeIds.length) return;
+
             const nowMs = Date.now();
             const known = activeIds.filter(id => bgCrimeCooldowns[id] !== undefined);
             const dueKnown = known.filter(id => (bgCrimeCooldowns[id] || 0) <= nowMs);
@@ -8890,71 +9213,114 @@ async function doQTPerkRedeem() {
             // Only refresh /?p=crimes when we actually need a token for a due crime.
             // If all enabled crimes have future cooldowns, do not poll the page just because the token is missing.
             if (!bgCrimeToken) {
-                if (known.length > 0 && dueKnown.length === 0) {
-                    scheduleBgCrimePoll();
-                    return;
-                }
+                if (known.length > 0 && dueKnown.length === 0) return;
+                if (bgCrimeNextPageFetchAt > nowMs) return;
 
-                if (bgCrimeNextPageFetchAt > nowMs) {
-                    scheduleBgCrimePoll();
-                    return;
-                }
+                const pageText = await bgCrimeFetchText('/?p=crimes', {
+                    credentials: 'include',
+                    cache: 'no-store'
+                });
 
-                const pageResp = await fetch('/?p=crimes', { credentials: 'include', cache: 'no-store' });
-                const pageText = await pageResp.text();
                 const parser = new DOMParser();
                 const doc = parser.parseFromString(pageText, 'text/html');
 
                 // Check for jail. Do not repeatedly poll the crimes page while jailed.
                 if (doc.querySelector('#jailn') || pageText.includes('jailn')) {
                     noteBgCrimeJailPause(doc);
-                    scheduleBgCrimePoll();
                     return;
                 }
 
-                // Get token
-                const scripts = [...doc.querySelectorAll('script')];
-                const crimeScript = scripts.find(s => s.textContent.includes('unluckykidda'));
+                // Get the token from the complete Crimes-page controller, not a
+                // stale AJAX result script that may be present inside #showmessi.
+                const crimeScript = getBgCrimeControllerScript(doc);
                 const token = crimeScript?.textContent.match(/var unluckykidda\s*=\s*["']([a-f0-9]+)["']/)?.[1];
                 if (!token) {
+                    // Only classify a complete Crimes page as a CTC when the normal
+                    // crime token is absent. Normal pages may contain hidden CTC
+                    // templates or CTC-related scripts even when no challenge is active.
+                    if (bgCrimeResponseHasCTC(pageText, false)) {
+                        noteBgCrimeCtcDetected('Crimes page response');
+                        return;
+                    }
                     bumpBgCrimeFetchBackoff();
-                    scheduleBgCrimePoll();
                     return;
                 }
 
+                if (!bgCrimeActive || !state.bgCrimeEnabled || state.bgCrimeCtcPending) return;
                 bgCrimeToken = token;
                 resetBgCrimeFetchBackoff();
 
+                // The fetched page is authoritative about which crimes currently
+                // have a real Commit button. This protects against prestige/rank
+                // changes even if a selected crime is still checked in the UI.
+                const pageUnlockedIds = getBgCrimeUnlockedIdsFromPage(doc);
+                activeIds = activeIds.filter(id => pageUnlockedIds.has(id));
+                if (!activeIds.length) {
+                    bgCrimeToken = null;
+                    bgCrimeNextPageFetchAt = Date.now() + BG_CRIME_IDLE_POLL_MS;
+                    return;
+                }
+
                 // Get initial cooldowns — convert relative seconds to absolute timestamps.
-                // The page is still useful for the first token/state load, but after that
-                // successful crime responses use fixed per-crime cooldown defaults when
-                // the response does not include an explicit timing update.
                 const pageTimerBase = Date.now();
                 const timingMatches = [...(crimeScript?.textContent.matchAll(/timing\["([^"]+)"\]\s*=\s*"?(-?\d+)"?/g) || [])];
-                timingMatches.forEach(m => setBgCrimeCooldown(m[1], pageTimerBase, m[2]));
-
-                // If the page omitted an enabled crime timer, make a single normal attempt.
-                // Once it succeeds, fixed cooldowns keep it timer-driven without page polling.
-                activeIds.forEach(id => {
-                    if (bgCrimeCooldowns[id] === undefined) bgCrimeCooldowns[id] = 0;
+                timingMatches.forEach(m => {
+                    if (pageUnlockedIds.has(m[1])) {
+                        setBgCrimeCooldown(m[1], pageTimerBase, m[2]);
+                    }
                 });
+
+                // Do not treat a missing timer as zero. Only infer availability when
+                // the fetched page contains a genuine unlocked Commit control whose
+                // wrapper/text says it is available.
+                activeIds.forEach(id => {
+                    if (bgCrimeCooldowns[id] !== undefined) return;
+
+                    const wrapper = doc.querySelector(`#bcrime${id}`);
+                    const timerNode = doc.querySelector(`#crimetime-${id}`);
+                    const timerText = (timerNode?.textContent || '').trim();
+                    const wrapperStyle = (wrapper?.getAttribute('style') || '').toLowerCase();
+                    const visiblyAvailable = !!wrapper &&
+                        !/display\s*:\s*none/.test(wrapperStyle) &&
+                        /available/i.test(timerText);
+
+                    if (visiblyAvailable) {
+                        bgCrimeCooldowns[id] = 0;
+                        return;
+                    }
+
+                    const secondsMatch = timerText.match(/(-?\d+)\s*seconds?/i);
+                    if (secondsMatch) {
+                        setBgCrimeCooldown(id, pageTimerBase, secondsMatch[1]);
+                    }
+                });
+
+                const unresolvedIds = activeIds.filter(id => bgCrimeCooldowns[id] === undefined);
+                if (unresolvedIds.length) {
+                    addLiveLog(`BG Crime: timer missing for ${unresolvedIds.map(getCrimeName).join(', ')} — refreshing Crimes data`);
+                    bgCrimeToken = null;
+                    bgCrimeNextPageFetchAt = Date.now() + BG_CRIME_FETCH_BACKOFF_MIN;
+                    return;
+                }
             }
 
             // Commit all currently due enabled crimes using cached cooldowns.
             const commitNow = Date.now();
-            const available = activeIds.filter(id => (bgCrimeCooldowns[id] ?? 0) <= commitNow);
+            const available = activeIds.filter(id =>
+                bgCrimeCooldowns[id] !== undefined && bgCrimeCooldowns[id] <= commitNow
+            );
             for (const id of available) {
-                if (!bgCrimeToken) break;
+                if (!bgCrimeToken || state.bgCrimeCtcPending) break;
                 if (!bgCrimeActive || !state.bgCrimeEnabled) break;
 
-                const resp = await fetch(`/a/crime.php?id=${id}&noob=${bgCrimeToken}&unlucky=${rand(4,196)}&kidda=${rand(4,18)}`, {
-                    credentials: 'include'
-                });
-                const text = await resp.text();
+                const text = await bgCrimeFetchText(
+                    `/a/crime.php?id=${id}&noob=${bgCrimeToken}&unlucky=${rand(4,196)}&kidda=${rand(4,18)}`,
+                    { credentials: 'include' }
+                );
 
-                // Check for CTC in response
-                if (/match the letters|captcha/i.test(text)) {
-                    scheduleBgCrimePoll();
+                const newToken = text.match(/var unluckykidda\s*=\s*["']([a-f0-9]+)["']/)?.[1];
+                if (!newToken && bgCrimeResponseHasCTC(text, true)) {
+                    noteBgCrimeCtcDetected(`crime ${id} response`);
                     return;
                 }
 
@@ -8965,19 +9331,14 @@ async function doQTPerkRedeem() {
                         addLiveLog('BG Crime: jailed after crime — pausing background crime page fetches');
                         bgCrimeJailPauseLogged = true;
                     }
-                    scheduleBgCrimePoll();
                     return;
                 }
 
-                const newToken = text.match(/var unluckykidda\s*=\s*["']([a-f0-9]+)["']/)?.[1];
                 const result = text.match(/^([^<\n]+)/)?.[1]?.trim();
 
                 if (newToken) {
                     bgCrimeToken = newToken;
                     resetBgCrimeFetchBackoff();
-                    // Update cooldown as absolute timestamp. If the AJAX response does
-                    // not include a fresh timer, fall back to the known fixed cooldown for
-                    // this exact crime instead of using a short retry/backoff delay.
                     const timingMatch = text.match(new RegExp(`timing\\["${id}"\\]\\s*=\\s*"?(-?\\d+)"?`));
                     setBgCrimeCooldown(id, Date.now(), timingMatch ? timingMatch[1] : null);
                     addLiveLog(`BG Crime: ${result || 'committed crime ' + id}`);
@@ -8991,20 +9352,25 @@ async function doQTPerkRedeem() {
                 await wait(150);
             }
         } catch (e) {
-            addLiveLog(`BG Crime: error — ${e.message}`);
-            bgCrimeToken = null; // clear token, but respect fetch backoff before refreshing the crimes page
+            // An intentional stop/security pause abort should not be logged as a fault.
+            if (!bgCrimeActive || !state.bgCrimeEnabled || state.securityVerificationHoldActive || hasSecurityVerificationPage()) return;
+            const message = e?.name === 'AbortError' ? 'request timed out' : (e?.message || String(e));
+            addLiveLog(`BG Crime: error — ${message}`);
+            bgCrimeToken = null;
             bumpBgCrimeFetchBackoff();
+        } finally {
+            bgCrimeInFlight = false;
+            scheduleBgCrimePoll();
         }
-        scheduleBgCrimePoll();
     }
 
     // ── Bullet Factory System ─────────────────────────────────────────────────
     // Checks the Global Owners page every 30 minutes (on the half-hour).
-    // Finds countries with bullet factories that have 300+ bullets, withdraws
+    // Finds countries with bullet factories that have 150+ bullets, withdraws
     // cash and travels to each to buy all available stock.
 
     const BULLET_FACTORY_CHECK_INTERVAL_MS = 30 * 60 * 1000; // 30 minutes
-    const BULLET_FACTORY_MIN_STOCK         = 300;
+    const BULLET_FACTORY_MIN_STOCK         = 150;
     const BULLET_FACTORY_COST_PER_BULLET   = 10000; // safe upper bound
 
     // Returns the timestamp of the most recent half-hour boundary (e.g. 12:30, 13:00)
@@ -9237,7 +9603,7 @@ async function doQTPerkRedeem() {
         return !!playerCountry && playerCountry.toLowerCase() === target.country.toLowerCase();
     }
 
-    // Fetches the Global Owners page and returns countries with 300+ bullet stock
+    // Fetches the Global Owners page and returns countries with 150+ bullet stock
     // sorted by stock descending (most bullets first)
     async function fetchBulletFactoryStocks() {
         try {
@@ -9295,7 +9661,7 @@ async function doQTPerkRedeem() {
 
         const stocks = await fetchBulletFactoryStocks();
         if (!stocks.length) {
-            addLiveLog('Bullet factory: no countries have 300+ bullets — skipping');
+            addLiveLog(`Bullet factory: no countries have ${BULLET_FACTORY_MIN_STOCK}+ bullets — skipping`);
             return;
         }
 
@@ -9596,7 +9962,7 @@ async function doQTPerkRedeem() {
 
         state.lastActionAt = now();
         markGTACooldownStarted();
-        humanClick(btn);
+        humanClickForPageLoad(btn, 'gta-steal-submit');
         addLiveLog('GTA attempted');
 
         return true;
@@ -9735,7 +10101,7 @@ async function doQTPerkRedeem() {
         freshRadio.checked       = true;
         state.pendingMeltBullets = candidate.bulletValue;
         state.pendingMeltCarText = `${candidate.name} #${candidate.id}`;
-        humanClick(freshSubmit);
+        humanClickForPageLoad(freshSubmit, `melt-submit-${candidate.id}`);
         markMeltCooldownStarted();
         resetMeltSearchState();
 
@@ -9811,7 +10177,7 @@ async function doQTPerkRedeem() {
         }
 
         state.lastActionAt = now();
-        humanClick(freshRepair);
+        humanClickForPageLoad(freshRepair, 'bulk-repair-submit');
 
         updateStats(s => {
             s.repairs       += 1;
@@ -9856,7 +10222,7 @@ async function doQTPerkRedeem() {
         const freshBtn = getLeaveJailButton();
         if (!freshBtn) return false;
 
-        humanClick(freshBtn);
+        humanClickForPageLoad(freshBtn, 'leave-jail-submit');
 
         updateStats(s => {
             s.jailEscapes   += 1;
@@ -10485,7 +10851,7 @@ async function doQTPerkRedeem() {
         const freshBtn = getMissionAcceptButton();
         if (!freshBtn || freshBtn.disabled) return false;
 
-        humanClick(freshBtn);
+        humanClickForPageLoad(freshBtn, 'mission-accept-submit');
         return true;
     }
 
@@ -10499,7 +10865,7 @@ async function doQTPerkRedeem() {
         const freshBtn = getMissionDeclineButton();
         if (!freshBtn || freshBtn.disabled) return false;
 
-        humanClick(freshBtn);
+        humanClickForPageLoad(freshBtn, 'mission-decline-submit');
         return true;
     }
 
@@ -10538,7 +10904,7 @@ async function doQTPerkRedeem() {
                 const freshSubmit = getUseForMissionButton();
                 if (!freshSubmit) return false;
 
-                humanClick(freshSubmit);
+                humanClickForPageLoad(freshSubmit, 'mission-cars-submit');
                 addLiveLog(`Submitted ${requiredAmount} cars for mission`);
                 return true;
             }
@@ -10570,7 +10936,7 @@ async function doQTPerkRedeem() {
         const freshSubmit = getUseForMissionButton();
         if (!freshSubmit) return false;
 
-        humanClick(freshSubmit);
+        humanClickForPageLoad(freshSubmit, 'mission-cars-submit-manual');
         addLiveLog(`Submitted ${requiredAmount} cars for mission (manual selection)`);
         return true;
     }
@@ -10976,12 +11342,12 @@ async function doQTPerkRedeem() {
             nativeInputValueSetter.call(passInput, password);
             passInput.dispatchEvent(new Event('input', { bubbles: true }));
             await wait(300);
-            loginBtn.click();
+            nativeClickForPageLoad(loginBtn, 'account-login-submit');
         } else {
             // No credentials — rely on browser autofill (works on Firefox)
             addLiveLog('Auto login: clicking Enter (autofill mode)');
             await wait(rand(500, 800));
-            loginBtn.click();
+            nativeClickForPageLoad(loginBtn, 'account-login-submit');
         }
     }
 
@@ -11037,7 +11403,7 @@ async function doQTPerkRedeem() {
             removeCurrentAccName();
             addLiveLog('Auto login: invalid username — removed from list');
             await wait(rand(300, 600));
-            location.reload();
+            reloadCurrentPage('account-invalid-name-refresh');
             return;
         }
 
@@ -11063,7 +11429,7 @@ async function doQTPerkRedeem() {
             addLiveLog(`Auto login: "${username}" already taken — removing from list`);
             removeCurrentAccName();
             await wait(rand(400, 800));
-            location.reload();
+            reloadCurrentPage('account-taken-name-refresh');
             return;
         }
 
@@ -11073,7 +11439,7 @@ async function doQTPerkRedeem() {
         // will reload and the next name will be tried. This prevents used names
         // from staying in the list if the taken error isn't caught.
         removeCurrentAccName();
-        humanClick(confirmBtn);
+        humanClickForPageLoad(confirmBtn, 'account-username-submit');
     }
 
     async function handleRulesPage() {
@@ -11087,7 +11453,7 @@ async function doQTPerkRedeem() {
         });
         if (tutorialForm) {
             await wait(rand(500, 900));
-            tutorialForm.submit();
+            submitFormForPageLoad(tutorialForm, 'account-tutorial-decline-submit');
             await wait(rand(800, 1200));
             return; // page will reload, handler will run again for rules
         }
@@ -11119,7 +11485,7 @@ async function doQTPerkRedeem() {
             }
             await wait(rand(500, 900));
             addLiveLog('Auto login: rules accepted — retrieving assets from previous account');
-            humanClick(agreeBtn);
+            humanClickForPageLoad(agreeBtn, 'account-rules-submit');
             return;
         }
 
@@ -11292,7 +11658,7 @@ async function doQTPerkRedeem() {
             // Try to do something else useful instead
             const gtaUsable   = isGTAEnabled()  && !isGTALocked();
             const meltUsable  = isMeltUsable();
-            const drugsUsable = isDrugsEnabled();
+            const drugsUsable = isDrugRunUsableNow();
             if (drugsUsable && isInternalDriveReady() && !(state.killBgSpamEnabled && state.killBgSpamTarget && state.killBgCheckEnabled)) {
                 await wait(navRand());
                 gotoPage('drugs');
@@ -11331,7 +11697,7 @@ async function doQTPerkRedeem() {
             }
             const gtaUsable   = isGTAEnabled()  && !isGTALocked();
             const meltUsable  = isMeltUsable();
-            const drugsUsable = isDrugsEnabled();
+            const drugsUsable = isDrugRunUsableNow();
 
             if (shouldRunRepairCycle()) {
                 addLiveLog(`Repair threshold reached (${state.meltsSinceRepair}/${state.repairEveryMelts})`);
@@ -11465,7 +11831,7 @@ async function doQTPerkRedeem() {
 
         const gtaUsable   = isGTAEnabled()  && !isGTALocked();
         const meltUsable  = isMeltUsable();
-        const drugsUsable = isDrugsEnabled();
+        const drugsUsable = isDrugRunUsableNow();
 
         const bgSpamSuppressed = state.killBgSpamEnabled && state.killBgSpamTarget && state.killBgCheckEnabled;
 
@@ -11942,7 +12308,7 @@ async function doQTPerkRedeem() {
                     state.lastActionAt = now();
                     await wait(rand(DEFAULTS.actionDelayMin, DEFAULTS.actionDelayMax));
                     const freshRepair = document.querySelector('form input[type="submit"][name="repair"]');
-                    if (freshRepair) humanClick(freshRepair);
+                    if (freshRepair) humanClickForPageLoad(freshRepair, 'kill-travel-car-repair-submit');
                     return; // Page reloads — next tick handles post-repair
                 }
             }
@@ -12034,7 +12400,7 @@ async function doQTPerkRedeem() {
             // Log before clicking: the form submit can navigate immediately,
             // which previously made successful drives look like they never fired.
             addLiveLog(`Kill loop: driving to ${pending.travelTo} (attempt ${attempts})`);
-            humanClick(freshGo);
+            humanClickForPageLoad(freshGo, `kill-travel-drive-${pending.travelTo}`);
             return;
         }
 
@@ -12253,7 +12619,7 @@ async function doQTPerkRedeem() {
                             state.killSearchLoopActive = true;
                             state.killLoopActive       = false;
                             state.lastActionAt         = now();
-                            form.querySelector('input[type="submit"]')?.click();
+                            nativeClickForPageLoad(form.querySelector('input[type="submit"]'), `kill-bg-farm-search-${target}`);
                         }
                     }
                 }
@@ -12301,7 +12667,7 @@ async function doQTPerkRedeem() {
                     if (showCheckbox) showCheckbox.checked = !state.killAnonymousShooting;
                     state.pendingKillAction = { stage: 'bg_farm_result', targetName: target, shootAfterBg: pending.shootAfterBg, afterVerify: pending.afterVerify, bgFor: pending.bgFor || null, postBgKillRecheck: !!pending.postBgKillRecheck };
                     state.lastActionAt = now();
-                    humanClick(submitBtn);
+                    humanClickForPageLoad(submitBtn, `kill-bg-farm-check-${target}`);
                     return;
                 }
             }
@@ -12609,7 +12975,7 @@ async function doQTPerkRedeem() {
                                     state.killBgWaitUntil   = isPlayerBgFarmEnabled(target) ? 0 : now() + (3 * 60 * 60 * 1000); // max search time ~3hrs
                                     state.lastActionAt = now();
                                     await wait(rand(DEFAULTS.actionDelayMin, DEFAULTS.actionDelayMax));
-                                    humanClick(submitBtn);
+                                    humanClickForPageLoad(submitBtn, `kill-bg-search-${bgName}`);
                                     addLiveLog(`Kill loop: search submitted for bodyguard ${bgName}`);
                                     return;
                                 }
@@ -12714,7 +13080,7 @@ async function doQTPerkRedeem() {
                                             state.killBgWaitUntil   = isPlayerBgFarmEnabled(target) ? 0 : now() + (3 * 60 * 60 * 1000);
                                             state.lastActionAt = now();
                                             await wait(rand(DEFAULTS.actionDelayMin, DEFAULTS.actionDelayMax));
-                                            humanClick(submitBtn);
+                                            humanClickForPageLoad(submitBtn, `kill-bg-search-${bgName}`);
                                             addLiveLog(`Kill loop: search submitted for bodyguard ${bgName}`);
                                             return;
                                         }
@@ -13841,7 +14207,7 @@ async function doQTPerkRedeem() {
                 usernameSelect.value = bgTarget.name;
                 bulletsInput.value   = '1';
                 if (showCheckbox) showCheckbox.checked = !state.killAnonymousShooting;
-                humanClick(submitBtn);
+                humanClickForPageLoad(submitBtn, `kill-bg-check-${bgTarget.name}`);
                 addLiveLog(`Kill loop: BG check shot fired at ${bgTarget.name}`);
                 return;
             }
@@ -13972,7 +14338,7 @@ async function doQTPerkRedeem() {
                 usernameSelect.value = targetName;
                 bulletsInput.value   = String(requiredBullets);
                 if (showCheckbox) showCheckbox.checked = !state.killAnonymousShooting;
-                humanClick(submitBtn);
+                humanClickForPageLoad(submitBtn, `kill-shot-${targetName}`);
                 addLiveLog(`Kill loop: kill shot fired at ${targetName} (${requiredBullets} bullets)`);
                 return;
             }
@@ -14142,12 +14508,26 @@ async function doQTPerkRedeem() {
     async function tick() {
         if (loopBusy) return;
         if (reloadPending) {
+            // Never release the action lock merely because the server is slow. After a
+            // full minute, issue one safe GET navigation to the intended/current page.
+            // This can recover a lost page response without repeating the original POST,
+            // click, purchase, shot, search, travel, or other mutating action.
             const pendingFor = reloadPendingStartedAt ? now() - reloadPendingStartedAt : 0;
-            if (!nextReloadHandle && pendingFor > SECURITY_VERIFICATION_RELOAD_STUCK_MS) {
-                clearReloadPending('Navigation watchdog: reload/navigation did not unload page — clearing reloadPending');
-            } else {
-                return;
+            if (!nextReloadHandle && !reloadRecoveryIssued && pendingFor > PAGE_TRANSITION_RECOVERY_MS) {
+                reloadRecoveryIssued = true;
+                reloadPendingStartedAt = now();
+                const recoveryUrl = reloadPendingTargetUrl || window.location.href;
+                addLiveLog('Page transition still pending after 60s — issuing one safe GET recovery without repeating the action');
+                window.location.href = recoveryUrl;
             }
+            return;
+        }
+
+        // Do not route, submit forms, or click controls until the foreground page's
+        // actionable DOM has remained stable for a short period. CTC and security
+        // pages are explicitly allowed through by the readiness helper.
+        if (!isForegroundPageStableForActions()) {
+            return;
         }
 
         // ── Auto account creation — runs even when bot is paused ──────────────
@@ -14198,6 +14578,51 @@ async function doQTPerkRedeem() {
         // security verification page is visible, pause all normal routing and
         // only refresh the current page after a short patience delay.
         if (await maybeHandleSecurityVerificationPage()) {
+            return;
+        }
+
+        // A CTC discovered inside a Background Crimes fetch is not visible to the
+        // normal solver. Surface it by opening Crimes once, then let the existing
+        // foreground CTC solver handle it. Background requests remain paused meanwhile.
+        if (state.bgCrimeCtcPending) {
+            loopBusy = true;
+            try {
+                updatePanel();
+                if (hasCTCChallenge()) {
+                    setLastActionText('CTC solving…');
+                    await maybeSolveCTC();
+                    return;
+                }
+                const ctcDetectedAt = state.bgCrimeCtcDetectedAt || 0;
+                const isFreshCrimesLoad = isCrimesPage() && foregroundPageLoadedAt > ctcDetectedAt;
+                if (!isFreshCrimesLoad) {
+                    addLiveLog('BG Crime: loading Crimes page to surface detected CTC');
+                    // This intentionally reloads even if the current URL is already Crimes:
+                    // the hidden CTC may have been triggered after that page was loaded.
+                    gotoPage('crimes');
+                    return;
+                }
+
+                // Give UG's page scripts time to render a challenge after the fresh page
+                // load. Do not immediately declare it cleared while the DOM is still settling.
+                const surfaceAgeMs = now() - foregroundPageLoadedAt;
+                if (surfaceAgeMs < BG_CRIME_CTC_SURFACE_WAIT_MS || !isForegroundPageStableForActions()) {
+                    return;
+                }
+
+                // No visible challenge appeared on a fresh, stable Crimes page. Release
+                // the handoff, but use a short backoff before asking for another token so
+                // an unusual response format cannot create a rapid navigation loop.
+                state.bgCrimeCtcPending = false;
+                state.bgCrimeCtcDetectedAt = 0;
+                bgCrimeToken = null;
+                bgCrimeFetchBackoffMs = BG_CRIME_FETCH_BACKOFF_MIN;
+                bgCrimeNextPageFetchAt = Date.now() + BG_CRIME_CTC_NO_WIDGET_BACKOFF_MS;
+                if (bgCrimeActive && state.bgCrimeEnabled) scheduleBgCrimePoll();
+                addLiveLog('BG Crime: fresh Crimes page showed no visible CTC — resuming after safety backoff');
+            } finally {
+                loopBusy = false;
+            }
             return;
         }
 
@@ -15418,7 +15843,7 @@ async function doQTPerkRedeem() {
         }
 
         freshInput.value = String(stock);
-        humanClick(freshBtn);
+        humanClickForPageLoad(freshBtn, `bullet-factory-buy-${target.country}`);
     }
 
     // Handles the bullet factory travel stage — on the cars list page
@@ -15447,13 +15872,13 @@ async function doQTPerkRedeem() {
             const freshStocks = await fetchBulletFactoryStocks();
             const freshTarget = freshStocks.find(s => s.country.toLowerCase() === target.country.toLowerCase());
             if (!freshTarget) {
-                addLiveLog(`Bullet factory: ${target.country} has no stock — skipping travel`);
+                addLiveLog(`Bullet factory: ${target.country} has fewer than ${BULLET_FACTORY_MIN_STOCK} bullets — skipping travel`);
                 // Remove this target and try the next one
                 const newTargets = run.targets.slice(1).filter(t =>
                     freshStocks.some(s => s.country.toLowerCase() === t.country.toLowerCase())
                 );
                 if (!newTargets.length) {
-                    addLiveLog('Bullet factory: no more countries with stock — run complete');
+                    addLiveLog(`Bullet factory: no more countries with ${BULLET_FACTORY_MIN_STOCK}+ bullets — run complete`);
                     state.pendingBulletRun = null;
                     await wait(navRand());
                     gotoPage('crimes');
@@ -15539,7 +15964,7 @@ async function doQTPerkRedeem() {
                 addLiveLog(`Bullet factory: car damaged — repairing${repairCost ? ` for $${repairCost.toLocaleString()}` : ''}`);
                 state.lastActionAt = now();
                 await wait(rand(DEFAULTS.actionDelayMin, DEFAULTS.actionDelayMax));
-                humanClick(document.querySelector('form input[type="submit"][name="repair"]'));
+                humanClickForPageLoad(document.querySelector('form input[type="submit"][name="repair"]'), 'bullet-factory-car-repair-submit');
                 return;
             }
             // No repair button — try another car
@@ -15590,7 +16015,7 @@ async function doQTPerkRedeem() {
             navKey: driveKey,
             navIssuedAt: now()
         };
-        humanClick(freshGo);
+        humanClickForPageLoad(freshGo, `bullet-factory-drive-${target.country}`);
         addLiveLog(`Bullet factory: driving to ${target.country}`);
     }
 
@@ -16732,6 +17157,11 @@ async function doQTPerkRedeem() {
                             <span style="color:#ddd;font-size:12px;">Dupe mode — generate a random personality</span>
                         </div>
                         <div class="ug-helptext" style="margin-top:3px;">Makes this account behave distinctly from others — unique delays, GTA timing, jail behaviour, and navigation patterns. Ticking this regenerates the personality immediately.</div>
+                        <div style="display:flex;align-items:center;gap:6px;padding:5px 0 3px;margin-top:4px;border-top:1px solid #333;">
+                            <input id="ug-bot-human-page-visits" type="checkbox" style="width:13px;height:13px;min-width:13px;margin:0;padding:0;cursor:pointer;" />
+                            <span style="color:#ddd;font-size:12px;">Occasionally visit non-action pages</span>
+                        </div>
+                        <div class="ug-helptext" style="margin-top:2px;">Optional and off by default. Visits safe pages only during natural idle points and may slightly reduce efficiency. This setting is not changed when the personality is reset.</div>
                         <div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;">
                             <button id="ug-bot-personality-reset" type="button" class="ug-small-btn">Reset personality</button>
                         </div>
@@ -17942,7 +18372,7 @@ async function doQTPerkRedeem() {
                 cancelCurrentRun();
                 state.enabled      = true;
                 state.pausedReason = '';
-                clearScheduledReload();
+                clearAllReloadState();
                 updatePanel();
                 syncKillPlayerFinderScheduler();
                 startHeartbeat();
@@ -18191,6 +18621,7 @@ async function doQTPerkRedeem() {
         }
 
         const dupeModeInput = document.querySelector('#ug-bot-dupe-mode');
+        const humanPageVisitsInput = document.querySelector('#ug-bot-human-page-visits');
         const personalityInfoEl = document.querySelector('#ug-bot-personality-info');
         if (dupeModeInput) {
             dupeModeInput.checked = !!PERSONALITY.dupeMode;
@@ -18207,11 +18638,29 @@ async function doQTPerkRedeem() {
                 });
             }
         }
+        if (humanPageVisitsInput) {
+            humanPageVisitsInput.checked = state.humanPageVisitsEnabled;
+            if (!humanPageVisitsInput.dataset.listenerAttached) {
+                humanPageVisitsInput.dataset.listenerAttached = '1';
+                humanPageVisitsInput.addEventListener('change', () => {
+                    state.humanPageVisitsEnabled = humanPageVisitsInput.checked;
+                    addLiveLog(`Human page visits ${state.humanPageVisitsEnabled ? 'enabled' : 'disabled'}`);
+                    if (personalityInfoEl) {
+                        const p = PERSONALITY;
+                        const mode = p.dupeMode ? 'Dupe' : 'Normal';
+                        const humanPageCount = Array.isArray(p.humanPages) ? p.humanPages.length : 0;
+                        const humanVisitStatus = state.humanPageVisitsEnabled ? `on (${p.idleVisitChancePct}%, ${humanPageCount} pages)` : 'off';
+                        personalityInfoEl.textContent = `${mode} mode · nav ${p.navDelayMin}–${p.navDelayMax}ms · heartbeat ${p.heartbeatMs}ms · human visits: ${humanVisitStatus}`;
+                    }
+                });
+            }
+        }
         if (personalityInfoEl) {
             const p = PERSONALITY;
             const mode = p.dupeMode ? 'Dupe' : 'Normal';
             const humanPageCount = Array.isArray(p.humanPages) ? p.humanPages.length : 0;
-            personalityInfoEl.textContent = `${mode} mode · nav ${p.navDelayMin}–${p.navDelayMax}ms · heartbeat ${p.heartbeatMs}ms · idle ${p.idleVisitChancePct}% · human pages: ${humanPageCount}`;
+            const humanVisitStatus = state.humanPageVisitsEnabled ? `on (${p.idleVisitChancePct}%, ${humanPageCount} pages)` : 'off';
+            personalityInfoEl.textContent = `${mode} mode · nav ${p.navDelayMin}–${p.navDelayMax}ms · heartbeat ${p.heartbeatMs}ms · human visits: ${humanVisitStatus}`;
         }
 
         const accGenerateBtn = document.querySelector('#ug-bot-acc-generate');
@@ -20190,7 +20639,7 @@ async function doQTPerkRedeem() {
 
             panel.querySelector('#ug-bt-rescan')?.addEventListener('click', () => scanAllPages(true));
             panel.querySelector('#ug-bt-back-my-bets')?.addEventListener('click', () => {
-                location.href = buildMyBetsUrl(1);
+                navigateToUrl(buildMyBetsUrl(1), 'total-bet-open-my-bets');
             });
 
             return panel;
