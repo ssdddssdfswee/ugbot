@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Full UG Bot
 // @namespace    ug-bot
-// @version      3.0.21
+// @version      3.0.31
 // @description  Auto-runs crimes, GTA, melting, repair, missions, drug running with Swiss Bank management, live log, session stats, action checkboxes, jail handling, runtime tracking, melt pagination, repair cycles, automatic CTC solving, and point-spending features.
 // @match        *://www.underworldgangsters.com/*
 // @match        *://underworldgangsters.com/*
@@ -482,55 +482,161 @@
         }
 
         let consecutiveSkips = 0;
+        let retryTimer = null;
+        let reloadTimer = null;
+        let reloadScheduled = false;
+        let nextAttemptAt = 0;
         const MAX_SKIPS_BEFORE_RELOAD = 5;
+        const CTC_RETRY_DELAY_MS = 1000;
+        const CTC_MIN_RELOAD_GAP_MS = 5000;
+        const CTC_LAST_RELOAD_KEY = 'ugbot_ctc_last_reload_at';
+
+        function isSecurityVerificationVisible() {
+            try {
+                return typeof hasSecurityVerificationPage === 'function' && hasSecurityVerificationPage();
+            } catch (_) {
+                return false;
+            }
+        }
+
+        function clearRetryTimer() {
+            if (!retryTimer) return;
+            clearTimeout(retryTimer);
+            retryTimer = null;
+        }
+
+        function getLastCtcReloadAt() {
+            try {
+                const value = Number(sessionStorage.getItem(CTC_LAST_RELOAD_KEY) || 0);
+                return Number.isFinite(value) ? value : 0;
+            } catch (_) {
+                return 0;
+            }
+        }
+
+        function setLastCtcReloadAt(value) {
+            try {
+                sessionStorage.setItem(CTC_LAST_RELOAD_KEY, String(value));
+            } catch (_) {}
+        }
+
+        function scheduleRetry(logFn) {
+            if (retryTimer || reloadScheduled || !isVisible() || isSecurityVerificationVisible()) return;
+            const delay = Math.max(0, nextAttemptAt - Date.now());
+            retryTimer = setTimeout(() => {
+                retryTimer = null;
+                if (reloadScheduled || !isVisible() || isSecurityVerificationVisible()) return;
+                trySolve(logFn);
+            }, delay);
+        }
+
+        function scheduleReload(logFn) {
+            if (reloadScheduled || isSecurityVerificationVisible()) return false;
+
+            reloadScheduled = true;
+            clearRetryTimer();
+
+            const nowMs = Date.now();
+            const elapsed = nowMs - getLastCtcReloadAt();
+            const delay = Math.max(0, CTC_MIN_RELOAD_GAP_MS - elapsed);
+
+            if (delay > 0) {
+                logFn(`CTC: reload guard active — reloading in ${Math.ceil(delay / 1000)}s`);
+            } else {
+                logFn('CTC: too many failed attempts — reloading page for fresh CTC');
+            }
+
+            reloadTimer = setTimeout(() => {
+                reloadTimer = null;
+                if (isSecurityVerificationVisible()) {
+                    reloadScheduled = false;
+                    return;
+                }
+                setLastCtcReloadAt(Date.now());
+                reloadCurrentPage('ctc-solver-refresh');
+            }, delay);
+            return true;
+        }
+
+        function recordFailure(logFn) {
+            consecutiveSkips++;
+            nextAttemptAt = Date.now() + CTC_RETRY_DELAY_MS;
+
+            if (consecutiveSkips >= MAX_SKIPS_BEFORE_RELOAD) {
+                consecutiveSkips = 0;
+                return scheduleReload(logFn);
+            }
+
+            scheduleRetry(logFn);
+            return false;
+        }
 
         async function trySolve(logFn) {
+            if (isSecurityVerificationVisible()) {
+                clearRetryTimer();
+                return { attempted: false, solved: false, message: 'CTC paused for security verification' };
+            }
+            if (reloadScheduled) {
+                return { attempted: false, solved: false, message: 'CTC reload already scheduled' };
+            }
             if (isSolving) {
                 return { attempted: false, solved: false, message: 'CTC solver already running' };
             }
 
-            await new Promise(resolve => setTimeout(resolve, SETTLE_DELAY_MS));
-
-            const widget = getWidget();
-            if (!widget) {
-                logFn('CTC widget rejected by getWidget() after settle delay');
-                return { attempted: false, solved: false, message: 'CTC widget not valid after settle delay' };
+            const nowMs = Date.now();
+            if (nowMs < nextAttemptAt) {
+                scheduleRetry(logFn);
+                return { attempted: false, solved: false, message: 'CTC retry delay active' };
             }
 
+            // Lock immediately, before the settle delay, so MutationObserver callbacks
+            // cannot queue several solver attempts before image processing begins.
             isSolving = true;
-            logFn('CTC detected — attempting auto-solve');
-
-            const solveCtx = { cancelled: false };
-
-            const timeout = new Promise(resolve =>
-                setTimeout(() => {
-                    solveCtx.cancelled = true;
-                    resolve({
-                        solved: false, choice: null, similarity: 0,
-                        message: 'CTC solver timed out'
-                    });
-                }, SOLVE_TIMEOUT_MS)
-            );
 
             try {
+                await new Promise(resolve => setTimeout(resolve, SETTLE_DELAY_MS));
+
+                if (isSecurityVerificationVisible()) {
+                    clearRetryTimer();
+                    return { attempted: false, solved: false, message: 'CTC paused for security verification' };
+                }
+
+                const widget = getWidget();
+                if (!widget) {
+                    const message = 'CTC widget rejected by getWidget() after settle delay';
+                    logFn(message);
+                    recordFailure(logFn);
+                    return { attempted: true, solved: false, message };
+                }
+
+                logFn('CTC detected — attempting auto-solve');
+
+                const solveCtx = { cancelled: false };
+
+                const timeout = new Promise(resolve =>
+                    setTimeout(() => {
+                        solveCtx.cancelled = true;
+                        resolve({
+                            solved: false, choice: null, similarity: 0,
+                            message: 'CTC solver timed out'
+                        });
+                    }, SOLVE_TIMEOUT_MS)
+                );
+
                 const result = await Promise.race([doSolve(widget, logFn, solveCtx), timeout]);
                 logFn(result.message);
                 if (result.solved) {
                     consecutiveSkips = 0;
+                    nextAttemptAt = 0;
+                    clearRetryTimer();
                 } else {
-                    consecutiveSkips++;
-                    if (consecutiveSkips >= MAX_SKIPS_BEFORE_RELOAD) {
-                        consecutiveSkips = 0;
-                        logFn('CTC: too many failed attempts — reloading page for fresh CTC');
-                        reloadCurrentPage('ctc-solver-refresh');
-                        return { attempted: true, solved: false, message: result.message };
-                    }
+                    recordFailure(logFn);
                 }
                 return { attempted: true, solved: result.solved, message: result.message };
             } catch (err) {
                 const message = 'CTC solver error: ' + err.message;
                 logFn(message);
-                consecutiveSkips++;
+                recordFailure(logFn);
                 return { attempted: true, solved: false, message };
             } finally {
                 isSolving = false;
@@ -607,7 +713,7 @@
     // BOT CONFIG
     // =========================================================================
 
-    const SCRIPT_VERSION = '3.0.21';
+    const SCRIPT_VERSION = '3.0.31';
 
 
     // =========================================================================
@@ -622,6 +728,7 @@
         intervalMs: 2 * 60 * 1000,
         tableName: 'shared_kill_players',
         deadTableName: 'shared_kill_dead_players',
+        suppressedTableName: 'shared_kill_suppressed_players',
         supabaseUrl: 'https://vphqofqlrjplbsthhfvv.supabase.co',
         supabaseKey: 'sb_publishable_LdG4Ud1lJyV6pzVgEOjyHA_OaxGT11o',
 
@@ -630,13 +737,16 @@
         // staff/unkillable names change. Names are matched case-insensitively.
         excludedNames: [
             'Crisy',
+            'Aphotic',
+            'Cosmic'
         ],
 
         uploadBatchSize: 500,
         deleteBatchSize: 500,
         downloadPageSize: 1000,
         maxDownloadNames: 20000,
-        maxDeadDownloadNames: 50000
+        maxDeadDownloadNames: 50000,
+        maxSuppressedDownloadNames: 50000
     };
 
     const CRIME_DEFS = [
@@ -656,6 +766,8 @@
 
     const CRIME_NAME_BY_ID = Object.fromEntries(CRIME_DEFS.map(c => [c.id, c.name]));
     const DEFAULT_ORDER    = ['gang', 'drug', '1', '3', '4', '5', '6', '7', '2'];
+    // Dupe Mode commits available crimes from the lowest crime upward.
+    const DUPE_CRIME_ORDER = ['7', '6', '5', '4', '3', 'drug', '2', '1', 'gang'];
     const ALL_IDS          = [...CRIME_DEFS.map(c => c.id), GTA_DEF.id, MELT_DEF.id];
 
     // Known crime cooldowns supplied by the game/user.
@@ -683,8 +795,8 @@
     // Drug running route configuration.
     // Country location select values: 1=England 2=Mexico 3=Russia 4=South Africa 5=USA
     // Drug select values: 1=Cannabis 2=Heroin 3=Cocaine 4=Ecstasy 5=LSD
-    // Reserve is based on the USA Heroin buy price as that is the most expensive leg.
-    // Prices never change per country so this is hardcoded.
+    // Reserve is based on the current USA Heroin buy price because the route buys a full Heroin load in USA.
+    // Update this constant whenever the game owner changes the USA Heroin price.
     const DRUG_RUN_ROUTE = {
         countryA:         'USA',
         countryALocation: '5',
@@ -694,7 +806,7 @@
         drugInB:          { name: 'Cannabis', value: '1' },
     };
 
-    const DRUG_HEROIN_USA_PRICE = 28999; // Fixed USA Heroin buy price — used to calculate the cash reserve
+    const DRUG_HEROIN_USA_PRICE = 30134; // Current USA Heroin buy price — used to calculate the cash reserve
 
     // Country name → location select value mapping (used by kill travel)
     const COUNTRY_LOCATION_MAP = {
@@ -1158,6 +1270,248 @@
         await wait(navRand());
         gotoPage(page);
         return true;
+    }
+
+    // ── Dupe Mode idle breaks ─────────────────────────────────────────────
+    // Only active when Dupe Mode is enabled. Each installation keeps its own
+    // persistent schedule across normal page navigation and browser refreshes.
+    const DUPE_IDLE_NEXT_AT_KEY    = 'ugbot_dupeIdleNextAt';
+    const DUPE_IDLE_UNTIL_KEY      = 'ugbot_dupeIdleUntil';
+    const DUPE_IDLE_PAGE_KEY       = 'ugbot_dupeIdlePage';
+    const DUPE_IDLE_STARTED_AT_KEY = 'ugbot_dupeIdleStartedAt';
+
+    const DUPE_IDLE_MIN_ACTIVE_MS   = 60 * 60 * 1000;      // 1 hour
+    const DUPE_IDLE_MAX_ACTIVE_MS   = 3 * 60 * 60 * 1000;  // 3 hours
+    const DUPE_IDLE_MIN_DURATION_MS = 3 * 60 * 1000;       // 3 minutes
+    const DUPE_IDLE_MAX_DURATION_MS = 10 * 60 * 1000;      // 10 minutes
+
+    // Pages chosen for a break contain no automatic form submission by simply
+    // loading them. The heartbeat remains alive only for CTC/security/jail safety.
+    const DUPE_IDLE_SAFE_PAGES = [
+        'help', 'online', 'top', 'stats', 'my-stats', 'notes',
+        'notifications', 'mail', 'forum', 'hospital', 'hitlist',
+        'lottery', 'auction', 'betting', 'gangs'
+    ];
+
+    let dupeIdleLoggedUntil = 0;
+
+    function readDupeIdleTimestamp(key) {
+        const value = Number(readStoredValue(key, 0));
+        return Number.isFinite(value) && value > 0 ? Math.round(value) : 0;
+    }
+
+    function writeDupeIdleTimestamp(key, value) {
+        writeStoredValue(key, Math.max(0, Math.round(Number(value) || 0)));
+    }
+
+    function clearDupeIdleBreak(clearSchedule = false) {
+        writeDupeIdleTimestamp(DUPE_IDLE_UNTIL_KEY, 0);
+        writeDupeIdleTimestamp(DUPE_IDLE_STARTED_AT_KEY, 0);
+        writeStoredValue(DUPE_IDLE_PAGE_KEY, '');
+        dupeIdleLoggedUntil = 0;
+        if (clearSchedule) writeDupeIdleTimestamp(DUPE_IDLE_NEXT_AT_KEY, 0);
+    }
+
+    function scheduleNextDupeIdleBreak(baseAt = Date.now()) {
+        if (!PERSONALITY.dupeMode) {
+            writeDupeIdleTimestamp(DUPE_IDLE_NEXT_AT_KEY, 0);
+            return 0;
+        }
+        const nextAt = Math.round(baseAt) + rand(DUPE_IDLE_MIN_ACTIVE_MS, DUPE_IDLE_MAX_ACTIVE_MS);
+        writeDupeIdleTimestamp(DUPE_IDLE_NEXT_AT_KEY, nextAt);
+        return nextAt;
+    }
+
+    function ensureDupeIdleSchedule() {
+        if (!PERSONALITY.dupeMode) {
+            clearDupeIdleBreak(true);
+            return 0;
+        }
+        const existing = readDupeIdleTimestamp(DUPE_IDLE_NEXT_AT_KEY);
+        if (existing > 0) return existing;
+        return scheduleNextDupeIdleBreak(Date.now());
+    }
+
+    function getDupeIdleUntil() {
+        if (!PERSONALITY.dupeMode) return 0;
+        return readDupeIdleTimestamp(DUPE_IDLE_UNTIL_KEY);
+    }
+
+    function getDupeIdleRemainingMs(at = Date.now()) {
+        return Math.max(0, getDupeIdleUntil() - at);
+    }
+
+    function isDupeIdleActive(at = Date.now()) {
+        return PERSONALITY.dupeMode && getDupeIdleUntil() > at;
+    }
+
+    function chooseDupeIdlePage() {
+        const current = currentPage();
+        const preferred = (PERSONALITY.humanPages || [])
+            .filter(page => DUPE_IDLE_SAFE_PAGES.includes(page) && page !== current);
+        const candidates = preferred.length
+            ? preferred
+            : DUPE_IDLE_SAFE_PAGES.filter(page => page !== current);
+        const pool = candidates.length ? candidates : DUPE_IDLE_SAFE_PAGES;
+        return pool[rand(0, pool.length - 1)] || 'help';
+    }
+
+    function canStartDupeIdleBreak() {
+        if (!PERSONALITY.dupeMode || !state.enabled) return false;
+        if (!(isCrimesPage() || hasCrimePageMarkers())) return false;
+        if (reloadPending || actionInFlight || loopBusy) return false;
+        if (hasSecurityVerificationPage() || hasCTCChallenge() || isLikelyJailPage()) return false;
+        if (state.pendingBankAction || state.pendingKillAction || state.pendingBulletRun || state.pendingMissionCheck || state.pendingPenaltyPage) return false;
+        if (bgCrimeInFlight || killSharedSyncRunning || killPlayerFinderRunning || qtAuctionInFlight || autoBuyGunBusy || qtSniperAbortController) return false;
+        if (recentlyActed(5000)) return false;
+        return true;
+    }
+
+    function beginDupeIdleBreak() {
+        const startedAt = Date.now();
+        const durationMs = rand(DUPE_IDLE_MIN_DURATION_MS, DUPE_IDLE_MAX_DURATION_MS);
+        const until = startedAt + durationMs;
+        const page = chooseDupeIdlePage();
+
+        writeDupeIdleTimestamp(DUPE_IDLE_STARTED_AT_KEY, startedAt);
+        writeDupeIdleTimestamp(DUPE_IDLE_UNTIL_KEY, until);
+        writeStoredValue(DUPE_IDLE_PAGE_KEY, page);
+        scheduleNextDupeIdleBreak(until);
+        dupeIdleLoggedUntil = until;
+
+        addLiveLog(`Dupe idle: opening ?p=${page} and pausing all automation for ${Math.ceil(durationMs / 60000)} minute(s)`);
+        setLastActionText(`Dupe idle — ${Math.ceil(durationMs / 60000)}m`);
+        gotoPage(page);
+        return true;
+    }
+
+    async function maybeHandleDupeIdleBreak() {
+        if (!PERSONALITY.dupeMode) {
+            if (readDupeIdleTimestamp(DUPE_IDLE_UNTIL_KEY) || readDupeIdleTimestamp(DUPE_IDLE_NEXT_AT_KEY)) {
+                clearDupeIdleBreak(true);
+            }
+            return false;
+        }
+
+        const nowMs = Date.now();
+        const until = getDupeIdleUntil();
+
+        if (until > nowMs) {
+            // Safety pages still take priority even during an idle break.
+            if (hasCTCChallenge()) {
+                setLastActionText('CTC solving…');
+                await maybeSolveCTC();
+                return true;
+            }
+            if (isLikelyJailPage()) {
+                await handleJailState();
+                return true;
+            }
+
+            const remainingMs = until - nowMs;
+            if (dupeIdleLoggedUntil !== until) {
+                dupeIdleLoggedUntil = until;
+                const page = String(readStoredValue(DUPE_IDLE_PAGE_KEY, '') || currentPage() || 'current page');
+                addLiveLog(`Dupe idle: break active on ?p=${page} — ${Math.ceil(remainingMs / 60000)} minute(s) remaining`);
+            }
+            setLastActionText(`Dupe idle — ${Math.ceil(remainingMs / 60000)}m remaining`);
+            return true;
+        }
+
+        if (until > 0) {
+            clearDupeIdleBreak(false);
+            addLiveLog('Dupe idle: break complete — resuming normal operation');
+            setLastActionText('Dupe idle complete');
+            if (!(isCrimesPage() || hasCrimePageMarkers())) {
+                gotoPage('crimes');
+                return true;
+            }
+        }
+
+        const nextAt = ensureDupeIdleSchedule();
+        if (!nextAt || nextAt > nowMs) return false;
+        if (!canStartDupeIdleBreak()) return false;
+        return beginDupeIdleBreak();
+    }
+
+
+    // ── Dupe Mode Crimes/GTA cooldown browsing loop ───────────────────────
+    // When foreground crimes have no currently available action and the other
+    // normal modules are still cooling down, Dupe Mode alternates between the
+    // Crimes and GTA pages every 2–5 seconds. It re-checks all safety and ready
+    // conditions after the delay so a newly available action is never skipped.
+    const DUPE_COOLDOWN_BROWSE_MIN_DELAY_MS = 2000;
+    const DUPE_COOLDOWN_BROWSE_MAX_DELAY_MS = 5000;
+    let dupeCooldownBrowsePending = false;
+    let dupeCooldownBrowseLastLogAt = 0;
+
+    function isDupeCooldownBrowseBlocked() {
+        if (!PERSONALITY.dupeMode || !state.enabled) return true;
+        if (state.bgCrimeEnabled || state.resetCrimesEnabled || state.gtaResetLoopActive) return true;
+        if (!(isCrimesPage() || hasCrimePageMarkers() || currentPage() === 'gta' || hasGTAPageMarkers())) return true;
+        if (reloadPending || actionInFlight) return true;
+        if (isDupeIdleActive()) return true;
+        if (hasSecurityVerificationPage() || hasCTCChallenge() || isLikelyJailPage()) return true;
+        if (state.pendingBankAction || state.pendingKillAction || state.pendingBulletRun || state.pendingMissionCheck || state.pendingPenaltyPage) return true;
+        if (bgCrimeInFlight || killSharedSyncRunning || killPlayerFinderRunning || qtAuctionInFlight || autoBuyGunBusy || qtSniperAbortController) return true;
+        return false;
+    }
+
+    function hasDupeCooldownActionReady() {
+        if (isDupeCooldownBrowseBlocked()) return true;
+
+        if (isCrimesPage() || hasCrimePageMarkers()) {
+            try {
+                if (getAvailableCrimes().length > 0) return true;
+            } catch (_) {}
+        }
+
+        if (currentPage() === 'gta' || hasGTAPageMarkers()) {
+            const gtaButton = getGTAStealButton();
+            if (gtaButton && !gtaButton.disabled) return true;
+        }
+
+        if (shouldRunRepairCycle()) return true;
+        if (isDrugsEnabled() && shouldDoSwissDeposit()) return true;
+
+        const bgSpamSuppressed = state.killBgSpamEnabled && state.killBgSpamTarget && state.killBgCheckEnabled;
+        const drugsUsable = isDrugRunUsableNow();
+        if (drugsUsable && state.drugCompEnabled && (!state.killLoopActive || isPassiveBgBulletWaitActive(state.pendingKillAction)) && !bgSpamSuppressed) return true;
+        if (drugsUsable && isInternalDriveReady() && (!state.killLoopActive || isPassiveBgBulletWaitActive(state.pendingKillAction)) && !bgSpamSuppressed) return true;
+        if (isGTAEnabled() && !isGTALocked() && isInternalGTAReady()) return true;
+        if (isMeltUsable() && isInternalMeltReady()) return true;
+        return false;
+    }
+
+    async function maybeRunDupeCooldownBrowseLoop() {
+        if (isDupeCooldownBrowseBlocked()) return false;
+        if (dupeCooldownBrowsePending) return true;
+
+        dupeCooldownBrowsePending = true;
+        try {
+            const delayMs = rand(DUPE_COOLDOWN_BROWSE_MIN_DELAY_MS, DUPE_COOLDOWN_BROWSE_MAX_DELAY_MS);
+            await wait(delayMs);
+
+            // A timer may become ready during the wait. Leave the page in place so
+            // the next heartbeat can perform that action instead of navigating.
+            if (hasDupeCooldownActionReady()) return false;
+
+            const onGtaPage = currentPage() === 'gta' || hasGTAPageMarkers();
+            const canVisitGta = isGTAEnabled() && !isGTALocked();
+            const destination = onGtaPage ? 'crimes' : (canVisitGta ? 'gta' : 'crimes');
+
+            // Avoid filling the live log every few seconds while still leaving an
+            // occasional visible confirmation that the loop is active.
+            if ((Date.now() - dupeCooldownBrowseLastLogAt) >= 30000) {
+                dupeCooldownBrowseLastLogAt = Date.now();
+                addLiveLog('Dupe cooldown browsing: alternating Crimes/GTA every 2–5 seconds while actions cool down');
+            }
+
+            gotoPage(destination);
+            return true;
+        } finally {
+            dupeCooldownBrowsePending = false;
+        }
     }
 
     function getSetting(key, fallback) {
@@ -2075,6 +2429,26 @@
 
     function humanClick(el) {
         if (!el) return;
+
+        // Dupe Mode disables the coordinate-based human click path.
+        // Use the browser's native element activation so buttons still submit,
+        // links still navigate, and the game's normal click handlers still run.
+        // Calling the prototype directly also avoids a page script replacing an
+        // individual element's click() method.
+        if (PERSONALITY.dupeMode) {
+            if (typeof HTMLElement !== 'undefined' && el instanceof HTMLElement) {
+                HTMLElement.prototype.click.call(el);
+            } else if (typeof el.click === 'function') {
+                el.click();
+            } else {
+                el.dispatchEvent(new Event('click', {
+                    bubbles: true,
+                    cancelable: true,
+                }));
+            }
+            return;
+        }
+
         let rect = el.getBoundingClientRect();
         // OperaGX and some browsers return zero dimensions for elements whose
         // parent wrapper was recently made visible — walk up to find a valid rect
@@ -5155,21 +5529,36 @@
     // Player list management
     // -------------------------------------------------------------------------
 
-    // Returns the full player list, filtering out dead players.
+    // Returns the full player list, filtering out dead and currently suppressed names.
     function getKillPlayers() {
-        return (state.killPlayers || []).filter(p => p.status !== KILL_STATUS.DEAD);
+        const suppressedKeys = getKnownKillSharedSuppressedKeySet();
+        return (state.killPlayers || []).filter(player => {
+            if (!player || player.status === KILL_STATUS.DEAD) return false;
+            const key = getKillSharedSyncNameKey(player.name);
+            return !key || !suppressedKeys.has(key);
+        });
     }
 
-    // Saves the player list back to GM storage, removing dead players.
+    // Saves the player list back to GM storage, removing dead and currently
+    // suppressed names. A manual/live rediscovery queues an unsuppress first,
+    // so the name is allowed to be saved again immediately.
     function saveKillPlayers(players) {
         const list = Array.isArray(players) ? players : [];
         rememberKillSharedDeadPlayersFromList(list);
-        state.killPlayers = list.filter(p => p.status !== KILL_STATUS.DEAD);
+        const suppressedKeys = getKnownKillSharedSuppressedKeySet();
+        state.killPlayers = list.filter(player => {
+            if (!player || player.status === KILL_STATUS.DEAD) return false;
+            const key = getKillSharedSyncNameKey(player.name);
+            return !key || !suppressedKeys.has(key);
+        });
     }
 
     // Adds new players from Players Online to the list.
-    // Only adds players not already in the list.
-    function mergeOnlinePlayers(usernames) {
+    // A live online appearance is positive evidence that a previously
+    // suppressed username now exists again, so it is unsuppressed first.
+    async function mergeOnlinePlayers(usernames) {
+        await unsuppressKillSharedNamesFromPositiveEvidence(usernames, 'Players Online');
+
         const existing = state.killPlayers || [];
         const existingNames = new Set(existing.map(p => p.name.toLowerCase()));
         let added = 0;
@@ -5187,9 +5576,7 @@
             }
         }
 
-        // Remove dead players when saving
-        rememberKillSharedDeadPlayersFromList(existing);
-        state.killPlayers = existing.filter(p => p.status !== KILL_STATUS.DEAD);
+        saveKillPlayers(existing);
         return added;
     }
 
@@ -5290,13 +5677,131 @@
         return set;
     }
 
-    function getLocalKillPlayerNamesOnly(deadNameKeys = null) {
+    function normaliseKillSharedNameList(names) {
+        const map = new Map();
+        for (const rawName of names || []) {
+            const name = cleanKillSharedSyncName(rawName);
+            const key = getKillSharedSyncNameKey(name);
+            if (!name || !key || isKillSharedSyncExcludedName(name)) continue;
+            if (!map.has(key)) map.set(key, name);
+        }
+        return [...map.values()];
+    }
+
+    function getKillSharedSuppressedPendingKey() {
+        return 'killSharedSuppressedNamesPending';
+    }
+
+    function getKillSharedSuppressedCacheKey() {
+        return 'killSharedSuppressedNamesCache';
+    }
+
+    function getKillSharedUnsuppressPendingKey() {
+        return 'killSharedUnsuppressNamesPending';
+    }
+
+    function getPendingKillSharedSuppressedNames() {
+        const raw = getSetting(getKillSharedSuppressedPendingKey(), []);
+        return normaliseKillSharedNameList(Array.isArray(raw) ? raw : []);
+    }
+
+    function setPendingKillSharedSuppressedNames(names) {
+        setSetting(getKillSharedSuppressedPendingKey(), normaliseKillSharedNameList(names));
+    }
+
+    function getCachedKillSharedSuppressedNames() {
+        const raw = getSetting(getKillSharedSuppressedCacheKey(), []);
+        return normaliseKillSharedNameList(Array.isArray(raw) ? raw : []);
+    }
+
+    function setCachedKillSharedSuppressedNames(names) {
+        setSetting(getKillSharedSuppressedCacheKey(), normaliseKillSharedNameList(names));
+    }
+
+    function getPendingKillSharedUnsuppressNames() {
+        const raw = getSetting(getKillSharedUnsuppressPendingKey(), []);
+        return normaliseKillSharedNameList(Array.isArray(raw) ? raw : []);
+    }
+
+    function setPendingKillSharedUnsuppressNames(names) {
+        setSetting(getKillSharedUnsuppressPendingKey(), normaliseKillSharedNameList(names));
+    }
+
+    function buildKillSharedSuppressedKeySet(names) {
+        const set = new Set();
+        for (const rawName of names || []) {
+            const key = getKillSharedSyncNameKey(rawName);
+            if (key && !isKillSharedSyncExcludedName(rawName)) set.add(key);
+        }
+        return set;
+    }
+
+    function getKnownKillSharedSuppressedKeySet() {
+        const suppressed = buildKillSharedSuppressedKeySet([
+            ...getCachedKillSharedSuppressedNames(),
+            ...getPendingKillSharedSuppressedNames()
+        ]);
+        const unsuppressing = buildKillSharedSuppressedKeySet(getPendingKillSharedUnsuppressNames());
+        for (const key of unsuppressing) suppressed.delete(key);
+        return suppressed;
+    }
+
+    function rememberKillSharedSuppressedPlayers(names) {
+        const incoming = normaliseKillSharedNameList(names);
+        if (!incoming.length) return 0;
+
+        const pendingMap = new Map(getPendingKillSharedSuppressedNames().map(name => [getKillSharedSyncNameKey(name), name]));
+        const cacheMap = new Map(getCachedKillSharedSuppressedNames().map(name => [getKillSharedSyncNameKey(name), name]));
+        const unsuppressMap = new Map(getPendingKillSharedUnsuppressNames().map(name => [getKillSharedSyncNameKey(name), name]));
+        let added = 0;
+
+        for (const name of incoming) {
+            const key = getKillSharedSyncNameKey(name);
+            if (!pendingMap.has(key) && !cacheMap.has(key)) added++;
+            pendingMap.set(key, name);
+            cacheMap.set(key, name);
+            unsuppressMap.delete(key);
+        }
+
+        setPendingKillSharedSuppressedNames([...pendingMap.values()]);
+        setCachedKillSharedSuppressedNames([...cacheMap.values()]);
+        setPendingKillSharedUnsuppressNames([...unsuppressMap.values()]);
+        return added;
+    }
+
+    function queueKillSharedUnsuppressPlayers(names) {
+        const incoming = normaliseKillSharedNameList(names);
+        if (!incoming.length) return 0;
+
+        const knownBefore = getKnownKillSharedSuppressedKeySet();
+        const pendingSuppressedMap = new Map(getPendingKillSharedSuppressedNames().map(name => [getKillSharedSyncNameKey(name), name]));
+        const cacheMap = new Map(getCachedKillSharedSuppressedNames().map(name => [getKillSharedSyncNameKey(name), name]));
+        const unsuppressMap = new Map(getPendingKillSharedUnsuppressNames().map(name => [getKillSharedSyncNameKey(name), name]));
+        let queued = 0;
+
+        for (const name of incoming) {
+            const key = getKillSharedSyncNameKey(name);
+            if (!knownBefore.has(key) && !pendingSuppressedMap.has(key) && !cacheMap.has(key)) continue;
+            if (!unsuppressMap.has(key)) queued++;
+            pendingSuppressedMap.delete(key);
+            cacheMap.delete(key);
+            unsuppressMap.set(key, name);
+        }
+
+        setPendingKillSharedSuppressedNames([...pendingSuppressedMap.values()]);
+        setCachedKillSharedSuppressedNames([...cacheMap.values()]);
+        setPendingKillSharedUnsuppressNames([...unsuppressMap.values()]);
+        return queued;
+    }
+
+    function getLocalKillPlayerNamesOnly(deadNameKeys = null, suppressedNameKeys = null) {
         const map = new Map();
         for (const player of getKillPlayers()) {
             const name = cleanKillSharedSyncName(player && player.name);
             const key = getKillSharedSyncNameKey(name);
             if (!name || !key || isKillSharedSyncExcludedName(name)) continue;
             if (deadNameKeys && deadNameKeys.has(key)) continue;
+            if (suppressedNameKeys && suppressedNameKeys.has(key)) continue;
             if (!map.has(key)) map.set(key, name);
         }
         return [...map.values()];
@@ -5350,11 +5855,11 @@
         return killSharedSyncClient;
     }
 
-    async function uploadKillPlayerNamesToSharedList(deadNameKeys = null) {
+    async function uploadKillPlayerNamesToSharedList(deadNameKeys = null, suppressedNameKeys = null) {
         const client = getKillSharedSyncClient();
         if (!client) return { ok: false, uploaded: 0 };
 
-        const names = getLocalKillPlayerNamesOnly(deadNameKeys);
+        const names = getLocalKillPlayerNamesOnly(deadNameKeys, suppressedNameKeys);
         if (!names.length) return { ok: true, uploaded: 0 };
 
         let uploaded = 0;
@@ -5431,6 +5936,113 @@
         return { ok: true, uploaded, names };
     }
 
+    async function uploadPendingKillSharedSuppressedPlayers() {
+        const client = getKillSharedSyncClient();
+        if (!client) return { ok: false, uploaded: 0, names: getPendingKillSharedSuppressedNames() };
+
+        const names = getPendingKillSharedSuppressedNames();
+        if (!names.length) return { ok: true, uploaded: 0, names: [] };
+
+        let uploaded = 0;
+        const batchSize = Math.max(1, Number(KILL_SHARED_SYNC.uploadBatchSize) || 500);
+        const playerId = getKillSharedSyncPlayerId();
+        const nowIso = new Date().toISOString();
+
+        for (let i = 0; i < names.length; i += batchSize) {
+            const batch = names.slice(i, i + batchSize).map(name => ({
+                name_key: getKillSharedSyncNameKey(name),
+                name,
+                suppressed_at: nowIso,
+                reported_by: playerId,
+                reason: 'user_does_not_exist'
+            })).filter(row => row.name_key && row.name);
+
+            if (!batch.length) continue;
+
+            const { error } = await client
+                .from(KILL_SHARED_SYNC.suppressedTableName)
+                .upsert(batch, {
+                    onConflict: 'name_key',
+                    ignoreDuplicates: false
+                });
+
+            if (error) {
+                addLiveLog(`Kill Sync: suppression upload failed — ${error.message || error}`);
+                return { ok: false, uploaded, names };
+            }
+
+            uploaded += batch.length;
+        }
+
+        setPendingKillSharedSuppressedNames([]);
+        return { ok: true, uploaded, names };
+    }
+
+    async function flushPendingKillSharedUnsuppressPlayers() {
+        const client = getKillSharedSyncClient();
+        if (!client) return { ok: false, deleted: 0, names: getPendingKillSharedUnsuppressNames() };
+
+        const names = getPendingKillSharedUnsuppressNames();
+        if (!names.length) return { ok: true, deleted: 0, names: [] };
+
+        const keys = names.map(getKillSharedSyncNameKey).filter(Boolean);
+        const batchSize = Math.max(1, Number(KILL_SHARED_SYNC.deleteBatchSize) || 500);
+        let deleted = 0;
+
+        for (let i = 0; i < keys.length; i += batchSize) {
+            const batch = keys.slice(i, i + batchSize);
+            const { error } = await client
+                .from(KILL_SHARED_SYNC.suppressedTableName)
+                .delete()
+                .in('name_key', batch);
+
+            if (error) {
+                addLiveLog(`Kill Sync: unsuppress failed — ${error.message || error}`);
+                return { ok: false, deleted, names };
+            }
+
+            deleted += batch.length;
+        }
+
+        setPendingKillSharedUnsuppressNames([]);
+        return { ok: true, deleted, names };
+    }
+
+    async function downloadSharedKillSuppressedNames() {
+        const client = getKillSharedSyncClient();
+        if (!client) return [];
+
+        const names = [];
+        const pageSize = Math.max(1, Number(KILL_SHARED_SYNC.downloadPageSize) || 1000);
+        const maxNames = Math.max(pageSize, Number(KILL_SHARED_SYNC.maxSuppressedDownloadNames) || 50000);
+
+        for (let from = 0; from < maxNames; from += pageSize) {
+            const to = Math.min(from + pageSize - 1, maxNames - 1);
+            const { data, error } = await client
+                .from(KILL_SHARED_SYNC.suppressedTableName)
+                .select('name_key,name')
+                .order('name_key', { ascending: true })
+                .range(from, to);
+
+            if (error) {
+                addLiveLog(`Kill Sync: suppression download failed — ${error.message || error}`);
+                return getCachedKillSharedSuppressedNames();
+            }
+
+            const rows = data || [];
+            for (const row of rows) {
+                const name = cleanKillSharedSyncName(row && row.name);
+                const key = cleanKillSharedSyncName(row && row.name_key).toLowerCase() || getKillSharedSyncNameKey(name);
+                if (!key || isKillSharedSyncExcludedName(name || key)) continue;
+                names.push(name || key);
+            }
+
+            if (rows.length < pageSize) break;
+        }
+
+        return normaliseKillSharedNameList(names);
+    }
+
     async function downloadSharedKillDeadNameKeys() {
         const client = getKillSharedSyncClient();
         if (!client) return new Set();
@@ -5490,6 +6102,56 @@
         return { ok: true, deleted };
     }
 
+    async function deleteSuppressedNamesFromActiveSharedList(suppressedNameKeys) {
+        const client = getKillSharedSyncClient();
+        if (!client || !suppressedNameKeys || !suppressedNameKeys.size) return { ok: true, deleted: 0 };
+
+        const keys = [...suppressedNameKeys].filter(Boolean);
+        const batchSize = Math.max(1, Number(KILL_SHARED_SYNC.deleteBatchSize) || 500);
+        let deleted = 0;
+
+        for (let i = 0; i < keys.length; i += batchSize) {
+            const batch = keys.slice(i, i + batchSize);
+            const { error } = await client
+                .from(KILL_SHARED_SYNC.tableName)
+                .delete()
+                .in('name_key', batch);
+
+            if (error) {
+                addLiveLog(`Kill Sync: active suppression cleanup failed — ${error.message || error}`);
+                return { ok: false, deleted };
+            }
+
+            deleted += batch.length;
+        }
+
+        return { ok: true, deleted };
+    }
+
+    function removeSharedSuppressedPlayersFromLocalList(suppressedNameKeys) {
+        if (!suppressedNameKeys || !suppressedNameKeys.size) return 0;
+
+        const players = state.killPlayers || [];
+        const kept = [];
+        let removed = 0;
+
+        for (const player of players) {
+            const key = getKillSharedSyncNameKey(player && player.name);
+            if (key && suppressedNameKeys.has(key)) {
+                removed++;
+                continue;
+            }
+            kept.push(player);
+        }
+
+        if (removed > 0) {
+            state.killPlayers = kept;
+            if (document.querySelector('#ug-bot-kill-list')) renderKillList();
+        }
+
+        return removed;
+    }
+
     function removeSharedDeadPlayersFromLocalList(deadNameKeys) {
         if (!deadNameKeys || !deadNameKeys.size) return 0;
 
@@ -5514,7 +6176,7 @@
         return removed;
     }
 
-    async function downloadSharedKillPlayerNames(deadNameKeys = null) {
+    async function downloadSharedKillPlayerNames(deadNameKeys = null, suppressedNameKeys = null) {
         const client = getKillSharedSyncClient();
         if (!client) return [];
 
@@ -5539,7 +6201,7 @@
             for (const row of rows) {
                 const name = cleanKillSharedSyncName(row && row.name);
                 const key = getKillSharedSyncNameKey(name);
-                if (name && key && !isKillSharedSyncExcludedName(name) && !(deadNameKeys && deadNameKeys.has(key))) names.push(name);
+                if (name && key && !isKillSharedSyncExcludedName(name) && !(deadNameKeys && deadNameKeys.has(key)) && !(suppressedNameKeys && suppressedNameKeys.has(key))) names.push(name);
             }
 
             if (rows.length < pageSize) break;
@@ -5548,7 +6210,7 @@
         return names;
     }
 
-    function mergeSharedKillNamesIntoLocalList(sharedNames, deadNameKeys = null) {
+    function mergeSharedKillNamesIntoLocalList(sharedNames, deadNameKeys = null, suppressedNameKeys = null) {
         const players = getKillPlayers();
         const existing = new Set(
             players
@@ -5561,7 +6223,7 @@
         for (const rawName of sharedNames || []) {
             const name = cleanKillSharedSyncName(rawName);
             const key = getKillSharedSyncNameKey(name);
-            if (!name || !key || isKillSharedSyncExcludedName(name) || (deadNameKeys && deadNameKeys.has(key)) || existing.has(key)) continue;
+            if (!name || !key || isKillSharedSyncExcludedName(name) || (deadNameKeys && deadNameKeys.has(key)) || (suppressedNameKeys && suppressedNameKeys.has(key)) || existing.has(key)) continue;
 
             players.push({
                 name,
@@ -5586,10 +6248,25 @@
     }
 
     async function runKillSharedPlayerListSync() {
-        if (!KILL_SHARED_SYNC.enabled || killSharedSyncRunning) return;
+        if (!KILL_SHARED_SYNC.enabled || killSharedSyncRunning || isDupeIdleActive()) return;
 
         killSharedSyncRunning = true;
         try {
+            // Intentional/live rediscovery wins first: delete any queued
+            // unsuppressions before downloading the authoritative suppression set.
+            const unsuppress = await flushPendingKillSharedUnsuppressPlayers();
+
+            const pendingSuppressedNames = getPendingKillSharedSuppressedNames();
+            const pendingSuppressedKeys = buildKillSharedSuppressedKeySet(pendingSuppressedNames);
+            const suppressionUpload = await uploadPendingKillSharedSuppressedPlayers();
+
+            const downloadedSuppressedNames = await downloadSharedKillSuppressedNames();
+            setCachedKillSharedSuppressedNames(downloadedSuppressedNames);
+            const suppressedNameKeys = new Set([
+                ...pendingSuppressedKeys,
+                ...buildKillSharedSuppressedKeySet(downloadedSuppressedNames)
+            ]);
+
             const pendingDeadNames = getPendingKillSharedDeadNames();
             const pendingDeadKeys = buildKillSharedDeadKeySet(pendingDeadNames);
             const deadUpload = await uploadPendingKillSharedDeadPlayers();
@@ -5597,16 +6274,18 @@
             const downloadedDeadKeys = await downloadSharedKillDeadNameKeys();
             const deadNameKeys = new Set([...pendingDeadKeys, ...downloadedDeadKeys]);
 
+            const removedLocalSuppressed = removeSharedSuppressedPlayersFromLocalList(suppressedNameKeys);
             const removedLocalDead = removeSharedDeadPlayersFromLocalList(deadNameKeys);
+            const activeSuppressedCleanup = await deleteSuppressedNamesFromActiveSharedList(suppressedNameKeys);
             const activeDeadCleanup = await deleteDeadNamesFromActiveSharedList(pendingDeadKeys);
 
-            const upload = await uploadKillPlayerNamesToSharedList(deadNameKeys);
+            const upload = await uploadKillPlayerNamesToSharedList(deadNameKeys, suppressedNameKeys);
             if (!upload.ok) return;
 
-            const sharedNames = await downloadSharedKillPlayerNames(deadNameKeys);
-            const added = mergeSharedKillNamesIntoLocalList(sharedNames, deadNameKeys);
+            const sharedNames = await downloadSharedKillPlayerNames(deadNameKeys, suppressedNameKeys);
+            const added = mergeSharedKillNamesIntoLocalList(sharedNames, deadNameKeys, suppressedNameKeys);
 
-            addLiveLog(`Kill Sync: uploaded ${upload.uploaded} active username(s), dead synced ${deadUpload.uploaded}, dead known ${deadNameKeys.size}, active cleanup ${activeDeadCleanup.deleted}, downloaded ${sharedNames.length}, added ${added} missing${removedLocalDead ? `, removed ${removedLocalDead} local dead` : ''}`);
+            addLiveLog(`Kill Sync: uploaded ${upload.uploaded} active username(s), suppressed synced ${suppressionUpload.uploaded}, suppressed known ${suppressedNameKeys.size}, unsuppressed ${unsuppress.deleted}, dead synced ${deadUpload.uploaded}, dead known ${deadNameKeys.size}, active cleanup ${activeSuppressedCleanup.deleted + activeDeadCleanup.deleted}, downloaded ${sharedNames.length}, added ${added} missing${removedLocalSuppressed ? `, removed ${removedLocalSuppressed} local suppressed` : ''}${removedLocalDead ? `, removed ${removedLocalDead} local dead` : ''}`);
         } catch (e) {
             addLiveLog(`Kill Sync: failed — ${e && e.message ? e.message : e}`);
         } finally {
@@ -5637,6 +6316,67 @@
     }
 
 
+
+    async function publishKillSuppressionNow(rawName) {
+        const name = cleanKillSharedSyncName(rawName);
+        const key = getKillSharedSyncNameKey(name);
+        if (!name || !key || isKillSharedSyncExcludedName(name)) return false;
+
+        rememberKillSharedSuppressedPlayers([name]);
+        removeSharedSuppressedPlayersFromLocalList(new Set([key]));
+
+        if (state.pendingKillAction) {
+            const actionTarget = getKillSharedSyncNameKey(state.pendingKillAction.targetName);
+            const actionOwner = getKillSharedSyncNameKey(state.pendingKillAction.bgFor);
+            if (actionTarget === key || actionOwner === key) {
+                state.pendingKillAction = null;
+                state.killLoopActive = false;
+            }
+        }
+
+        const uploaded = await uploadPendingKillSharedSuppressedPlayers();
+        if (uploaded.ok) {
+            await deleteSuppressedNamesFromActiveSharedList(new Set([key]));
+        }
+        return uploaded.ok;
+    }
+
+    async function unsuppressKillSharedNamesFromPositiveEvidence(rawNames, sourceLabel = 'live evidence', force = false) {
+        const names = normaliseKillSharedNameList(rawNames);
+        const knownSuppressed = getKnownKillSharedSuppressedKeySet();
+        const matching = force
+            ? names
+            : names.filter(name => knownSuppressed.has(getKillSharedSyncNameKey(name)));
+        if (!matching.length) return 0;
+
+        if (force) {
+            // Manual import is an intentional override even if this tab has not
+            // downloaded the latest suppression cache yet. Queue every imported
+            // name for a delete; deleting a non-existent row is harmless.
+            const pending = new Map(getPendingKillSharedUnsuppressNames().map(name => [getKillSharedSyncNameKey(name), name]));
+            for (const name of matching) pending.set(getKillSharedSyncNameKey(name), name);
+            setPendingKillSharedUnsuppressNames([...pending.values()]);
+
+            const suppressedPending = new Map(getPendingKillSharedSuppressedNames().map(name => [getKillSharedSyncNameKey(name), name]));
+            const cache = new Map(getCachedKillSharedSuppressedNames().map(name => [getKillSharedSyncNameKey(name), name]));
+            for (const name of matching) {
+                const key = getKillSharedSyncNameKey(name);
+                suppressedPending.delete(key);
+                cache.delete(key);
+            }
+            setPendingKillSharedSuppressedNames([...suppressedPending.values()]);
+            setCachedKillSharedSuppressedNames([...cache.values()]);
+        } else {
+            const queued = queueKillSharedUnsuppressPlayers(matching);
+            if (!queued) return 0;
+        }
+
+        const result = await flushPendingKillSharedUnsuppressPlayers();
+        if (result.ok) {
+            addLiveLog(`Kill Sync: unsuppressed ${matching.length} username(s) from ${sourceLabel}`);
+        }
+        return result.ok ? matching.length : 0;
+    }
 
     // -------------------------------------------------------------------------
     // Kill Player Searcher (AJAX prefix finder)
@@ -5883,7 +6623,7 @@
     }
 
     async function processKillPlayerFinderTick() {
-        if (killPlayerFinderRunning || !state.killPlayerFinderEnabled) return;
+        if (killPlayerFinderRunning || !state.killPlayerFinderEnabled || isDupeIdleActive()) return;
         if (!state.enabled) {
             pauseKillPlayerFinderForBotPause();
             return;
@@ -5972,6 +6712,7 @@
                     nextState.deadSeen += deadNames.length;
                 }
 
+                await unsuppressKillSharedNamesFromPositiveEvidence(aliveNames, 'Player Searcher');
                 const added = mergeKillPlayerFinderNamesIntoLocalList(aliveNames, killPlayerFinderDeadKeyCache);
                 nextState.found += aliveNames.length;
                 nextState.added += added;
@@ -6122,6 +6863,17 @@
         return [...document.querySelectorAll('.bgm.fail')].some(el =>
             /that player is dead/i.test(textOf(el))
         );
+    }
+
+    // Detects the game's explicit response for a username which is not
+    // currently registered. Only normal failure banners are inspected so a
+    // network error, timeout, login page, or Cloudflare page cannot suppress a name.
+    function hasKillNonexistentMessage() {
+        return [...document.querySelectorAll('.bgm.fail')].some(el => {
+            const message = textOf(el);
+            return /\b(?:this|that)?\s*(?:user|player)\s+(?:does\s+not|doesn['’]?t)\s+exist\b/i.test(message) ||
+                   /\bno\s+such\s+(?:user|player)\b/i.test(message);
+        });
     }
 
     // Detects "X cannot be killed" message
@@ -6780,7 +7532,7 @@
         }
 
         const names = scrapeOnlinePlayers();
-        const added = mergeOnlinePlayers(names);
+        const added = await mergeOnlinePlayers(names);
         state.killLastOnlineScan = now();
 
         addLiveLog(`Kill scanner: found ${names.length} online players, added ${added} new`);
@@ -6847,6 +7599,8 @@
         // as UNKNOWN so they appear in the UI immediately with BG/Kill checkboxes.
         const pendingSearchEls = [...document.querySelectorAll('.bgl.i.wb .bgm.chs.pd b')];
         if (pendingSearchEls.length > 0) {
+            const pendingSearchNames = pendingSearchEls.map(el => cleanKillSharedSyncName(el.textContent)).filter(Boolean);
+            await unsuppressKillSharedNamesFromPositiveEvidence(pendingSearchNames, 'current pending searches');
             const players = getKillPlayers();
             const dead = state.killDeadPlayers || [];
             let added = false;
@@ -6906,7 +7660,7 @@
         if (!killSearchResultHandledThisLoad && state.killCurrentSearch && hasCTCContinuePlayingMessage()) {
             const current = state.killCurrentSearch;
             const currentLower = current.toLowerCase();
-            const hasFail    = hasKillDeadMessage() || hasKillProtectedMessage() ||
+            const hasFail    = hasKillDeadMessage() || hasKillNonexistentMessage() || hasKillProtectedMessage() ||
                                hasKillUncillableMessage() || hasKillSelfSearchMessage();
             const hasSuccess = hasKillSearchStartedMessage();
 
@@ -6955,7 +7709,16 @@
             const current = state.killCurrentSearch;
 
             if (current) {
-                if (hasKillDeadMessage()) {
+                if (hasKillNonexistentMessage()) {
+                    killSearchResultHandledThisLoad = true;
+                    const suppressionShared = await publishKillSuppressionNow(current);
+                    addLiveLog(suppressionShared
+                        ? `Kill scanner: ${current} does not exist — shared suppression added and player removed`
+                        : `Kill scanner: ${current} does not exist — removed locally; shared suppression queued for retry`);
+                    state.killCurrentSearch = '';
+                    clearKillSearchSubmitTracking();
+                    renderKillList();
+                } else if (hasKillDeadMessage()) {
                     killSearchResultHandledThisLoad = true;
                     addLiveLog(`Kill scanner: ${current} is dead — removed from list`);
                     // Check if this was a BG for a BG Farm player — trigger BG check on that player
@@ -7029,7 +7792,7 @@
             const waitingName = state.killCurrentSearch;
             const submittedAt = state.killSearchSubmitAt || 0;
             const elapsed = submittedAt ? (now() - submittedAt) : 0;
-            const responseStillPending = !hasKillDeadMessage() && !hasKillProtectedMessage() &&
+            const responseStillPending = !hasKillDeadMessage() && !hasKillNonexistentMessage() && !hasKillProtectedMessage() &&
                 !hasKillUncillableMessage() && !hasKillSelfSearchMessage() && !hasKillSearchStartedMessage();
 
             if (responseStillPending && submittedAt && elapsed < KILL_SEARCH_RESPONSE_WAIT_MS) {
@@ -7424,7 +8187,7 @@
     }
 
     async function doDiceJoin() {
-        if (!diceJoinActive || !state.enabled || !state.diceJoinEnabled) { scheduleDiceJoin(); return; }
+        if (!diceJoinActive || !state.enabled || !state.diceJoinEnabled || isDupeIdleActive()) { scheduleDiceJoin(); return; }
         setSetting('diceJoinLastRun', Date.now());
         try {
             const resp = await fetch('/?p=multiplayer-dice&page=1', { credentials: 'include', cache: 'no-store' });
@@ -7478,7 +8241,7 @@
     }
 
     async function doQTPerkExtend() {
-        if (!qtPerkExtendActive || !state.enabled || !state.qtPerkExtendEnabled || crimePaused || (!state.bgCrimeEnabled && (isCrimesPage() || hasCrimePageMarkers()))) {
+        if (!qtPerkExtendActive || !state.enabled || !state.qtPerkExtendEnabled || isDupeIdleActive() || crimePaused || (!state.bgCrimeEnabled && (isCrimesPage() || hasCrimePageMarkers()))) {
             scheduleQTPerkExtend();
             return;
         }
@@ -7581,7 +8344,7 @@
     }
 
 async function doQTPerkRedeem() {
-        if (!qtPerkRedeemActive || !state.enabled || !state.qtPerkRedeemEnabled) {
+        if (!qtPerkRedeemActive || !state.enabled || !state.qtPerkRedeemEnabled || isDupeIdleActive()) {
             scheduleQTPerkRedeem();
             return;
         }
@@ -7930,7 +8693,7 @@ async function doQTPerkRedeem() {
     }
 
     async function doBgSpam() {
-        if (!bgSpamActive || !state.enabled || !state.killBgCheckEnabled || !state.killBgSpamEnabled) {
+        if (!bgSpamActive || !state.enabled || !state.killBgCheckEnabled || !state.killBgSpamEnabled || isDupeIdleActive()) {
             scheduleBgSpam();
             return;
         }
@@ -8201,7 +8964,7 @@ async function doQTPerkRedeem() {
     }
 
     async function doQTSniperPoll() {
-        if (!qtSniperActive || !state.enabled || !state.qtPerksEnabled || crimePaused || (!state.bgCrimeEnabled && (isCrimesPage() || hasCrimePageMarkers()))) { scheduleQTSniperPoll(); return; }
+        if (!qtSniperActive || !state.enabled || !state.qtPerksEnabled || isDupeIdleActive() || crimePaused || (!state.bgCrimeEnabled && (isCrimesPage() || hasCrimePageMarkers()))) { scheduleQTSniperPoll(); return; }
         if (!state.qtBgEnabled && !state.qtBulletsEnabled && !state.qtPointsEnabled &&
             !state.qtBustEnabled && !state.qtAlwaysSuccEnabled && !state.qtDoubleMeltsEnabled && !state.qtDoubleXpEnabled &&
             !state.qtDoubleCashEnabled && !state.qtRareEnabled && !state.qtBulletValueEnabled) { scheduleQTSniperPoll(); return; }
@@ -8210,7 +8973,7 @@ async function doQTPerkRedeem() {
 
         try {
             qtSniperAbortController = new AbortController();
-            const resp = await fetch('/index3.php?p=qt&a=perks', { credentials: 'include', cache: 'no-store', signal: qtSniperAbortController.signal });
+            const resp = await fetch('/index2.php?p=qt&a=perks', { credentials: 'include', cache: 'no-store', signal: qtSniperAbortController.signal });
             const text = await resp.text();
             const parser = new DOMParser();
             const doc = parser.parseFromString(text, 'text/html');
@@ -8664,7 +9427,7 @@ async function doQTPerkRedeem() {
     }
 
     async function doQTAuctionScan() {
-        if (!qtAuctionActive || !state.enabled || !state.qtAuctionEnabled || crimePaused || (!state.bgCrimeEnabled && (isCrimesPage() || hasCrimePageMarkers()))) { scheduleQTAuctionScan(); return; }
+        if (!qtAuctionActive || !state.enabled || !state.qtAuctionEnabled || isDupeIdleActive() || crimePaused || (!state.bgCrimeEnabled && (isCrimesPage() || hasCrimePageMarkers()))) { scheduleQTAuctionScan(); return; }
         if (!isQTAuctionConfigured()) { scheduleQTAuctionScan(); return; }
         if (hasCTCChallenge()) { scheduleQTAuctionScan(); return; }
         if (actionInFlight || qtAuctionInFlight) { scheduleQTAuctionScan(); return; }
@@ -8767,7 +9530,7 @@ async function doQTPerkRedeem() {
     }
 
     async function doQTCarScan() {
-        if (!qtCarScanActive || !state.enabled || !state.qtCarsEnabled || crimePaused || (!state.bgCrimeEnabled && (isCrimesPage() || hasCrimePageMarkers()))) { scheduleQTCarScan(); return; }
+        if (!qtCarScanActive || !state.enabled || !state.qtCarsEnabled || isDupeIdleActive() || crimePaused || (!state.bgCrimeEnabled && (isCrimesPage() || hasCrimePageMarkers()))) { scheduleQTCarScan(); return; }
         if (hasCTCChallenge()) { scheduleQTCarScan(); return; }
         if (actionInFlight) { scheduleQTCarScan(); return; }
 
@@ -9169,6 +9932,10 @@ async function doQTPerkRedeem() {
     }
 
     async function doBgCrimePoll() {
+        if (isDupeIdleActive()) {
+            scheduleBgCrimePoll();
+            return;
+        }
         if (bgCrimeInFlight) {
             scheduleBgCrimePoll();
             return;
@@ -9729,7 +10496,8 @@ async function doQTPerkRedeem() {
 
     function getAvailableCrimes() {
         const enabled = state.enabledActions;
-        return DEFAULT_ORDER.filter(id =>
+        const crimeOrder = PERSONALITY.dupeMode ? DUPE_CRIME_ORDER : DEFAULT_ORDER;
+        return crimeOrder.filter(id =>
             enabled.includes(id) &&
             !isCrimeLocked(id) &&
             isCrimeAvailable(id)
@@ -10273,6 +11041,47 @@ async function doQTPerkRedeem() {
         return false;
     }
 
+    // ── Dupe Mode jail navigation loop ────────────────────────────────────
+    // While an owned account is jailed, Dupe Mode periodically attempts to open
+    // GTA or Crimes. UG redirects the account back to jail while the sentence is
+    // active; the fresh jail page then schedules the next attempt. Normal mode is
+    // deliberately unchanged.
+    const DUPE_JAIL_NAV_MIN_DELAY_MS = 3000;
+    const DUPE_JAIL_NAV_MAX_DELAY_MS = 7000;
+    const DUPE_JAIL_NAV_PAGES = ['gta', 'crimes'];
+    let dupeJailNavigationPending = false;
+
+    function chooseDupeJailNavigationPage() {
+        return DUPE_JAIL_NAV_PAGES[rand(0, DUPE_JAIL_NAV_PAGES.length - 1)] || 'crimes';
+    }
+
+    async function maybeRunDupeJailNavigationLoop() {
+        if (!PERSONALITY.dupeMode || !state.enabled) return false;
+        if (!isLikelyJailPage() || !getOwnJailRow()) return false;
+        if (hasSecurityVerificationPage() || hasCTCChallenge()) return false;
+        if (reloadPending || dupeJailNavigationPending) return true;
+
+        dupeJailNavigationPending = true;
+        try {
+            const destination = chooseDupeJailNavigationPage();
+            const delayMs = rand(DUPE_JAIL_NAV_MIN_DELAY_MS, DUPE_JAIL_NAV_MAX_DELAY_MS);
+            addLiveLog(`Dupe jail loop: trying ${destination === 'gta' ? 'GTA' : 'Crimes'} in ${(delayMs / 1000).toFixed(1)}s`);
+            await wait(delayMs);
+
+            // Re-check every safety condition after the delay. The jail row may
+            // disappear during the wait, or CTC/security handling may take over.
+            if (!PERSONALITY.dupeMode || !state.enabled) return false;
+            if (reloadPending || hasSecurityVerificationPage() || hasCTCChallenge()) return false;
+            if (!isLikelyJailPage() || !getOwnJailRow()) return false;
+
+            addLiveLog(`Dupe jail loop: opening ${destination === 'gta' ? 'GTA' : 'Crimes'} while still jailed`);
+            gotoPage(destination);
+            return true;
+        } finally {
+            dupeJailNavigationPending = false;
+        }
+    }
+
     function hasCrimePageMarkers() {
         return !!document.querySelector('#crimebox') || !!document.querySelector('input.crime');
     }
@@ -10445,6 +11254,14 @@ async function doQTPerkRedeem() {
                 // Not enough points — fall through to normal wait behaviour
             }
 
+            // Dupe Mode only: do not remain passively parked on the jail page.
+            // Try GTA or Crimes every few seconds; UG will redirect back here
+            // while the sentence is active, and the new page load repeats safely.
+            if (PERSONALITY.dupeMode) {
+                await maybeRunDupeJailNavigationLoop();
+                return;
+            }
+
             return;
         }
 
@@ -10477,6 +11294,7 @@ async function doQTPerkRedeem() {
     }
 
     async function doNoReloadBustPoll() {
+        if (isDupeIdleActive()) { scheduleNoReloadBustPoll(); return; }
         if (state.securityVerificationHoldActive || hasSecurityVerificationPage()) { scheduleNoReloadBustPoll(); return; }
         if (!noReloadBustActive) return;
         try {
@@ -10631,7 +11449,7 @@ async function doQTPerkRedeem() {
     }
 
     async function doAutoBuyBg() {
-        if (!autoBuyBgActive || !state.enabled || !state.autoBuyBgEnabled) {
+        if (!autoBuyBgActive || !state.enabled || !state.autoBuyBgEnabled || isDupeIdleActive()) {
             scheduleAutoBuyBg();
             return;
         }
@@ -11873,6 +12691,11 @@ async function doQTPerkRedeem() {
         if (nextMeltMs  != null && nextMeltMs  > 0) parts.push(`melt ${Math.ceil(nextMeltMs   / 1000)}s`);
         if (nextDriveMs != null && nextDriveMs > 0) parts.push(`drive ${Math.ceil(nextDriveMs / 1000)}s`);
 
+        if (PERSONALITY.dupeMode) {
+            await maybeRunDupeCooldownBrowseLoop();
+            return;
+        }
+
         if (parts.length) {
             return;
         }
@@ -11954,6 +12777,11 @@ async function doQTPerkRedeem() {
 
         const synced = syncGTAReadyFromQuickLink();
         if (!synced) state.nextGTAReadyAt = now() + 15000;
+
+        if (PERSONALITY.dupeMode) {
+            await maybeRunDupeCooldownBrowseLoop();
+            return;
+        }
 
         addLiveLog('GTA not ready yet — returning to crimes');
         if (await maybeVisitHumanPage()) return;
@@ -14623,6 +15451,13 @@ async function doQTPerkRedeem() {
             } finally {
                 loopBusy = false;
             }
+            return;
+        }
+
+        // ── Dupe Mode scheduled idle break ────────────────────────────────────
+        // CTC/security handling above remains live; every normal foreground action
+        // and all independent background workers pause while this returns true.
+        if (await maybeHandleDupeIdleBreak()) {
             return;
         }
 
@@ -18776,17 +19611,19 @@ async function doQTPerkRedeem() {
                     if (e.target === overlay) document.body.removeChild(overlay);
                 });
 
-                document.querySelector('#ug-bot-kill-import-confirm').addEventListener('click', () => {
+                document.querySelector('#ug-bot-kill-import-confirm').addEventListener('click', async () => {
                     const ta = document.querySelector('#ug-bot-kill-import-ta');
                     const lines = ta.value.split('\n').map(l => l.trim()).filter(Boolean);
                     if (!lines.length) return;
 
+                    const cleanLines = normaliseKillSharedNameList(lines);
+                    const unsuppressed = await unsuppressKillSharedNamesFromPositiveEvidence(cleanLines, 'manual import', true);
                     const players = getKillPlayers();
                     const existingNames = new Set(players.map(p => p.name.toLowerCase()));
                     let added = 0;
                     let skipped = 0;
 
-                    for (const name of lines) {
+                    for (const name of cleanLines) {
                         if (existingNames.has(name.toLowerCase())) {
                             skipped++;
                             continue;
@@ -18810,7 +19647,7 @@ async function doQTPerkRedeem() {
                     }
 
                     const result = document.querySelector('#ug-bot-kill-import-result');
-                    if (result) result.textContent = `Added ${added} player${added !== 1 ? 's' : ''}${skipped ? `, skipped ${skipped} duplicate${skipped !== 1 ? 's' : ''}` : ''}.`;
+                    if (result) result.textContent = `Added ${added} player${added !== 1 ? 's' : ''}${unsuppressed ? `, unsuppressed ${unsuppressed}` : ''}${skipped ? `, skipped ${skipped} duplicate${skipped !== 1 ? 's' : ''}` : ''}.`;
 
                     if (added > 0) {
                         setTimeout(() => {
