@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Full UG Bot
 // @namespace    ug-bot
-// @version      3.0.31
+// @version      3.0.51
 // @description  Auto-runs crimes, GTA, melting, repair, missions, drug running with Swiss Bank management, live log, session stats, action checkboxes, jail handling, runtime tracking, melt pagination, repair cycles, automatic CTC solving, and point-spending features.
 // @match        *://www.underworldgangsters.com/*
 // @match        *://underworldgangsters.com/*
@@ -39,6 +39,652 @@
     } catch (e) {
         console.warn('[UG-BOT] Could not inject checkbox/radio zoom fix:', e);
     }
+
+    // ── Profile Top 10 Checker (always-on profile utility) ─────────────────────
+    // Integrated from the approved standalone v0.8.0 design. This intentionally
+    // runs before the main bot window-identity/activation gate so it is available
+    // in every profile tab/window where the userscript loads, even when UG Bot is
+    // stopped or that window has never been activated. Requests remain click-only.
+    (() => {
+        'use strict';
+
+        const ROOT_ID = 'ug-profile-top10-test';
+        const SIDE_GAP = 12;
+        const MIN_PANEL_WIDTH = 185;
+        const MAX_PANEL_WIDTH = 285;
+
+        const TOP_GROUPS = {
+            alive: {
+                label: 'Alive Top 10',
+                button: 'Check Alive',
+                side: 'right',
+                scopes: [
+                    { id: 'alive-criminal', label: 'Criminal', params: {} },
+                    { id: 'alive-financial', label: 'Financial', params: { s: 's' } }
+                ]
+            },
+            online: {
+                label: 'Online Top 10',
+                button: 'Check Online',
+                side: 'left',
+                scopes: [
+                    { id: 'online-criminal', label: 'Criminal', params: { ss: 'online' } },
+                    { id: 'online-financial', label: 'Financial', params: { ss: 'online', s: 's' } }
+                ]
+            }
+        };
+
+        function cleanText(value) {
+            return String(value || '').replace(/\s+/g, ' ').trim();
+        }
+
+        function getUsernameFromUrl() {
+            const params = new URLSearchParams(location.search);
+            for (const key of ['u', 'user', 'username', 'player', 'name']) {
+                const value = cleanText(params.get(key));
+                if (value) return value;
+            }
+            return '';
+        }
+
+        function isTopPage() {
+            return new URLSearchParams(location.search).get('p') === 'top';
+        }
+
+        function findLikelyProfileUsername() {
+            const fromUrl = getUsernameFromUrl();
+            if (fromUrl) return fromUrl;
+
+            const selectors = [
+                '#profile-username',
+                '.profile-username',
+                '[data-profile-username]',
+                '.username.profile',
+                '.player-profile .username'
+            ];
+
+            for (const selector of selectors) {
+                const el = document.querySelector(selector);
+                const value = cleanText(el?.textContent);
+                if (value) return value;
+            }
+
+            return '';
+        }
+
+        function makeFilteredTopUrl(username, scope) {
+            const url = new URL('/?p=top', location.origin);
+            url.searchParams.set('u', username);
+
+            for (const [key, value] of Object.entries(scope.params || {})) {
+                url.searchParams.set(key, value);
+            }
+
+            return url.pathname + url.search;
+        }
+
+        function rowIsHighlighted(row) {
+            return [...row.querySelectorAll('td')].some(td => {
+                const classes = [...td.classList].map(c => c.toLowerCase());
+                const style = String(td.getAttribute('style') || '').toLowerCase().replace(/\s+/g, '');
+
+                return classes.includes('sprouts') ||
+                       style.includes('background-color:darkblue');
+            });
+        }
+
+        function getSectionName(table) {
+            const th = table.querySelector('th');
+            if (!th) return 'Unknown';
+
+            const clone = th.cloneNode(true);
+            clone.querySelectorAll('.toggle').forEach(el => el.remove());
+            const rawName = cleanText(clone.textContent) || 'Unknown';
+            return rawName === 'Money Earned From Crimes' ? 'Crime Money' : rawName;
+        }
+
+        function parseTop10Matches(html) {
+            const doc = new DOMParser().parseFromString(html, 'text/html');
+            const matches = [];
+
+            for (const table of doc.querySelectorAll('table.wo')) {
+                const section = getSectionName(table);
+
+                for (const row of table.querySelectorAll('tr')) {
+                    const cells = [...row.querySelectorAll('td')];
+                    if (cells.length < 2 || !rowIsHighlighted(row)) continue;
+
+                    const rankText = cleanText(cells[0]?.textContent);
+                    if (!/^\d+$/.test(rankText)) continue;
+
+                    matches.push({
+                        section,
+                        rank: Number(rankText),
+                        value: cleanText(cells[cells.length - 1]?.textContent)
+                    });
+                }
+            }
+
+            return matches;
+        }
+
+        function responseLooksLoggedOut(html) {
+            return html.includes('id="login-email"') ||
+                   html.includes('id="login-password"') ||
+                   html.includes("id='login-email'") ||
+                   html.includes("id='login-password'");
+        }
+
+        async function fetchScopeMatches(username, scope) {
+            const response = await fetch(makeFilteredTopUrl(username, scope), {
+                method: 'GET',
+                credentials: 'include',
+                cache: 'no-store'
+            });
+
+            if (!response.ok) {
+                throw new Error(`${scope.label}: HTTP ${response.status}`);
+            }
+
+            const html = await response.text();
+
+            if (responseLooksLoggedOut(html)) {
+                throw new Error('The game returned the login page. Log in and try again.');
+            }
+
+            return {
+                scope,
+                matches: parseTop10Matches(html)
+            };
+        }
+
+        async function fetchGroupMatches(username, groupKey, onProgress = null) {
+            const group = TOP_GROUPS[groupKey];
+            if (!group) throw new Error(`Unknown Top 10 group: ${groupKey}`);
+
+            const results = [];
+
+            // Two controlled sequential requests per button click.
+            for (let i = 0; i < group.scopes.length; i++) {
+                const scope = group.scopes[i];
+                onProgress?.(scope, i + 1, group.scopes.length);
+                results.push(await fetchScopeMatches(username, scope));
+            }
+
+            return results;
+        }
+
+        function scoreProfileAnchor(table) {
+            if (!table || table.closest(`#${ROOT_ID}`)) return -1;
+
+            const text = cleanText(table.textContent).toLowerCase();
+            let score = 0;
+            for (const marker of ['username', 'status', 'rank', 'money']) {
+                if (text.includes(marker)) score++;
+            }
+            if (text.includes('total kills')) score++;
+            if (text.includes('busts')) score++;
+
+            const rect = table.getBoundingClientRect();
+            if (rect.width >= 350 && rect.width <= 900) score += 2;
+            if (rect.height >= 150 && rect.height <= 650) score += 1;
+
+            return score;
+        }
+
+        function findProfileAnchor() {
+            let best = null;
+            let bestScore = -1;
+
+            for (const table of document.querySelectorAll('table')) {
+                const score = scoreProfileAnchor(table);
+                if (score > bestScore) {
+                    best = table;
+                    bestScore = score;
+                }
+            }
+
+            return bestScore >= 5 ? best : null;
+        }
+
+        function injectStyles() {
+            if (document.getElementById(`${ROOT_ID}-style`)) return;
+
+            const style = document.createElement('style');
+            style.id = `${ROOT_ID}-style`;
+            style.textContent = `
+                #${ROOT_ID} {
+                    position: static;
+                }
+
+                #${ROOT_ID} .ug-t10-side {
+                    position: absolute;
+                    z-index: 50;
+                    box-sizing: border-box;
+                    border: 1px solid #444;
+                    background: rgba(24,24,24,.97);
+                    color: #ddd;
+                    font: 12px Arial, sans-serif;
+                    box-shadow: 0 2px 8px rgba(0,0,0,.28);
+                    overflow: hidden;
+                }
+
+                #${ROOT_ID} .ug-t10-side-head {
+                    display: flex;
+                    align-items: center;
+                    justify-content: space-between;
+                    gap: 6px;
+                    min-height: 27px;
+                    padding: 5px 7px;
+                    background: #222;
+                    border-bottom: 1px solid #383838;
+                    box-sizing: border-box;
+                }
+
+                #${ROOT_ID} .ug-t10-side-title {
+                    font-weight: bold;
+                    color: #ddd;
+                    white-space: nowrap;
+                }
+
+                #${ROOT_ID} .ug-t10-user {
+                    min-width: 0;
+                    overflow: hidden;
+                    text-overflow: ellipsis;
+                    white-space: nowrap;
+                    color: #777;
+                    font-size: 10px;
+                    text-align: right;
+                }
+
+                #${ROOT_ID} .ug-t10-btn {
+                    display: block;
+                    width: calc(100% - 12px);
+                    margin: 6px !important;
+                    padding: 5px 7px !important;
+                    box-sizing: border-box;
+                    border: 1px solid #555 !important;
+                    background: #2a2a2a !important;
+                    color: #ddd !important;
+                    font-size: 11px !important;
+                    line-height: 1.25 !important;
+                    cursor: pointer !important;
+                }
+
+                #${ROOT_ID} .ug-t10-btn:hover:not(:disabled) {
+                    background: #353535 !important;
+                    border-color: #777 !important;
+                }
+
+                #${ROOT_ID} .ug-t10-btn:disabled {
+                    opacity: .55;
+                    cursor: default !important;
+                }
+
+                #${ROOT_ID} .ug-t10-body {
+                    padding: 0 7px 7px;
+                    min-height: 0;
+                }
+
+                #${ROOT_ID} .ug-t10-placeholder,
+                #${ROOT_ID} .ug-t10-status,
+                #${ROOT_ID} .ug-t10-empty {
+                    color: #777;
+                    font-size: 10px;
+                    line-height: 1.35;
+                    text-align: center;
+                    padding: 3px 0 1px;
+                }
+
+                #${ROOT_ID} .ug-t10-error {
+                    color: #ff8f8f;
+                    font-size: 10px;
+                    line-height: 1.35;
+                    text-align: center;
+                    padding: 3px 0 1px;
+                }
+
+                #${ROOT_ID} .ug-t10-summary {
+                    color: #777;
+                    font-size: 9px;
+                    text-align: right;
+                    padding: 1px 0 4px;
+                }
+
+                #${ROOT_ID} .ug-t10-row {
+                    display: grid;
+                    grid-template-columns: 30px minmax(0, 1fr) max-content;
+                    align-items: baseline;
+                    column-gap: 7px;
+                    min-width: 0;
+                    padding: 5px 0;
+                    border-top: 1px solid rgba(255,255,255,.065);
+                    line-height: 1.25;
+                    white-space: nowrap;
+                }
+
+                #${ROOT_ID} .ug-t10-row:first-of-type {
+                    border-top: 0;
+                }
+
+                #${ROOT_ID} .ug-t10-rank {
+                    width: 30px;
+                    min-width: 30px;
+                    font-weight: bold;
+                    font-size: 13px;
+                    text-align: left;
+                }
+
+                #${ROOT_ID} .ug-t10-section {
+                    min-width: 0;
+                    overflow: hidden;
+                    text-overflow: ellipsis;
+                    color: #ddd;
+                    font-size: 13px;
+                    text-align: left;
+                }
+
+                #${ROOT_ID} .ug-t10-value {
+                    min-width: 0;
+                    overflow: hidden;
+                    text-overflow: ellipsis;
+                    color: #999;
+                    font-size: 11px;
+                    text-align: right;
+                    justify-self: end;
+                }
+
+                #${ROOT_ID} .ug-t10-side.ug-t10-narrow .ug-t10-user {
+                    display: none;
+                }
+
+                #${ROOT_ID} .ug-t10-side.ug-t10-narrow .ug-t10-row {
+                    grid-template-columns: 28px minmax(0, 1fr) max-content;
+                    column-gap: 5px;
+                }
+
+                #${ROOT_ID} .ug-t10-side.ug-t10-narrow .ug-t10-rank,
+                #${ROOT_ID} .ug-t10-side.ug-t10-narrow .ug-t10-section {
+                    font-size: 12px;
+                }
+
+                #${ROOT_ID} .ug-t10-side.ug-t10-narrow .ug-t10-value {
+                    font-size: 10px;
+                }
+            `;
+            document.head.appendChild(style);
+        }
+
+        function createSidePanel(username, groupKey) {
+            const group = TOP_GROUPS[groupKey];
+            const panel = document.createElement('div');
+            panel.className = 'ug-t10-side';
+            panel.dataset.group = groupKey;
+
+            const head = document.createElement('div');
+            head.className = 'ug-t10-side-head';
+
+            const title = document.createElement('div');
+            title.className = 'ug-t10-side-title';
+            title.textContent = group.label;
+
+            const user = document.createElement('div');
+            user.className = 'ug-t10-user';
+            user.textContent = username;
+            user.title = username;
+
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'ug-t10-btn';
+            button.textContent = group.button;
+
+            const body = document.createElement('div');
+            body.className = 'ug-t10-body';
+
+            const placeholder = document.createElement('div');
+            placeholder.className = 'ug-t10-placeholder';
+            placeholder.textContent = 'Not checked';
+            body.appendChild(placeholder);
+
+            head.append(title, user);
+            panel.append(head, button, body);
+
+            return { panel, button, body };
+        }
+
+        function setPanelStatus(body, text, mode = 'status') {
+            body.replaceChildren();
+            const el = document.createElement('div');
+            el.className = mode === 'error' ? 'ug-t10-error' : 'ug-t10-status';
+            el.textContent = text;
+            body.appendChild(el);
+        }
+
+        function renderPanelResults(body, results) {
+            body.replaceChildren();
+
+            const allMatches = [];
+            for (const result of results) {
+                for (const match of result.matches) {
+                    allMatches.push({ ...match, scopeLabel: result.scope.label });
+                }
+            }
+
+            if (!allMatches.length) {
+                const empty = document.createElement('div');
+                empty.className = 'ug-t10-empty';
+                empty.textContent = 'No Top 10 positions';
+                body.appendChild(empty);
+                return;
+            }
+
+            const summary = document.createElement('div');
+            summary.className = 'ug-t10-summary';
+            summary.textContent = `${allMatches.length} position${allMatches.length === 1 ? '' : 's'}`;
+            body.appendChild(summary);
+
+            for (const match of allMatches) {
+                const row = document.createElement('div');
+                row.className = 'ug-t10-row';
+
+                // Keep each result compact and game-like: "#1 Crimes 315,842".
+                // The native UG .cg class supplies the same green used elsewhere in the game.
+                const rank = document.createElement('span');
+                rank.className = 'ug-t10-rank cg';
+                rank.textContent = `#${match.rank}`;
+
+                const section = document.createElement('span');
+                section.className = 'ug-t10-section';
+                section.textContent = match.section;
+
+                const value = document.createElement('span');
+                value.className = 'ug-t10-value';
+                value.textContent = match.value || '';
+
+                row.append(rank, section);
+                if (value.textContent) row.append(value);
+                body.appendChild(row);
+            }
+        }
+
+        function getProfileCentreBounds(anchor) {
+            // UG's desktop layout is a three-column table:
+            // td.left | td#tabcen (profile/content) | td.right.
+            // Constrain our panels to the centre content cell so they can never
+            // overlap the left navigation or the right Stats sidebar.
+            return anchor.closest('#maincen') ||
+                   document.querySelector('#maincen') ||
+                   anchor.closest('#maincenc') ||
+                   document.querySelector('#maincenc') ||
+                   anchor.closest('#tabcen') ||
+                   document.querySelector('#tabcen');
+        }
+
+        function positionSidePanels(anchor, onlinePanel, alivePanel) {
+            if (!anchor || !anchor.isConnected) return false;
+
+            const rect = anchor.getBoundingClientRect();
+            const boundsEl = getProfileCentreBounds(anchor);
+            const boundsRect = boundsEl?.getBoundingClientRect?.();
+            if (!rect.width || !rect.height || !boundsRect?.width) return false;
+
+            const pageX = window.scrollX || window.pageXOffset || 0;
+            const pageY = window.scrollY || window.pageYOffset || 0;
+            const EDGE_PAD = 8;
+
+            // Only use the real empty space inside UG's centre content column.
+            // This is the key difference from v0.4.0, which measured all the way
+            // to the viewport edges and could therefore overlap both sidebars.
+            const leftSpace = Math.max(0, rect.left - boundsRect.left - SIDE_GAP - EDGE_PAD);
+            const rightSpace = Math.max(0, boundsRect.right - rect.right - SIDE_GAP - EDGE_PAD);
+
+            const leftWidth = Math.min(MAX_PANEL_WIDTH, Math.floor(leftSpace));
+            const rightWidth = Math.min(MAX_PANEL_WIDTH, Math.floor(rightSpace));
+            const top = Math.round(rect.top + pageY);
+
+            const applyPanel = (panel, side, availableWidth) => {
+                if (availableWidth < MIN_PANEL_WIDTH) {
+                    panel.style.display = 'none';
+                    return;
+                }
+
+                panel.style.display = 'block';
+                panel.style.width = `${availableWidth}px`;
+                panel.style.maxWidth = `${MAX_PANEL_WIDTH}px`;
+                panel.style.top = `${top}px`;
+                panel.classList.toggle('ug-t10-narrow', availableWidth < 220);
+
+                if (side === 'left') {
+                    // Clamp the left edge to #maincen/#tabcen even if a browser zoom,
+                    // scrollbar or unusual theme shifts the profile by a pixel or two.
+                    const idealLeft = rect.left + pageX - SIDE_GAP - availableWidth;
+                    const minimumLeft = boundsRect.left + pageX + EDGE_PAD;
+                    panel.style.left = `${Math.round(Math.max(idealLeft, minimumLeft))}px`;
+                    panel.style.right = 'auto';
+                } else {
+                    const idealLeft = rect.right + pageX + SIDE_GAP;
+                    const maximumLeft = boundsRect.right + pageX - EDGE_PAD - availableWidth;
+                    panel.style.left = `${Math.round(Math.min(idealLeft, maximumLeft))}px`;
+                    panel.style.right = 'auto';
+                }
+            };
+
+            applyPanel(onlinePanel, 'left', leftWidth);
+            applyPanel(alivePanel, 'right', rightWidth);
+            return true;
+        }
+
+        function buildPanels(username) {
+            if (document.getElementById(ROOT_ID)) return;
+
+            const anchor = findProfileAnchor();
+            if (!anchor) return;
+
+            injectStyles();
+
+            const root = document.createElement('div');
+            root.id = ROOT_ID;
+
+            const online = createSidePanel(username, 'online');
+            const alive = createSidePanel(username, 'alive');
+
+            root.append(online.panel, alive.panel);
+            document.body.appendChild(root);
+
+            async function runCheck(groupKey, ui) {
+                const originalText = ui.button.textContent;
+                ui.button.disabled = true;
+                ui.button.textContent = 'Checking...';
+
+                try {
+                    const results = await fetchGroupMatches(username, groupKey, (scope, current, total) => {
+                        setPanelStatus(ui.body, `Checking ${current}/${total}: ${scope.label}...`);
+                    });
+                    renderPanelResults(ui.body, results);
+                } catch (error) {
+                    setPanelStatus(ui.body, `Check failed: ${error?.message || error}`, 'error');
+                } finally {
+                    ui.button.disabled = false;
+                    ui.button.textContent = originalText;
+                }
+            }
+
+            online.button.addEventListener('click', () => runCheck('online', online));
+            alive.button.addEventListener('click', () => runCheck('alive', alive));
+
+            let rafId = 0;
+            const schedulePosition = () => {
+                if (rafId) cancelAnimationFrame(rafId);
+                rafId = requestAnimationFrame(() => {
+                    rafId = 0;
+                    positionSidePanels(anchor, online.panel, alive.panel);
+                });
+            };
+
+            schedulePosition();
+            setTimeout(schedulePosition, 250);
+            setTimeout(schedulePosition, 1000);
+            window.addEventListener('resize', schedulePosition, { passive: true });
+
+            if (window.ResizeObserver) {
+                const observer = new ResizeObserver(schedulePosition);
+                observer.observe(anchor);
+                root._ugTop10ResizeObserver = observer;
+            }
+        }
+
+        function init() {
+            if (isTopPage()) return;
+
+            const username = findLikelyProfileUsername();
+            if (!username) return;
+
+            buildPanels(username);
+        }
+
+        // Main-bot integration: initialize this profile-only tool independently of
+        // UG Bot activation/Start state. The userscript itself runs at document-start,
+        // so watch for the profile DOM and inject as soon as table#profile is available.
+        // Actual Top 10 network requests remain manual: only button clicks fetch them.
+        function startEarlyProfileTop10Init() {
+            if (isTopPage()) return;
+
+            // Do not leave a page-wide MutationObserver running on unrelated UG pages.
+            // Player profile links carry the target username in the URL; once present,
+            // watch only long enough for the profile table to be inserted.
+            if (!getUsernameFromUrl()) return;
+
+            const tryInit = () => {
+                if (document.getElementById(ROOT_ID)) return true;
+                init();
+                return !!document.getElementById(ROOT_ID);
+            };
+
+            if (tryInit()) return;
+
+            let observer = null;
+            const stopObserverIfReady = () => {
+                if (!tryInit()) return false;
+                observer?.disconnect();
+                observer = null;
+                return true;
+            };
+
+            const startObserver = () => {
+                if (observer || document.getElementById(ROOT_ID)) return;
+                const target = document.documentElement || document;
+                observer = new MutationObserver(() => stopObserverIfReady());
+                observer.observe(target, { childList: true, subtree: true });
+                stopObserverIfReady();
+            };
+
+            startObserver();
+            document.addEventListener('DOMContentLoaded', stopObserverIfReady, { once: true });
+            window.addEventListener('load', stopObserverIfReady, { once: true });
+        }
+
+        startEarlyProfileTop10Init();
+    })();
 
     // ── Page load watchdog ────────────────────────────────────────────────────
     // If the page never fires the load event (stuck mid-load due to lag),
@@ -713,7 +1359,7 @@
     // BOT CONFIG
     // =========================================================================
 
-    const SCRIPT_VERSION = '3.0.31';
+    const SCRIPT_VERSION = '3.0.51';
 
 
     // =========================================================================
@@ -797,6 +1443,7 @@
     // Drug select values: 1=Cannabis 2=Heroin 3=Cocaine 4=Ecstasy 5=LSD
     // Reserve is based on the current USA Heroin buy price because the route buys a full Heroin load in USA.
     // Update this constant whenever the game owner changes the USA Heroin price.
+    // Classic route — intentionally preserved as the default/proven path.
     const DRUG_RUN_ROUTE = {
         countryA:         'USA',
         countryALocation: '5',
@@ -806,7 +1453,34 @@
         drugInB:          { name: 'Cannabis', value: '1' },
     };
 
-    const DRUG_HEROIN_USA_PRICE = 30134; // Current USA Heroin buy price — used to calculate the cash reserve
+    // Optional high-profit route. Each step buys locally, drives to nextCountry,
+    // sells there, then buys that country's configured drug and continues.
+    // England Cannabis -> Russia LSD -> Mexico Heroin -> England.
+    const DRUG_RUN_HIGH_PROFIT_ROUTE = {
+        startCountry:  'England',
+        startLocation: '1',
+        steps: {
+            england: {
+                country: 'England', location: '1',
+                drug: { name: 'Cannabis', value: '1' },
+                nextCountry: 'Russia', nextLocation: '3'
+            },
+            russia: {
+                country: 'Russia', location: '3',
+                drug: { name: 'LSD', value: '5' },
+                nextCountry: 'Mexico', nextLocation: '2'
+            },
+            mexico: {
+                country: 'Mexico', location: '2',
+                drug: { name: 'Heroin', value: '2' },
+                nextCountry: 'England', nextLocation: '1'
+            }
+        }
+    };
+
+    // Keep the proven classic reserve for BOTH routes. It is deliberately a little
+    // higher than the new route's most expensive buy, so banking remains conservative.
+    const DRUG_HEROIN_USA_PRICE = 30134;
 
     // Country name → location select value mapping (used by kill travel)
     const COUNTRY_LOCATION_MAP = {
@@ -864,6 +1538,7 @@
         autoGiveCarMissionsEnabled: false,
 
         autoDrugsEnabled:      false,
+        drugHighProfitRouteEnabled: false, // Off = proven USA <-> England classic route
         drugDepositMultiplier: 2, // Deposit when cash exceeds this multiple of the full run cost
 
         // Leave Jail settings
@@ -1005,6 +1680,10 @@
         bustNoReload: false,
         bustPollMin:  800,
         bustPollMax:  1200,
+
+        // Read-only Jail Monitor — discovers usernames from /a/jailn.php.
+        jailMonitorEnabled: false,
+        jailMonitorPollMs:  2000,
 
         // Extend perk thresholds
         extendBulletsThreshold:      7500,
@@ -1559,6 +2238,8 @@
 
         get autoDrugsEnabled()     { return !!getSetting('autoDrugsEnabled', DEFAULTS.autoDrugsEnabled); },
         set autoDrugsEnabled(v)    { setSetting('autoDrugsEnabled', !!v); },
+        get drugHighProfitRouteEnabled() { return !!getSetting('drugHighProfitRouteEnabled', DEFAULTS.drugHighProfitRouteEnabled); },
+        set drugHighProfitRouteEnabled(v){ setSetting('drugHighProfitRouteEnabled', !!v); },
         get drugCompEnabled()      { return !!getSetting('drugCompEnabled', false); },
         set drugCompEnabled(v)     { setSetting('drugCompEnabled', !!v); },
 
@@ -2025,6 +2706,16 @@
         get bustPollMax()          { return getSetting('bustPollMax', DEFAULTS.bustPollMax); },
         set bustPollMax(v)         { setSetting('bustPollMax', Number(v)); },
 
+        get jailMonitorEnabled()   { return !!getSetting('jailMonitorEnabled', DEFAULTS.jailMonitorEnabled); },
+        set jailMonitorEnabled(v)  { setSetting('jailMonitorEnabled', !!v); },
+        get jailMonitorPollMs() {
+            const migrated = getSetting('jailMonitorPollMin', DEFAULTS.jailMonitorPollMs);
+            return Math.max(100, Math.min(600000, Number(getSetting('jailMonitorPollMs', migrated)) || DEFAULTS.jailMonitorPollMs));
+        },
+        set jailMonitorPollMs(v) {
+            setSetting('jailMonitorPollMs', Math.max(100, Math.min(600000, Number(v) || DEFAULTS.jailMonitorPollMs)));
+        },
+
         // Extend perk thresholds
         get extendBulletsThreshold()      { return Number(getSetting('extendBulletsThreshold',     DEFAULTS.extendBulletsThreshold)); },
         set extendBulletsThreshold(v)     { setSetting('extendBulletsThreshold',     Number(v)); },
@@ -2169,6 +2860,8 @@
     let autoGiveCarsInput           = null;
     let drugCompModeInput           = null;
     let autoDrugsInput              = null;
+    let drugClassicRouteInput       = null;
+    let drugHighProfitRouteInput    = null;
     let drugDepositMultiplierEl     = null;
     let leaveJailInput              = null;
     let leaveJailMinPointsEl        = null;
@@ -2285,6 +2978,8 @@
     let killPlayerFinderDelayEl     = null;
     let killPlayerFinderRunEveryEl  = null;
     let killPlayerFinderStatusEl    = null;
+    let jailMonitorInput            = null;
+    let jailMonitorPollMsEl         = null;
     let killBgCheckInput            = null;
     let killBgSpamInput             = null;
     let killBgSpamIntervalEl        = null;
@@ -2753,6 +3448,7 @@
         stopQTCarScanner();
         stopQTAuctionScanner();
         stopNoReloadBust();
+        stopJailMonitor();
         stopAutoBuyBg();
         stopBonusPointsSpender();
         stopBustObserver();
@@ -3931,8 +4627,31 @@
         );
     }
 
+    function getHighProfitDrugRouteStep(country) {
+        if (!country) return null;
+        return DRUG_RUN_HIGH_PROFIT_ROUTE.steps[String(country).trim().toLowerCase()] || null;
+    }
+
+    function getDrugRouteStartCountry() {
+        return state.drugHighProfitRouteEnabled ? DRUG_RUN_HIGH_PROFIT_ROUTE.startCountry : DRUG_RUN_ROUTE.countryA;
+    }
+
+    function getDrugRouteStartLocation() {
+        return state.drugHighProfitRouteEnabled ? DRUG_RUN_HIGH_PROFIT_ROUTE.startLocation : DRUG_RUN_ROUTE.countryALocation;
+    }
+
+    function getDrugRouteStartDrug() {
+        if (state.drugHighProfitRouteEnabled) {
+            return getHighProfitDrugRouteStep(DRUG_RUN_HIGH_PROFIT_ROUTE.startCountry)?.drug || DRUG_RUN_ROUTE.drugInA;
+        }
+        return DRUG_RUN_ROUTE.drugInA;
+    }
+
     function getDrugForCurrentCountry(country) {
         if (!country) return null;
+        if (state.drugHighProfitRouteEnabled) {
+            return getHighProfitDrugRouteStep(country)?.drug || null;
+        }
         const upper = country.toUpperCase();
         if (upper === DRUG_RUN_ROUTE.countryA.toUpperCase()) return DRUG_RUN_ROUTE.drugInA;
         if (upper === DRUG_RUN_ROUTE.countryB.toUpperCase()) return DRUG_RUN_ROUTE.drugInB;
@@ -3941,6 +4660,9 @@
 
     function getDestinationLocationValue(currentCountry) {
         if (!currentCountry) return null;
+        if (state.drugHighProfitRouteEnabled) {
+            return getHighProfitDrugRouteStep(currentCountry)?.nextLocation || null;
+        }
         const upper = currentCountry.toUpperCase();
         if (upper === DRUG_RUN_ROUTE.countryA.toUpperCase()) return DRUG_RUN_ROUTE.countryBLocation;
         if (upper === DRUG_RUN_ROUTE.countryB.toUpperCase()) return DRUG_RUN_ROUTE.countryALocation;
@@ -3949,6 +4671,9 @@
 
     function getDestinationCountryName(currentCountry) {
         if (!currentCountry) return null;
+        if (state.drugHighProfitRouteEnabled) {
+            return getHighProfitDrugRouteStep(currentCountry)?.nextCountry || null;
+        }
         const upper = currentCountry.toUpperCase();
         if (upper === DRUG_RUN_ROUTE.countryA.toUpperCase()) return DRUG_RUN_ROUTE.countryB;
         if (upper === DRUG_RUN_ROUTE.countryB.toUpperCase()) return DRUG_RUN_ROUTE.countryA;
@@ -4090,7 +4815,7 @@
 
             if (space > 0) {
                 const country   = getPlayerLocation();
-                const drugToBuy = getDrugForCurrentCountry(country) || DRUG_RUN_ROUTE.drugInA;
+                const drugToBuy = getDrugForCurrentCountry(country) || getDrugRouteStartDrug();
 
                 addLiveLog(`Drug comp: buying 1 unit of ${drugToBuy.name} (${carried}/${capacity} carried)`);
 
@@ -4182,6 +4907,75 @@
             return;
         }
 
+        // Optional high-profit 3-country path. The classic USA <-> England
+        // branch below remains untouched and is used whenever this toggle is off.
+        if (state.drugHighProfitRouteEnabled) {
+            const routeStep = getHighProfitDrugRouteStep(country);
+
+            if (!routeStep) {
+                const startCountry  = getDrugRouteStartCountry();
+                const startLocation = getDrugRouteStartLocation();
+                addLiveLog(`Drug run [High Profit]: in unrecognised route country "${country}" — driving to ${startCountry} to start route`);
+                const didDriveToStart = await driveToDestination(startLocation, startCountry);
+                if (!didDriveToStart) {
+                    addLiveLog('Drug run [High Profit]: could not drive to route start — returning to crimes');
+                    await wait(navRand());
+                    gotoPage('crimes');
+                }
+                return;
+            }
+
+            if (available <= 0) {
+                addLiveLog(`Drug run [High Profit]: fully loaded in ${routeStep.country} — driving to ${routeStep.nextCountry}`);
+                const didDrive = await driveToDestination(routeStep.nextLocation, routeStep.nextCountry);
+                if (!didDrive) {
+                    addLiveLog('Drug run [High Profit]: drive failed — returning to crimes');
+                    await wait(navRand());
+                    gotoPage('crimes');
+                }
+                return;
+            }
+
+            if (capacity <= 0) {
+                addLiveLog('Drug run [High Profit]: capacity unknown — returning to crimes to wait for next visit');
+                await wait(navRand());
+                gotoPage('crimes');
+                return;
+            }
+
+            // Preserve the existing conservative reserve/banking behaviour. The
+            // reserve is based on USA Heroin ($30,134/unit), which exceeds the
+            // high-profit route's most expensive purchase and therefore remains safe.
+            if (cash < reserve) {
+                const swiss     = getPlayerSwiss();
+                const shortfall = reserve - cash;
+
+                if (swiss >= shortfall) {
+                    addLiveLog(`Drug run [High Profit]: insufficient cash ($${cash.toLocaleString()}) — withdrawing $${shortfall.toLocaleString()} reserve from Swiss Bank`);
+                    state.pendingBankAction = { type: 'withdraw', amount: shortfall };
+                    await wait(navRand());
+                    gotoPage('bank');
+                    return;
+                }
+
+                addLiveLog(`Drug run [High Profit]: insufficient funds — cash $${cash.toLocaleString()}, Swiss $${swiss.toLocaleString()}, need $${reserve.toLocaleString()} reserve — skipping this run`);
+                await wait(navRand());
+                gotoPage('crimes');
+                return;
+            }
+
+            if (drugToBuy && available > 0) {
+                addLiveLog(`Drug run [High Profit]: buying ${available} units of ${drugToBuy.name} in ${country}`);
+                const didBuy = await buyDrugs(drugToBuy, available);
+                if (!didBuy) {
+                    addLiveLog('Drug run [High Profit]: buy failed — returning to crimes');
+                    await wait(navRand());
+                    gotoPage('crimes');
+                }
+                return;
+            }
+        }
+
         if (country.toUpperCase() === DRUG_RUN_ROUTE.countryA.toUpperCase()) {
 
             if (available <= 0) {
@@ -4262,8 +5056,10 @@
             return;
         }
 
-        addLiveLog(`Drug run: in unrecognised country "${country}" — driving to ${DRUG_RUN_ROUTE.countryA} to start route`);
-        const didDriveToStart = await driveToDestination(DRUG_RUN_ROUTE.countryALocation, DRUG_RUN_ROUTE.countryA);
+        const routeStartCountry  = getDrugRouteStartCountry();
+        const routeStartLocation = getDrugRouteStartLocation();
+        addLiveLog(`Drug run: in unrecognised country "${country}" — driving to ${routeStartCountry} to start route`);
+        const didDriveToStart = await driveToDestination(routeStartLocation, routeStartCountry);
         if (!didDriveToStart) {
             addLiveLog('Drug run: could not drive to route start — returning to crimes');
             await wait(navRand());
@@ -8973,7 +9769,7 @@ async function doQTPerkRedeem() {
 
         try {
             qtSniperAbortController = new AbortController();
-            const resp = await fetch('/index2.php?p=qt&a=perks', { credentials: 'include', cache: 'no-store', signal: qtSniperAbortController.signal });
+            const resp = await fetch('/?p=qt&a=perks', { credentials: 'include', cache: 'no-store', signal: qtSniperAbortController.signal });
             const text = await resp.text();
             const parser = new DOMParser();
             const doc = parser.parseFromString(text, 'text/html');
@@ -9512,6 +10308,31 @@ async function doQTPerkRedeem() {
     let qtCarScanTimer  = null;
     let qtCarScanActive = false;
 
+    // Persist the next due timestamp so normal page navigation/reloads cannot
+    // restart the full interval. A due scan that is temporarily unsafe retries
+    // shortly while keeping the original due timestamp unchanged.
+    const QT_CAR_NEXT_SCAN_AT_KEY       = 'qtCarsNextScanAtV1';
+    const QT_CAR_DUE_RETRY_MS           = 2000;
+    const QT_CAR_PAUSED_RETRY_MS        = 10000;
+
+    function getQTCarScanIntervalMs() {
+        const seconds = Number(state.qtCarsScanInterval);
+        const safeSeconds = Number.isFinite(seconds) && seconds > 0
+            ? seconds
+            : Number(DEFAULTS.qtCarsScanInterval) || 30;
+        return Math.max(1000, Math.floor(safeSeconds * 1000));
+    }
+
+    function getQTCarNextScanAt() {
+        const value = Number(getSetting(QT_CAR_NEXT_SCAN_AT_KEY, 0));
+        return Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+    }
+
+    function setQTCarNextScanAt(value) {
+        const safe = Number(value);
+        setSetting(QT_CAR_NEXT_SCAN_AT_KEY, Number.isFinite(safe) && safe > 0 ? Math.floor(safe) : 0);
+    }
+
     function startQTCarScanner() {
         if (qtCarScanActive) return;
         qtCarScanActive = true;
@@ -9521,59 +10342,479 @@ async function doQTPerkRedeem() {
     function stopQTCarScanner() {
         qtCarScanActive = false;
         if (qtCarScanTimer) { clearTimeout(qtCarScanTimer); qtCarScanTimer = null; }
+        // Turning QT Cars off starts a fresh interval next time it is enabled.
+        setQTCarNextScanAt(0);
     }
 
-    function scheduleQTCarScan() {
-        if (!qtCarScanActive) return;
-        const intervalMs = state.qtCarsScanInterval * 1000;
-        qtCarScanTimer = setTimeout(doQTCarScan, intervalMs);
+    function scheduleQTCarScan(retryMs = null) {
+        if (!qtCarScanActive || !state.qtCarsEnabled) return;
+
+        // There must only ever be one live timer. Calls from crime settling,
+        // security recovery, settings saves, etc. should re-arm the same due
+        // timestamp rather than stacking timers or resetting the interval.
+        if (qtCarScanTimer) {
+            clearTimeout(qtCarScanTimer);
+            qtCarScanTimer = null;
+        }
+
+        const nowMs = Date.now();
+        let nextAt = getQTCarNextScanAt();
+        if (!nextAt) {
+            nextAt = nowMs + getQTCarScanIntervalMs();
+            setQTCarNextScanAt(nextAt);
+        }
+
+        const delayMs = retryMs === null
+            ? Math.max(0, nextAt - nowMs)
+            : Math.max(0, Number(retryMs) || 0);
+
+        qtCarScanTimer = setTimeout(() => {
+            qtCarScanTimer = null;
+            doQTCarScan();
+        }, Math.max(50, delayMs));
+    }
+
+    function retryDueQTCarScan(delayMs = QT_CAR_DUE_RETRY_MS) {
+        // Do NOT move qtCarsNextScanAt forward here. The scan is already due.
+        scheduleQTCarScan(delayMs);
+    }
+
+    function completeQTCarScanCycle() {
+        if (!qtCarScanActive || !state.qtCarsEnabled) return;
+        setQTCarNextScanAt(Date.now() + getQTCarScanIntervalMs());
+        scheduleQTCarScan();
+    }
+
+    function normalizeQTCarName(value) {
+        return String(value || '')
+            .replace(/\u00a0/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .toLowerCase();
+    }
+
+    function parseQTCarIdFieldName(name) {
+        const match = String(name || '').match(/^id\[(\d+)\]$/);
+        return match ? match[1] : null;
+    }
+
+    function parseQTCarInteger(value) {
+        const raw = String(value ?? '').trim();
+        if (!/^\d+$/.test(raw)) return null;
+        const n = Number(raw);
+        return Number.isSafeInteger(n) && n >= 0 ? n : null;
+    }
+
+    function parseQTCarMoneyText(value) {
+        const match = String(value || '').match(/\$\s*([\d,]+)/);
+        if (!match) return null;
+        const n = Number(match[1].replace(/,/g, ''));
+        return Number.isSafeInteger(n) && n >= 0 ? n : null;
+    }
+
+    function getQTCarDisplayedPriceFromRow(row) {
+        if (!row) return null;
+
+        const labelledCell = [...row.querySelectorAll('td')].find(td =>
+            [...td.querySelectorAll('span')].some(span => /^price$/i.test(String(span.textContent || '').trim()))
+        );
+        if (labelledCell) {
+            const preferred = labelledCell.querySelector('.cg, .cr, .cy, .cw');
+            const parsed = parseQTCarMoneyText(preferred?.textContent || labelledCell.textContent || '');
+            if (parsed !== null) return parsed;
+        }
+
+        const table = row.closest('table');
+        if (table) {
+            let priceIndex = -1;
+            for (const headerRow of table.querySelectorAll('tr')) {
+                const cells = [...headerRow.children];
+                const idx = cells.findIndex(cell =>
+                    /^price$/i.test(String(cell.textContent || '').replace(/\s+/g, ' ').trim())
+                );
+                if (idx >= 0) {
+                    priceIndex = idx;
+                    break;
+                }
+            }
+            if (priceIndex >= 0) {
+                const cell = row.children[priceIndex];
+                const parsed = parseQTCarMoneyText(cell?.textContent || '');
+                if (parsed !== null) return parsed;
+            }
+        }
+
+        return null;
+    }
+
+    function getQTCarNameFromRow(row, carId = '') {
+        const nameEl = row?.querySelector('th a[href*="p=car"], td a[href*="p=car"]');
+        if (!nameEl) return '';
+        let name = String(nameEl.textContent || '').replace(/\s+/g, ' ').trim();
+        if (carId) name = name.replace(new RegExp(`^#${carId}\\s*`, 'i'), '');
+        else name = name.replace(/^#\d+\s*/, '');
+        return name.trim();
+    }
+
+    function getQTCarStockMap(doc) {
+        const stock = new Map();
+        for (const link of doc.querySelectorAll('a[href*="a=cars"][href*="b="]')) {
+            const href = String(link.getAttribute('href') || '');
+            const bMatch = href.match(/[?&]b=(\d+)/);
+            if (!bMatch) continue;
+            const countMatch = String(link.textContent || '').match(/\(([\d,]+)\)\s*$/);
+            if (!countMatch) continue;
+
+            const b = Number(bMatch[1]);
+            const count = Number(countMatch[1].replace(/,/g, ''));
+            if (Number.isSafeInteger(b) && Number.isSafeInteger(count) && count >= 0) {
+                stock.set(b, count);
+            }
+        }
+        return stock;
+    }
+
+    function isExpectedQTCarCategoryPage(doc, carType) {
+        const expectedB = String(carType.b);
+        const expectedName = normalizeQTCarName(carType.name);
+        const activeLinks = [...doc.querySelectorAll('.bgd.i.in a[href*="a=cars"][href*="b="]')];
+
+        return activeLinks.some(link => {
+            const href = String(link.getAttribute('href') || '');
+            const bMatch = href.match(/[?&]b=(\d+)/);
+            if (!bMatch || bMatch[1] !== expectedB) return false;
+
+            const label = String(link.textContent || '')
+                .replace(/\s*\([\d,]+\)\s*$/, '')
+                .trim();
+
+            return normalizeQTCarName(label) === expectedName;
+        });
+    }
+
+    function validateQTCarListingRow(row, carType) {
+        const checkbox = row.querySelector('input[type="checkbox"][name^="id["]');
+        if (!checkbox) return { ok: false, reason: 'missing selection field' };
+
+        const carId = parseQTCarIdFieldName(checkbox.name);
+        if (!carId) return { ok: false, reason: 'invalid car ID field' };
+
+        const formPrice = parseQTCarInteger(checkbox.value);
+        const displayedPrice = getQTCarDisplayedPriceFromRow(row);
+
+        if (formPrice === null || formPrice <= 0) {
+            return { ok: false, reason: `invalid submitted price for #${carId}` };
+        }
+        if (displayedPrice === null || displayedPrice <= 0) {
+            return { ok: false, reason: `could not verify displayed price for #${carId}` };
+        }
+        if (formPrice !== displayedPrice) {
+            return {
+                ok: false,
+                reason: `price mismatch for #${carId}: displayed $${displayedPrice.toLocaleString()} vs form $${formPrice.toLocaleString()}`
+            };
+        }
+
+        const carName = getQTCarNameFromRow(row, carId);
+        if (!carName || normalizeQTCarName(carName) !== normalizeQTCarName(carType.name)) {
+            return {
+                ok: false,
+                reason: `car type mismatch for #${carId}: expected ${carType.name}, found ${carName || 'unknown'}`
+            };
+        }
+
+        return { ok: true, carId, price: displayedPrice, carName };
+    }
+
+    function validateQTCarConfirmation(buyDoc, carType, approvedById) {
+        const confirmBtn = buyDoc.querySelector('input[name="confirm"]');
+        if (!confirmBtn) {
+            return { ok: false, reason: 'confirmation button missing', cars: [] };
+        }
+
+        // UG's real confirmation page places the selected id[CAR_ID]=PRICE fields
+        // inside the confirmation box, while the matching table row is marked
+        // "Selected" and deliberately no longer displays a Price cell. Therefore
+        // confirmation safety uses redundant independent evidence:
+        //   1) originally verified listing row (displayed price == checkbox price),
+        //   2) confirmation hidden price for the same ID,
+        //   3) selected row ID + exact car type,
+        //   4) confirmation count + total,
+        //   5) Cash now - Cash after == confirmation total.
+        // Any mismatch aborts the ENTIRE purchase.
+        const confirmBox = confirmBtn.closest('.bgm') || confirmBtn.parentElement;
+        if (!confirmBox) {
+            return { ok: false, reason: 'confirmation box missing', cars: [] };
+        }
+
+        const fields = [...confirmBox.querySelectorAll('input[name^="id["]')];
+        if (!fields.length) {
+            return { ok: false, reason: 'confirmation contains no car IDs', cars: [] };
+        }
+
+        const seen = new Set();
+        const cars = [];
+
+        const rows = [...buyDoc.querySelectorAll('table.rdt tr')];
+        const getRowCarId = row => {
+            const link = row?.querySelector('a[href*="p=car"][href*="id="]');
+            if (!link) return null;
+            const match = String(link.getAttribute('href') || '').match(/[?&]id=(\d+)/);
+            return match ? match[1] : null;
+        };
+
+        for (const field of fields) {
+            const carId = parseQTCarIdFieldName(field.name);
+            if (!carId) {
+                return { ok: false, reason: `invalid confirmation ID field ${field.name || '(unnamed)'}`, cars: [] };
+            }
+            if (seen.has(carId)) {
+                return { ok: false, reason: `duplicate confirmation car #${carId}`, cars: [] };
+            }
+            seen.add(carId);
+
+            const approved = approvedById.get(carId);
+            if (!approved) {
+                return { ok: false, reason: `unexpected car #${carId} appeared on confirmation`, cars: [] };
+            }
+
+            const formPrice = parseQTCarInteger(field.value);
+            if (formPrice === null || formPrice <= 0) {
+                return { ok: false, reason: `invalid confirmation price for #${carId}`, cars: [] };
+            }
+            if (formPrice !== approved.price) {
+                return {
+                    ok: false,
+                    reason: `confirmation price changed for #${carId}: approved $${approved.price.toLocaleString()} vs confirmation $${formPrice.toLocaleString()}`,
+                    cars: []
+                };
+            }
+            if (formPrice > carType.maxPrice) {
+                return {
+                    ok: false,
+                    reason: `confirmation price $${formPrice.toLocaleString()} exceeds ${carType.name} max $${Number(carType.maxPrice).toLocaleString()} for #${carId}`,
+                    cars: []
+                };
+            }
+
+            // The selected row remains in the table but its Price/Select cells are
+            // replaced by a "Selected" marker. Match it by exact car ID instead of
+            // assuming the hidden field lives inside the row.
+            const row = rows.find(candidate => getRowCarId(candidate) === carId);
+            if (!row) {
+                return { ok: false, reason: `cannot find selected confirmation row for #${carId}`, cars: [] };
+            }
+
+            const selectedCell = [...row.querySelectorAll('td')].find(td =>
+                /^selected$/i.test(String(td.textContent || '').replace(/\s+/g, ' ').trim())
+            );
+            if (!selectedCell) {
+                return { ok: false, reason: `confirmation row for #${carId} is not marked Selected`, cars: [] };
+            }
+
+            const confirmationName = getQTCarNameFromRow(row, carId);
+            if (!confirmationName || normalizeQTCarName(confirmationName) !== normalizeQTCarName(carType.name)) {
+                return {
+                    ok: false,
+                    reason: `confirmation car type mismatch for #${carId}: expected ${carType.name}, found ${confirmationName || 'unknown'}`,
+                    cars: []
+                };
+            }
+
+            cars.push({ ...approved, price: formPrice });
+        }
+
+        // No selected row may exist without a corresponding verified hidden ID.
+        const selectedRows = rows.filter(row =>
+            [...row.querySelectorAll('td')].some(td =>
+                /^selected$/i.test(String(td.textContent || '').replace(/\s+/g, ' ').trim())
+            )
+        );
+        if (selectedRows.length !== cars.length) {
+            return {
+                ok: false,
+                reason: `confirmation selected-row count ${selectedRows.length} does not match verified ID count ${cars.length}`,
+                cars: []
+            };
+        }
+        for (const row of selectedRows) {
+            const selectedId = getRowCarId(row);
+            if (!selectedId || !seen.has(selectedId)) {
+                return { ok: false, reason: `unverified selected car #${selectedId || 'unknown'} appeared on confirmation`, cars: [] };
+            }
+        }
+
+        const calculatedTotal = cars.reduce((sum, car) => sum + car.price, 0);
+        if (!Number.isSafeInteger(calculatedTotal) || calculatedTotal <= 0) {
+            return { ok: false, reason: 'invalid calculated confirmation total', cars: [] };
+        }
+
+        const confirmText = String(confirmBox.textContent || '').replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim();
+        const summaryMatch = confirmText.match(/Buy\s+([\d,]+)\s+cars?\s+for\s+\$\s*([\d,]+)/i);
+        if (!summaryMatch) {
+            return { ok: false, reason: 'cannot verify confirmation count/total summary', cars: [] };
+        }
+
+        const summaryCount = Number(summaryMatch[1].replace(/,/g, ''));
+        const summaryTotal = Number(summaryMatch[2].replace(/,/g, ''));
+        if (!Number.isSafeInteger(summaryCount) || summaryCount !== cars.length) {
+            return {
+                ok: false,
+                reason: `confirmation count mismatch: summary ${summaryCount}, verified ${cars.length}`,
+                cars: []
+            };
+        }
+        if (!Number.isSafeInteger(summaryTotal) || summaryTotal !== calculatedTotal) {
+            return {
+                ok: false,
+                reason: `confirmation total mismatch: summary $${Number(summaryTotal || 0).toLocaleString()}, verified $${calculatedTotal.toLocaleString()}`,
+                cars: []
+            };
+        }
+
+        const cashNowMatch = confirmText.match(/Cash\s+now:\s*\$\s*([\d,]+)/i);
+        const cashAfterMatch = confirmText.match(/Cash\s+after:\s*\$\s*([\d,]+)/i);
+        if (!cashNowMatch || !cashAfterMatch) {
+            return { ok: false, reason: 'cannot verify confirmation cash before/after values', cars: [] };
+        }
+
+        const cashNow = Number(cashNowMatch[1].replace(/,/g, ''));
+        const cashAfter = Number(cashAfterMatch[1].replace(/,/g, ''));
+        if (!Number.isSafeInteger(cashNow) || !Number.isSafeInteger(cashAfter) || cashNow < cashAfter) {
+            return { ok: false, reason: 'invalid confirmation cash before/after values', cars: [] };
+        }
+        if ((cashNow - cashAfter) !== calculatedTotal) {
+            return {
+                ok: false,
+                reason: `cash delta mismatch: $${(cashNow - cashAfter).toLocaleString()} vs verified purchase $${calculatedTotal.toLocaleString()}`,
+                cars: []
+            };
+        }
+
+        return {
+            ok: true,
+            cars,
+            total: calculatedTotal,
+            summaryCount,
+            summaryTotal,
+            cashNow,
+            cashAfter
+        };
     }
 
     async function doQTCarScan() {
-        if (!qtCarScanActive || !state.enabled || !state.qtCarsEnabled || isDupeIdleActive() || crimePaused || (!state.bgCrimeEnabled && (isCrimesPage() || hasCrimePageMarkers()))) { scheduleQTCarScan(); return; }
-        if (hasCTCChallenge()) { scheduleQTCarScan(); return; }
-        if (actionInFlight) { scheduleQTCarScan(); return; }
+        if (!qtCarScanActive || !state.qtCarsEnabled) return;
+
+        // A due scan stays due until it actually gets a chance to run. Long-lived
+        // pauses use a light retry cadence; short transactional conflicts retry
+        // quickly. Neither path restarts the configured 120s/etc. interval.
+        if (!state.enabled || isDupeIdleActive()) { retryDueQTCarScan(QT_CAR_PAUSED_RETRY_MS); return; }
+        if (crimePaused || (!state.bgCrimeEnabled && (isCrimesPage() || hasCrimePageMarkers()))) { retryDueQTCarScan(); return; }
+        if (hasCTCChallenge()) { retryDueQTCarScan(); return; }
+        if (actionInFlight) { retryDueQTCarScan(); return; }
 
         const carTypes = state.qtCarsTypes || DEFAULTS.qtCarsTypes;
-        const enabled  = carTypes.filter(t => t.enabled);
-        if (!enabled.length) { scheduleQTCarScan(); return; }
+        const enabled = carTypes.filter(t =>
+            t.enabled &&
+            Number.isFinite(Number(t.maxPrice)) &&
+            Number(t.maxPrice) > 0
+        );
+
+        if (!enabled.length) {
+            completeQTCarScanCycle();
+            return;
+        }
 
         try {
             const parser = new DOMParser();
             let totalSpent = 0;
             let didWithdraw = false;
 
-            for (const carType of enabled) {
-                // Fetch this car type's QT page
-                const resp = await fetch(`/?p=qt&a=cars&b=${carType.b}`, { credentials: 'include', cache: 'no-store' });
-                const text = await resp.text();
-                const doc  = parser.parseFromString(text, 'text/html');
+            // First fetch only the main QT Cars index. It tells us which categories
+            // currently have listings, so empty enabled categories need no extra request.
+            const indexResp = await fetch('/?p=qt&a=cars', {
+                credentials: 'include',
+                cache: 'no-store'
+            });
+            if (!indexResp.ok) throw new Error(`QT Cars index HTTP ${indexResp.status}`);
 
-                // Find all cars in the table under the max price
-                const rows = [...doc.querySelectorAll('table.rdt tr')].filter(r => r.querySelector('input[type="checkbox"]'));
-                const eligible = [];
+            const indexText = await indexResp.text();
+            if (isLikelySecurityHtml(indexText)) {
+                throw new Error('security verification page returned for QT Cars index');
+            }
 
-                for (const row of rows) {
-                    const checkbox = row.querySelector('input[type="checkbox"]');
-                    if (!checkbox) continue;
-                    const carId = Object.keys(Object.fromEntries([...checkbox.name.matchAll(/id\[(\d+)\]/g)].map(m => [m[1], true])))[0]
-                        || checkbox.name.match(/id\[(\d+)\]/)?.[1];
-                    if (!carId) continue;
-                    const price = parseInt(checkbox.value, 10);
-                    if (isNaN(price) || price > carType.maxPrice) continue;
-                    // Get car name for logging
-                    const nameEl = row.querySelector('th a');
-                    const carName = nameEl ? nameEl.textContent.trim() : `Car #${carId}`;
-                    eligible.push({ carId, price, carName });
-                }
+            const indexDoc = parser.parseFromString(indexText, 'text/html');
+            const stockMap = getQTCarStockMap(indexDoc);
+            const listedEnabled = enabled.filter(t => (stockMap.get(Number(t.b)) || 0) > 0);
 
-                if (!eligible.length) {
+            if (!listedEnabled.length) {
+                completeQTCarScanCycle();
+                return;
+            }
+
+            for (const carType of listedEnabled) {
+                const maxPrice = Math.floor(Number(carType.maxPrice));
+
+                if (!Number.isSafeInteger(maxPrice) || maxPrice <= 0) {
+                    addLiveLog(`QT Cars: BLOCKED ${carType.name} — invalid max price setting`);
                     continue;
                 }
 
-                // Check we have enough funds
-                const totalNeeded = eligible.reduce((s, e) => s + e.price, 0);
-                const cash  = getPlayerMoney();
+                const resp = await fetch(`/?p=qt&a=cars&b=${carType.b}`, {
+                    credentials: 'include',
+                    cache: 'no-store'
+                });
+
+                if (!resp.ok) {
+                    addLiveLog(`QT Cars: BLOCKED ${carType.name} — category HTTP ${resp.status}`);
+                    continue;
+                }
+
+                const text = await resp.text();
+                if (isLikelySecurityHtml(text)) {
+                    addLiveLog(`QT Cars: BLOCKED ${carType.name} — security verification response`);
+                    continue;
+                }
+
+                const doc = parser.parseFromString(text, 'text/html');
+
+                // Fail closed if the returned category does not exactly match the
+                // configured b ID and expected car name.
+                if (!isExpectedQTCarCategoryPage(doc, carType)) {
+                    addLiveLog(`QT Cars: BLOCKED ${carType.name} — returned page/category did not match b=${carType.b}`);
+                    continue;
+                }
+
+                const rows = [...doc.querySelectorAll('table.rdt tr')]
+                    .filter(r => r.querySelector('input[type="checkbox"][name^="id["]'));
+
+                const eligible = [];
+                let categoryUnsafe = false;
+
+                for (const row of rows) {
+                    const checked = validateQTCarListingRow(row, carType);
+
+                    if (!checked.ok) {
+                        // Any ambiguity in type or price aborts this whole category.
+                        addLiveLog(`QT Cars: BLOCKED ${carType.name} — ${checked.reason}`);
+                        categoryUnsafe = true;
+                        break;
+                    }
+
+                    // The configured cap is PER CAR. Buy every verified car at or below it.
+                    if (checked.price <= maxPrice) {
+                        eligible.push(checked);
+                    }
+                }
+
+                if (categoryUnsafe || !eligible.length) continue;
+
+                const approvedById = new Map(
+                    eligible.map(car => [car.carId, car])
+                );
+
+                const totalNeeded = eligible.reduce((sum, car) => sum + car.price, 0);
+                const cash = getPlayerMoney();
                 const swiss = getPlayerSwiss();
 
                 if (cash + swiss < totalNeeded) {
@@ -9581,10 +10822,11 @@ async function doQTPerkRedeem() {
                     continue;
                 }
 
-                // Quick withdraw if needed
                 if (!didWithdraw && cash < totalNeeded) {
                     try {
-                        const wResp = await fetch(`/a/quickbank.php?type=withdraw`, { credentials: 'include' });
+                        const wResp = await fetch('/a/quickbank.php?type=withdraw', {
+                            credentials: 'include'
+                        });
                         await wResp.text();
                         didWithdraw = true;
                         await wait(200);
@@ -9594,60 +10836,122 @@ async function doQTPerkRedeem() {
                     }
                 }
 
-                // Buy all eligible cars in one bulk request
                 try {
-                    // Step 1: POST all car IDs at once to get confirmation page
+                    // Step 1: submit only cars whose displayed price, form price,
+                    // car identity and configured per-car max all passed validation.
                     const buyForm = new FormData();
-                    eligible.forEach(car => buyForm.append(`id[${car.carId}]`, String(car.price)));
+
+                    eligible.forEach(car => {
+                        buyForm.append(`id[${car.carId}]`, String(car.price));
+                    });
+
                     buyForm.append('buy', 'Buy');
+
                     const buyResp = await fetch(`/?p=qt&a=cars&b=${carType.b}`, {
                         method: 'POST',
                         body: buyForm,
                         credentials: 'include'
                     });
-                    const buyText = await buyResp.text();
-                    const buyDoc  = parser.parseFromString(buyText, 'text/html');
 
+                    if (!buyResp.ok) {
+                        addLiveLog(`QT Cars: BLOCKED ${carType.name} confirmation — HTTP ${buyResp.status}`);
+                        continue;
+                    }
+
+                    const buyText = await buyResp.text();
+
+                    if (isLikelySecurityHtml(buyText)) {
+                        addLiveLog(`QT Cars: BLOCKED ${carType.name} confirmation — security verification response`);
+                        continue;
+                    }
+
+                    const buyDoc = parser.parseFromString(buyText, 'text/html');
                     const confirmBtn = buyDoc.querySelector('input[name="confirm"]');
+
                     if (!confirmBtn) {
                         addLiveLog(`QT Cars: no confirm button for ${carType.name} — cars may have sold already`);
-                    } else {
-                        // Step 2: POST confirmation with all IDs from the confirmation page
-                        const confirmForm = new FormData();
-                        [...buyDoc.querySelectorAll('input[name^="id["]')].forEach(f => confirmForm.append(f.name, f.value));
-                        confirmForm.append('buy', 'Buy');
-                        confirmForm.append('confirm', 'Confirm');
-                        const confirmResp = await fetch(`/?p=qt&a=cars&b=${carType.b}`, {
-                            method: 'POST',
-                            body: confirmForm,
-                            credentials: 'include'
-                        });
-                        const confirmText = await confirmResp.text();
+                        continue;
+                    }
 
-                        if (/successfully|bought/i.test(confirmText)) {
-                            const spent = eligible.reduce((s, c) => s + c.price, 0);
-                            addLiveLog(`QT Cars: ✓ Bought ${eligible.length}x ${carType.name} for $${spent.toLocaleString()} total`);
-                            totalSpent += spent;
-                        } else {
-                            addLiveLog(`QT Cars: bulk buy failed for ${carType.name} — may have sold`);
-                        }
+                    // Fail closed at confirmation. A subset is allowed if some cars sold,
+                    // but no extra ID, duplicate, changed price, over-max price, wrong
+                    // car type, or unverifiable displayed price can ever be confirmed.
+                    const confirmation = validateQTCarConfirmation(
+                        buyDoc,
+                        { ...carType, maxPrice },
+                        approvedById
+                    );
+
+                    if (!confirmation.ok) {
+                        addLiveLog(`QT Cars: BLOCKED ${carType.name} purchase — ${confirmation.reason}`);
+                        continue;
+                    }
+
+                    if (!confirmation.cars.length) {
+                        addLiveLog(`QT Cars: BLOCKED ${carType.name} purchase — no verified cars remained at confirmation`);
+                        continue;
+                    }
+
+                    const confirmedTotal = confirmation.cars.reduce(
+                        (sum, car) => sum + car.price,
+                        0
+                    );
+
+                    if (
+                        !Number.isSafeInteger(confirmedTotal) ||
+                        confirmedTotal <= 0 ||
+                        confirmedTotal > totalNeeded
+                    ) {
+                        addLiveLog(`QT Cars: BLOCKED ${carType.name} purchase — unsafe confirmation total $${Number(confirmedTotal || 0).toLocaleString()}`);
+                        continue;
+                    }
+
+                    // Build the final request ourselves from the already-approved cars.
+                    // Never blindly replay arbitrary hidden fields from the confirmation page.
+                    const confirmForm = new FormData();
+
+                    confirmation.cars.forEach(car => {
+                        confirmForm.append(`id[${car.carId}]`, String(car.price));
+                    });
+
+                    confirmForm.append('buy', 'Buy');
+                    confirmForm.append('confirm', 'Confirm');
+
+                    const confirmResp = await fetch(`/?p=qt&a=cars&b=${carType.b}`, {
+                        method: 'POST',
+                        body: confirmForm,
+                        credentials: 'include'
+                    });
+
+                    const confirmText = await confirmResp.text();
+
+                    if (/successfully|bought/i.test(confirmText)) {
+                        addLiveLog(
+                            `QT Cars: ✓ Bought ${confirmation.cars.length}x ${carType.name} for $${confirmedTotal.toLocaleString()} total — each ≤ $${maxPrice.toLocaleString()}`
+                        );
+                        totalSpent += confirmedTotal;
+                    } else {
+                        addLiveLog(`QT Cars: bulk buy failed for ${carType.name} — may have sold`);
                     }
                 } catch (e) {
                     addLiveLog(`QT Cars: error buying ${carType.name} — ${e.message}`);
                 }
             }
 
-            // Quick deposit after all purchases if we withdrew
             if (didWithdraw || totalSpent > 0) {
                 try {
-                    await fetch(`/a/quickbank.php?type=deposit`, { credentials: 'include' });
+                    await fetch('/a/quickbank.php?type=deposit', {
+                        credentials: 'include'
+                    });
                 } catch (_) {}
             }
         } catch (e) {
             addLiveLog(`QT Cars: scan error — ${e.message}`);
         }
 
-        scheduleQTCarScan();
+        // Only after a real scan attempt completes do we advance the persistent
+        // due timestamp by the configured interval.
+        completeQTCarScanCycle();
     }
     let bgCrimeTimer  = null;
     let bgCrimeActive = false;
@@ -9659,16 +10963,21 @@ async function doQTPerkRedeem() {
     let bgCrimeFetchBackoffMs  = 5000;
     let bgCrimeJailPauseUntil  = 0;
     let bgCrimeJailPauseLogged = false;
+    let bgCrimeRecoveryPending = false;
+    let bgCrimeRecoveryReason  = '';
 
-    const BG_CRIME_READY_POLL_MS       = 150;
-    const BG_CRIME_IDLE_POLL_MS        = 5000;
-    const BG_CRIME_FETCH_BACKOFF_MIN   = 5000;
-    const BG_CRIME_FETCH_BACKOFF_MAX   = 60000;
+    // Background Crimes is latency-sensitive: once a crime is due, do not add
+    // human-style sleeps or multi-second recovery buffers. Network/server response
+    // time is the only intended delay on the normal commit path.
+    const BG_CRIME_READY_POLL_MS       = 25;
+    const BG_CRIME_IDLE_POLL_MS        = 1000;
+    const BG_CRIME_FETCH_BACKOFF_MIN   = 250;
+    const BG_CRIME_FETCH_BACKOFF_MAX   = 5000;
     const BG_CRIME_JAIL_FALLBACK_MS    = 30000;
+    const BG_CRIME_JAIL_RELEASE_BUFFER_MS    = 100;
     const BG_CRIME_FETCH_TIMEOUT_MS          = 15000;
-    const BG_CRIME_CTC_RECHECK_MS            = 5000;
-    const BG_CRIME_CTC_SURFACE_WAIT_MS       = 3000;
-    const BG_CRIME_CTC_NO_WIDGET_BACKOFF_MS  = 15000;
+    const BG_CRIME_CTC_RECHECK_MS            = 100;
+    const BG_CRIME_CTC_SURFACE_WAIT_MS       = 400;
 
     function getBgCrimeIds() {
         const gangText = (document.querySelector('#player-gang')?.textContent || '').trim().toLowerCase();
@@ -9777,10 +11086,13 @@ async function doQTPerkRedeem() {
         if (!wasPending) state.bgCrimeCtcDetectedAt = Date.now();
         state.bgCrimeCtcPending = true;
         bgCrimeToken = null;
-        bgCrimeNextPageFetchAt = Date.now() + BG_CRIME_CTC_RECHECK_MS;
+        bgCrimeNextPageFetchAt = 0;
+        bgCrimeRecoveryPending = false;
+        bgCrimeRecoveryReason = '';
         if (!wasPending) {
-            addLiveLog(`BG Crime: CTC detected in ${sourceLabel} — pausing requests and opening Crimes page`);
+            addLiveLog(`BG Crime: CTC detected in ${sourceLabel} — stopping crime requests and surfacing CTC now`);
         }
+        if (bgCrimeActive) scheduleBgCrimePoll(0);
     }
 
     async function bgCrimeFetchText(url, options = {}) {
@@ -9802,14 +11114,14 @@ async function doQTPerkRedeem() {
         const jailNode = doc.querySelector?.('#jailn');
         const jailText = jailNode ? textOf(jailNode) : '';
         const parsed = jailText ? parseDurationTextToMs(jailText) : null;
-        if (parsed && Number.isFinite(parsed) && parsed > 0) return parsed + 5000;
+        if (parsed && Number.isFinite(parsed) && parsed > 0) return parsed + BG_CRIME_JAIL_RELEASE_BUFFER_MS;
 
         if (doc === document) {
             const ownTimer = getOwnJailTimerMs();
-            if (ownTimer && Number.isFinite(ownTimer) && ownTimer > 0) return ownTimer + 5000;
+            if (ownTimer && Number.isFinite(ownTimer) && ownTimer > 0) return ownTimer + BG_CRIME_JAIL_RELEASE_BUFFER_MS;
 
             if (state.jailReleasesAt && state.jailReleasesAt > Date.now()) {
-                return Math.max(5000, state.jailReleasesAt - Date.now() + 5000);
+                return Math.max(BG_CRIME_JAIL_RELEASE_BUFFER_MS, state.jailReleasesAt - Date.now() + BG_CRIME_JAIL_RELEASE_BUFFER_MS);
             }
         }
 
@@ -9823,6 +11135,77 @@ async function doQTPerkRedeem() {
             addLiveLog('BG Crime: jailed — pausing background crime page fetches');
             bgCrimeJailPauseLogged = true;
         }
+    }
+
+    function isBgCrimeAccountFlowDocument(doc = document) {
+        if (!doc || typeof doc.querySelector !== 'function') return false;
+
+        // Login page. Keep this deliberately tied to the game's real login controls so
+        // unrelated forms containing username/password fields are not misclassified.
+        if (doc.querySelector('#logincon input[name="login"], #login-email, #login-password, #login-button')) {
+            return true;
+        }
+
+        // Post-death account setup pages. Background Crimes must never try to recover a
+        // Crimes token while the account is between login and normal gameplay.
+        const usernameInput = doc.querySelector('form input[name="username"][type="text"]');
+        const usernameCreate = doc.querySelector('form input[name="create"]');
+        if (usernameInput && usernameCreate) return true;
+        if (doc.querySelector('input[name="agree"], input[name="tutorial"]')) return true;
+
+        return false;
+    }
+
+    function deferBgCrimeForAccountFlow(delayMs = 1000) {
+        bgCrimeToken = null;
+        bgCrimeRecoveryPending = false;
+        bgCrimeRecoveryReason = '';
+        bgCrimeNextPageFetchAt = Date.now() + Math.max(250, Number(delayMs) || 1000);
+    }
+
+    function isBgCrimeRecoveryNavigationBlocked() {
+        // Crime commits themselves remain background-capable. Only a forced Crimes-page
+        // reload for token recovery must yield to transactional/kill foreground work.
+        // Account-flow pages are a hard navigation block: forcing /?p=crimes from Login,
+        // Username, Rules, or Tutorial can create a redirect/reload loop before relog runs.
+        if (isBgCrimeAccountFlowDocument(document)) return true;
+        if (reloadPending || actionInFlight) return true;
+        if (state.pendingBankAction || state.pendingBulletRun || state.pendingMissionCheck || state.pendingPenaltyPage) return true;
+        if (state.pendingKillAction || state.killBgShootPending || state.killPenaltyPendingAction) return true;
+        if (hasActiveBgFarmCriticalChain()) return true;
+        return false;
+    }
+
+    function requestBgCrimeCrimesPageRecovery(reason = 'crime token recovery') {
+        bgCrimeRecoveryPending = true;
+        bgCrimeRecoveryReason = reason;
+        bgCrimeToken = null;
+        bgCrimeNextPageFetchAt = 0;
+
+        // Never let token recovery fight the account/login flow. Clearing the pending
+        // recovery here is important: otherwise the 25ms recovery scheduler can keep
+        // trying to navigate to Crimes before auto-login gets a stable page to submit.
+        if (isBgCrimeAccountFlowDocument(document)) {
+            deferBgCrimeForAccountFlow(1000);
+            if (bgCrimeActive) scheduleBgCrimePoll(1000);
+            return false;
+        }
+
+        if (isBgCrimeRecoveryNavigationBlocked()) {
+            if (bgCrimeActive) scheduleBgCrimePoll(BG_CRIME_READY_POLL_MS);
+            return false;
+        }
+
+        bgCrimeRecoveryPending = false;
+        const recoveryReason = bgCrimeRecoveryReason || reason;
+        bgCrimeRecoveryReason = '';
+        addLiveLog(`BG Crime: ${recoveryReason} — reloading Crimes page immediately`);
+        if (isCrimesPage() || hasCrimePageMarkers()) {
+            reloadCurrentPage('bg-crime-token-recovery');
+        } else {
+            gotoPage('crimes');
+        }
+        return true;
     }
 
     function resetBgCrimeFetchBackoff() {
@@ -9852,17 +11235,18 @@ async function doQTPerkRedeem() {
     function getBgCrimeScheduleDelayMs() {
         const nowMs = Date.now();
 
+        if (bgCrimeRecoveryPending) return BG_CRIME_READY_POLL_MS;
         if (state.bgCrimeCtcPending) return BG_CRIME_CTC_RECHECK_MS;
-        if (hasCTCChallenge()) return 1000;
-        if (bgCrimeInFlight) return 1000;
+        if (hasCTCChallenge()) return BG_CRIME_CTC_RECHECK_MS;
+        if (bgCrimeInFlight) return BG_CRIME_READY_POLL_MS;
 
         if (bgCrimeJailPauseUntil > nowMs) {
-            return Math.max(1000, bgCrimeJailPauseUntil - nowMs);
+            return Math.max(BG_CRIME_READY_POLL_MS, bgCrimeJailPauseUntil - nowMs);
         }
 
         if (isLikelyJailPage()) {
             noteBgCrimeJailPause(document);
-            return Math.max(1000, bgCrimeJailPauseUntil - Date.now());
+            return Math.max(BG_CRIME_READY_POLL_MS, bgCrimeJailPauseUntil - Date.now());
         }
 
         bgCrimeJailPauseLogged = false;
@@ -9887,7 +11271,7 @@ async function doQTPerkRedeem() {
 
             // Initial token load or token refresh for a due crime. Respect backoff.
             if (bgCrimeNextPageFetchAt > nowMs) {
-                return Math.max(1000, bgCrimeNextPageFetchAt - nowMs);
+                return Math.max(BG_CRIME_READY_POLL_MS, bgCrimeNextPageFetchAt - nowMs);
             }
             return BG_CRIME_READY_POLL_MS;
         }
@@ -9921,14 +11305,19 @@ async function doQTPerkRedeem() {
         bgCrimeFetchBackoffMs = BG_CRIME_FETCH_BACKOFF_MIN;
         bgCrimeJailPauseUntil = 0;
         bgCrimeJailPauseLogged = false;
+        bgCrimeRecoveryPending = false;
+        bgCrimeRecoveryReason = '';
         state.bgCrimeCtcPending = false;
         state.bgCrimeCtcDetectedAt = 0;
     }
 
-    function scheduleBgCrimePoll() {
+    function scheduleBgCrimePoll(delayOverride = null) {
         if (bgCrimeTimer) { clearTimeout(bgCrimeTimer); bgCrimeTimer = null; }
         if (!bgCrimeActive) return;
-        bgCrimeTimer = setTimeout(doBgCrimePoll, getBgCrimeScheduleDelayMs());
+        const delay = delayOverride == null
+            ? getBgCrimeScheduleDelayMs()
+            : Math.max(0, Math.trunc(Number(delayOverride)) || 0);
+        bgCrimeTimer = setTimeout(doBgCrimePoll, delay);
     }
 
     async function doBgCrimePoll() {
@@ -9941,6 +11330,21 @@ async function doQTPerkRedeem() {
             return;
         }
 
+        // Login/account setup must have absolute priority over Background Crimes. A logged-
+        // out /?p=crimes response is the login page and has no crime token; treating that as
+        // token corruption caused an immediate Crimes redirect/reload loop that starved relog.
+        if (isBgCrimeAccountFlowDocument(document)) {
+            deferBgCrimeForAccountFlow(1000);
+            scheduleBgCrimePoll(1000);
+            return;
+        }
+
+        if (bgCrimeRecoveryPending) {
+            if (requestBgCrimeCrimesPageRecovery(bgCrimeRecoveryReason || 'crime token recovery')) return;
+            scheduleBgCrimePoll(BG_CRIME_READY_POLL_MS);
+            return;
+        }
+
         bgCrimeInFlight = true;
         try {
             if (state.securityVerificationHoldActive || hasSecurityVerificationPage()) {
@@ -9950,10 +11354,10 @@ async function doQTPerkRedeem() {
             if (!bgCrimeActive || !state.bgCrimeEnabled || !state.enabled || crimePaused) return;
             if (state.bgCrimeCtcPending) return;
 
-            // Never launch a background action while the foreground page is still
-            // assembling after a slow load. This also prevents overlapping work when
-            // game scripts add their forms/buttons late.
-            if (!isForegroundPageStableForActions()) return;
+            // Background crime AJAX does not depend on the visible page DOM. Do not
+            // make a due crime wait for arbitrary foreground DOM-settle windows. Only
+            // an actual page transition lock should defer the request.
+            if (reloadPending) return;
 
             // A visible CTC is handled by the foreground heartbeat. Keep Background
             // Crimes paused and preserve the pending flag across the solver reload.
@@ -9991,6 +11395,19 @@ async function doQTPerkRedeem() {
                 const parser = new DOMParser();
                 const doc = parser.parseFromString(pageText, 'text/html');
 
+                // A session can expire between foreground page loads. In that case the
+                // background /?p=crimes fetch returns Login/Username/Rules/Tutorial HTML,
+                // not a Crimes page. This is NOT a bad crime token. Surface the account flow
+                // once and then let the normal auto-login/account handler own navigation.
+                if (isBgCrimeAccountFlowDocument(doc)) {
+                    deferBgCrimeForAccountFlow(1000);
+                    if (!isBgCrimeAccountFlowDocument(document) && !reloadPending) {
+                        addLiveLog('BG Crime: session/account flow detected — pausing crime recovery and surfacing login');
+                        gotoPage('crimes');
+                    }
+                    return;
+                }
+
                 // Check for jail. Do not repeatedly poll the crimes page while jailed.
                 if (doc.querySelector('#jailn') || pageText.includes('jailn')) {
                     noteBgCrimeJailPause(doc);
@@ -10009,7 +11426,7 @@ async function doQTPerkRedeem() {
                         noteBgCrimeCtcDetected('Crimes page response');
                         return;
                     }
-                    bumpBgCrimeFetchBackoff();
+                    requestBgCrimeCrimesPageRecovery('crime token missing or invalid');
                     return;
                 }
 
@@ -10064,9 +11481,8 @@ async function doQTPerkRedeem() {
 
                 const unresolvedIds = activeIds.filter(id => bgCrimeCooldowns[id] === undefined);
                 if (unresolvedIds.length) {
-                    addLiveLog(`BG Crime: timer missing for ${unresolvedIds.map(getCrimeName).join(', ')} — refreshing Crimes data`);
-                    bgCrimeToken = null;
-                    bgCrimeNextPageFetchAt = Date.now() + BG_CRIME_FETCH_BACKOFF_MIN;
+                    addLiveLog(`BG Crime: timer missing for ${unresolvedIds.map(getCrimeName).join(', ')} — refreshing Crimes immediately`);
+                    requestBgCrimeCrimesPageRecovery('crime timer data incomplete');
                     return;
                 }
             }
@@ -10092,12 +11508,11 @@ async function doQTPerkRedeem() {
                 }
 
                 if (/#jailn|jail/i.test(text) && !/jailbroken|jail break/i.test(text)) {
-                    bgCrimeToken = null;
-                    bgCrimeJailPauseUntil = Date.now() + BG_CRIME_JAIL_FALLBACK_MS;
-                    if (!bgCrimeJailPauseLogged) {
-                        addLiveLog('BG Crime: jailed after crime — pausing background crime page fetches');
-                        bgCrimeJailPauseLogged = true;
-                    }
+                    // Use any jail timer returned by the crime response instead of
+                    // blindly sleeping for the 30s fallback. Resume essentially at
+                    // release time (100ms safety only) whenever UG exposes the timer.
+                    const jailDoc = new DOMParser().parseFromString(text, 'text/html');
+                    noteBgCrimeJailPause(jailDoc);
                     return;
                 }
 
@@ -10110,13 +11525,16 @@ async function doQTPerkRedeem() {
                     setBgCrimeCooldown(id, Date.now(), timingMatch ? timingMatch[1] : null);
                     addLiveLog(`BG Crime: ${result || 'committed crime ' + id}`);
                 } else {
-                    // Token rejected or response was incomplete. Do not instantly refetch /?p=crimes.
+                    // Token rejected/incomplete response: keep this crime due. Never add
+                    // a fake cooldown. Recover a fresh token via a real Crimes-page reload
+                    // as soon as no kill/transactional foreground action is in progress.
                     bgCrimeToken = null;
-                    bgCrimeCooldowns[id] = Date.now() + BG_CRIME_FETCH_BACKOFF_MIN;
-                    bumpBgCrimeFetchBackoff();
+                    bgCrimeCooldowns[id] = 0;
+                    requestBgCrimeCrimesPageRecovery(`token rejected while committing ${getCrimeName(id)}`);
                     break;
                 }
-                await wait(150);
+                // No artificial inter-crime sleep. The awaited server response above is
+                // sufficient serialization; fire the next simultaneously-due crime now.
             }
         } catch (e) {
             // An intentional stop/security pause abort should not be logged as a fault.
@@ -11283,6 +12701,185 @@ async function doQTPerkRedeem() {
         }
     }
 
+    // ── Jail Monitor — read-only background username discovery ────────────────
+    // This never submits a bust request. It only polls /a/jailn.php, extracts
+    // usernames, and adds newly observed accounts to the existing Player List.
+    const JAIL_MONITOR_MIN_POLL_MS = 100;
+    const JAIL_MONITOR_MAX_POLL_MS = 600000;
+    let jailMonitorTimer = null;
+    let jailMonitorActive = false;
+    let jailMonitorPollRunning = false;
+    let jailMonitorScheduledPollMs = 0;
+    let jailMonitorGeneration = 0;
+
+    function getJailMonitorPollMs() {
+        const value = Math.trunc(Number(state.jailMonitorPollMs));
+        if (!Number.isFinite(value)) return DEFAULTS.jailMonitorPollMs;
+        return Math.min(JAIL_MONITOR_MAX_POLL_MS, Math.max(JAIL_MONITOR_MIN_POLL_MS, value));
+    }
+
+    function extractJailMonitorUsernames(rawText) {
+        const source = String(rawText || '');
+        const found = [];
+
+        // /a/jailn.php normally returns JavaScript containing escaped HTML:
+        // name=\"player\" value=\"Username\". Keep a plain-HTML fallback too.
+        const patterns = [
+            /name=\\["']player\\["']\s+value=\\["']([^\\"']+)\\["']/gi,
+            /name=["']player["']\s+value=["']([^"']+)["']/gi
+        ];
+
+        for (const pattern of patterns) {
+            let match;
+            while ((match = pattern.exec(source)) !== null) {
+                if (match[1]) found.push(match[1]);
+            }
+        }
+
+        // Fallback for payloads where attributes are ordered differently.
+        const unescaped = source.replace(/\\"/g, '"').replace(/\\'/g, "'");
+        try {
+            const doc = new DOMParser().parseFromString(unescaped, 'text/html');
+            doc.querySelectorAll('input[name="player"][value]').forEach(input => {
+                const value = input.getAttribute('value');
+                if (value) found.push(value);
+            });
+        } catch (_) {}
+
+        return normaliseKillSharedNameList(found);
+    }
+
+    function jailMonitorPayloadLooksBlocked(rawText) {
+        const text = String(rawText || '').slice(0, 20000).toLowerCase();
+        if (!text) return false;
+        return text.includes('cf-turnstile') ||
+            text.includes('challenges.cloudflare.com') ||
+            text.includes('verify you are human') ||
+            text.includes("verify you're human") ||
+            text.includes('checking if the site connection is secure') ||
+            text.includes('login-email') ||
+            text.includes('login-password');
+    }
+
+    async function mergeJailMonitorPlayers(rawNames) {
+        const names = normaliseKillSharedNameList(rawNames);
+        if (!names.length) return [];
+
+        const suppressedKeys = getKnownKillSharedSuppressedKeySet();
+        const suppressedSeen = names.filter(name => suppressedKeys.has(getKillSharedSyncNameKey(name)));
+        if (suppressedSeen.length) {
+            await unsuppressKillSharedNamesFromPositiveEvidence(suppressedSeen, 'Jail Monitor');
+        }
+
+        const players = Array.isArray(state.killPlayers) ? state.killPlayers : [];
+        const existingKeys = new Set(
+            players.map(player => getKillSharedSyncNameKey(player && player.name)).filter(Boolean)
+        );
+        const addedNames = [];
+
+        for (const name of names) {
+            const key = getKillSharedSyncNameKey(name);
+            if (!key || existingKeys.has(key)) continue;
+            players.push({
+                name,
+                status: KILL_STATUS.UNKNOWN,
+                lastChecked: 0,
+                firstSeen: now(),
+                searchCount: 0
+            });
+            existingKeys.add(key);
+            addedNames.push(name);
+        }
+
+        if (addedNames.length) {
+            saveKillPlayers(players);
+            if (state.killSearchEnabled) state.killSearchLoopActive = true;
+            if (document.querySelector('#ug-bot-kill-list')) renderKillList();
+            for (const name of addedNames) {
+                addLiveLog(`Jail Monitor: new player found — ${name}`);
+            }
+        }
+
+        return addedNames;
+    }
+
+    function scheduleJailMonitorPoll(delayMs = getJailMonitorPollMs()) {
+        if (!jailMonitorActive) return;
+        if (jailMonitorTimer) clearTimeout(jailMonitorTimer);
+        const delay = Math.max(0, Math.trunc(Number(delayMs)) || 0);
+        jailMonitorScheduledPollMs = getJailMonitorPollMs();
+        jailMonitorTimer = setTimeout(() => {
+            jailMonitorTimer = null;
+            doJailMonitorPoll();
+        }, delay);
+    }
+
+    async function doJailMonitorPoll() {
+        if (!jailMonitorActive || jailMonitorPollRunning) return;
+
+        if (state.securityVerificationHoldActive || hasSecurityVerificationPage()) {
+            scheduleJailMonitorPoll();
+            return;
+        }
+
+        const generation = jailMonitorGeneration;
+        jailMonitorPollRunning = true;
+        try {
+            const response = await fetch('/a/jailn.php', {
+                credentials: 'include',
+                cache: 'no-store'
+            });
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            const payload = await response.text();
+            if (!jailMonitorActive || generation !== jailMonitorGeneration) return;
+            if (!jailMonitorPayloadLooksBlocked(payload)) {
+                await mergeJailMonitorPlayers(extractJailMonitorUsernames(payload));
+            }
+        } catch (_) {
+            // Network or temporary page failures are intentionally silent.
+        } finally {
+            if (generation !== jailMonitorGeneration) return;
+            jailMonitorPollRunning = false;
+            if (jailMonitorActive) scheduleJailMonitorPoll();
+        }
+    }
+
+    function startJailMonitor() {
+        if (jailMonitorActive) return;
+        jailMonitorGeneration += 1;
+        jailMonitorActive = true;
+        scheduleJailMonitorPoll(0);
+    }
+
+    function stopJailMonitor() {
+        jailMonitorGeneration += 1;
+        jailMonitorActive = false;
+        jailMonitorPollRunning = false;
+        jailMonitorScheduledPollMs = 0;
+        if (jailMonitorTimer) {
+            clearTimeout(jailMonitorTimer);
+            jailMonitorTimer = null;
+        }
+    }
+
+    function syncJailMonitorState() {
+        if (!state.enabled || !state.jailMonitorEnabled) {
+            stopJailMonitor();
+            return;
+        }
+
+        if (!jailMonitorActive) {
+            startJailMonitor();
+            return;
+        }
+
+        // Apply a changed rate without needing a page refresh.
+        const pollMs = getJailMonitorPollMs();
+        if (!jailMonitorPollRunning && jailMonitorScheduledPollMs !== pollMs) {
+            scheduleJailMonitorPoll(pollMs);
+        }
+    }
+
     // ── No Reload Bust — background fetch polling ─────────────────────────────
     let noReloadBustTimer  = null;
     let noReloadBustActive = false;
@@ -12133,39 +13730,75 @@ async function doQTPerkRedeem() {
     async function handleLoginPage() {
         if (!state.accEnabled) return;
 
-        const lastAttempt = Number(GM_getValue('loginLastAttempt', 0));
-        const nowMs = Date.now();
-        if (nowMs - lastAttempt < 10000) return;
-        GM_setValue('loginLastAttempt', nowMs);
-
-        // Death detected — disable protection-breaking settings immediately
-        applyDeathSettingsReset();
-
         const emailInput = document.querySelector('#login-email');
         const passInput  = document.querySelector('#login-password');
         const loginBtn   = document.querySelector('#login-button');
         const loginForm  = loginBtn ? loginBtn.closest('form') : null;
         if (!emailInput || !passInput || !loginBtn || !loginForm) return;
 
-        const email    = state.accEmail;
-        const password = state.accPassword;
+        // A normal login page can be reached by logout/session expiry as well as death.
+        // Death-specific protection settings are reset only after the username-creation
+        // page is actually detected by the main loop, so do not reset them here.
+
+        let email    = String(state.accEmail || '').trim();
+        let password = String(state.accPassword || '');
 
         if (email && password) {
-            // Credentials stored — fill fields programmatically and submit
+            // Credentials stored — fill the exact current login fields and fire both
+            // input/change so any page-side listeners see the same state as manual entry.
             addLiveLog('Auto login: filling credentials and submitting');
             await wait(rand(500, 800));
-            const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-            nativeInputValueSetter.call(emailInput, email);
-            emailInput.dispatchEvent(new Event('input', { bubbles: true }));
-            nativeInputValueSetter.call(passInput, password);
-            passInput.dispatchEvent(new Event('input', { bubbles: true }));
-            await wait(300);
-            nativeClickForPageLoad(loginBtn, 'account-login-submit');
+            const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+            if (nativeInputValueSetter) {
+                nativeInputValueSetter.call(emailInput, email);
+                nativeInputValueSetter.call(passInput, password);
+            } else {
+                emailInput.value = email;
+                passInput.value  = password;
+            }
+            emailInput.dispatchEvent(new Event('input',  { bubbles: true }));
+            emailInput.dispatchEvent(new Event('change', { bubbles: true }));
+            passInput.dispatchEvent(new Event('input',   { bubbles: true }));
+            passInput.dispatchEvent(new Event('change',  { bubbles: true }));
         } else {
-            // No credentials — rely on browser autofill (works on Firefox)
-            addLiveLog('Auto login: clicking Enter (autofill mode)');
-            await wait(rand(500, 800));
-            nativeClickForPageLoad(loginBtn, 'account-login-submit');
+            // Browser-autofill mode: never blindly submit an empty login form. Chrome can
+            // populate saved credentials a little after DOM ready, so give it a few seconds.
+            // If the user picks a saved login manually during this window, that is detected too.
+            addLiveLog('Auto login: waiting for browser autofill');
+            const autofillDeadline = Date.now() + 5000;
+            while (Date.now() < autofillDeadline) {
+                email    = String(emailInput.value || '').trim();
+                password = String(passInput.value || '');
+                if (email && password) break;
+                await wait(250);
+            }
+            if (!email || !password) {
+                addLiveLog('Auto login: waiting — login fields are not filled yet');
+                return;
+            }
+            addLiveLog('Auto login: browser credentials detected — submitting');
+        }
+
+        // Throttle only real submit attempts. Previously this timestamp was written before
+        // confirming the fields/form existed, which could delay recovery after a partial load.
+        const lastAttempt = Number(GM_getValue('loginLastAttempt', 0));
+        const nowMs = Date.now();
+        if (nowMs - lastAttempt < 10000) return;
+        GM_setValue('loginLastAttempt', nowMs);
+
+        await wait(300);
+        if (reloadPending || !beginPageLoadTransition('account-login-submit')) return;
+        try {
+            // requestSubmit preserves the submit button as the submitter, so the POST still
+            // includes name="login" value="Enter" exactly like clicking the real button.
+            if (typeof loginForm.requestSubmit === 'function') {
+                loginForm.requestSubmit(loginBtn);
+            } else {
+                loginBtn.click();
+            }
+        } catch (error) {
+            clearReloadPending();
+            throw error;
         }
     }
 
@@ -15431,23 +17064,20 @@ async function doQTPerkRedeem() {
                     return;
                 }
 
-                // Give UG's page scripts time to render a challenge after the fresh page
-                // load. Do not immediately declare it cleared while the DOM is still settling.
+                // Allow only a very short render window for a challenge widget. As
+                // soon as the fresh Crimes page is stable with no CTC, resume crimes now.
                 const surfaceAgeMs = now() - foregroundPageLoadedAt;
                 if (surfaceAgeMs < BG_CRIME_CTC_SURFACE_WAIT_MS || !isForegroundPageStableForActions()) {
                     return;
                 }
 
-                // No visible challenge appeared on a fresh, stable Crimes page. Release
-                // the handoff, but use a short backoff before asking for another token so
-                // an unusual response format cannot create a rapid navigation loop.
                 state.bgCrimeCtcPending = false;
                 state.bgCrimeCtcDetectedAt = 0;
                 bgCrimeToken = null;
                 bgCrimeFetchBackoffMs = BG_CRIME_FETCH_BACKOFF_MIN;
-                bgCrimeNextPageFetchAt = Date.now() + BG_CRIME_CTC_NO_WIDGET_BACKOFF_MS;
-                if (bgCrimeActive && state.bgCrimeEnabled) scheduleBgCrimePoll();
-                addLiveLog('BG Crime: fresh Crimes page showed no visible CTC — resuming after safety backoff');
+                bgCrimeNextPageFetchAt = 0;
+                if (bgCrimeActive && state.bgCrimeEnabled) scheduleBgCrimePoll(0);
+                addLiveLog('BG Crime: CTC cleared/not visible — resuming crime requests immediately');
             } finally {
                 loopBusy = false;
             }
@@ -16969,7 +18599,7 @@ async function doQTPerkRedeem() {
             return '$' + Math.round(n).toLocaleString();
         }
 
-        el.textContent = `At ${multiplier}× — deposits when cash exceeds ${fmt(trigger)}, keeping ${fmt(reserve)} on hand.`;
+        el.textContent = `At ${multiplier}× — deposits when cash exceeds\n${fmt(trigger)}, keeping ${fmt(reserve)} on hand.`;
     }
 
     function renderLiveLog() {
@@ -17091,6 +18721,13 @@ async function doQTPerkRedeem() {
         state.autoMissionsEnabled        = autoMissionsInput  ? autoMissionsInput.checked  : state.autoMissionsEnabled;
         state.autoGiveCarMissionsEnabled = autoGiveCarsInput  ? autoGiveCarsInput.checked  : state.autoGiveCarMissionsEnabled;
         state.autoDrugsEnabled           = autoDrugsInput     ? autoDrugsInput.checked     : state.autoDrugsEnabled;
+        // Route checkboxes are mutually exclusive in the UI. Preserve the existing
+        // persisted boolean so upgrades map cleanly: false=Classic, true=New route.
+        if (drugHighProfitRouteInput && drugClassicRouteInput) {
+            state.drugHighProfitRouteEnabled = !!drugHighProfitRouteInput.checked;
+        } else if (drugHighProfitRouteInput) {
+            state.drugHighProfitRouteEnabled = !!drugHighProfitRouteInput.checked;
+        }
         state.drugDepositMultiplier      = multiplierValue;
         state.leaveJailEnabled           = leaveJailInput     ? leaveJailInput.checked     : state.leaveJailEnabled;
         state.leaveJailMinPoints         = minJailPtsValue;
@@ -17263,6 +18900,11 @@ async function doQTPerkRedeem() {
         state.killPlayerFinderDelayMs = killPlayerFinderDelayEl ? Number(String(killPlayerFinderDelayEl.value).replace(/[^0-9]/g, '')) : state.killPlayerFinderDelayMs;
         state.killPlayerFinderRunEveryMins = killPlayerFinderRunEveryEl ? Number(String(killPlayerFinderRunEveryEl.value).replace(/[^0-9]/g, '')) : state.killPlayerFinderRunEveryMins;
         syncKillPlayerFinderScheduler();
+        if (jailMonitorInput) state.jailMonitorEnabled = jailMonitorInput.checked;
+        if (jailMonitorPollMsEl) {
+            state.jailMonitorPollMs = Math.max(100, Math.min(600000, parseInt(jailMonitorPollMsEl.value, 10) || DEFAULTS.jailMonitorPollMs));
+            jailMonitorPollMsEl.value = String(state.jailMonitorPollMs);
+        }
         state.killBgCheckEnabled     = killBgCheckInput      ? killBgCheckInput.checked      : state.killBgCheckEnabled;
         if (killBgSpamInput)       state.killBgSpamEnabled      = killBgSpamInput.checked;
         if (killBgSpamIntervalEl)  state.killBgSpamIntervalSecs = Number(killBgSpamIntervalEl.value) || 2;
@@ -17322,6 +18964,7 @@ async function doQTPerkRedeem() {
         state.gtaResetLoopActive   = state.resetGTAEnabled;
         state.meltResetLoopActive  = state.resetMeltEnabled;
         if (state.bustNoReload) { startNoReloadBust(); } else { stopNoReloadBust(); }
+        syncJailMonitorState();
 
         // Kill search loop activation logic:
         // - If the toggle is off, always deactivate
@@ -17729,11 +19372,34 @@ async function doQTPerkRedeem() {
                 <!-- ==================== DRUGS TAB ==================== -->
                 <div class="ug-tab-pane" data-tab="drugs" style="display:none;">
 <div style="width:100%;background:#1b1b1b;border:1px solid #444;border-radius:6px;padding:8px;box-sizing:border-box;margin-bottom:4px;overflow:hidden;"><table style="width:auto;border-collapse:collapse;">
-                    <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-autodrugs" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">Drug run</td><td style="width:1px;"></td></tr>
-                    <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-drug-comp" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">Comp mode</td><td style="width:1px;"></td></tr>
-                    <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;"></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">Swiss deposit multiplier</td><td style="vertical-align:middle;white-space:nowrap;padding:3px 0;width:1px;"><input id="ug-bot-drug-deposit-multiplier" type="text" inputmode="numeric" class="ug-compact-input ug-compact-input-sm" placeholder="3" /></td><td style="color:#888;font-size:10px;padding-left:3px;vertical-align:middle;white-space:nowrap;">x run cost</td></tr>
-                    <tr><td colspan="4"><div id="ug-bot-drug-deposit-calc" class="ug-drug-calc-info"></div></td></tr>
-                    <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-leave-cash-enabled" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">Leave cash on hand</td><td style="vertical-align:middle;white-space:nowrap;padding:3px 0;width:120px;"><input id="ug-bot-leave-cash-on-hand" type="text" inputmode="numeric" class="ug-compact-input" placeholder="5,000,000,000" style="width:130px !important;max-width:130px !important;" /></td></tr>
+                    <tr>
+                        <td colspan="5" style="padding:0;">
+                            <table style="width:100%;border-collapse:collapse;table-layout:fixed;">
+                                <colgroup>
+                                    <col style="width:32px;" />
+                                    <col style="width:82px;" />
+                                    <col style="width:158px;" />
+                                    <col />
+                                </colgroup>
+                                <tr>
+                                    <td style="padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-autodrugs" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td>
+                                    <td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;white-space:nowrap;">Drug run</td>
+                                    <td style="vertical-align:middle;padding:2px 6px 2px 0;">
+                                        <div style="display:flex;flex-direction:column;align-items:stretch;gap:2px;">
+                                            <span style="color:#777;font-size:9px;line-height:1;white-space:nowrap;">Deposit multi</span>
+                                            <input id="ug-bot-drug-deposit-multiplier" type="text" inputmode="numeric" class="ug-compact-input ug-compact-input-sm" placeholder="3" style="width:100%!important;max-width:100%!important;box-sizing:border-box;" />
+                                        </div>
+                                    </td>
+                                    <td style="color:#888;font-size:10px;padding:12px 0 2px 4px;vertical-align:middle;text-align:left;white-space:nowrap;">x run cost</td>
+                                </tr>
+                            </table>
+                        </td>
+                    </tr>
+                    <tr><td></td><td colspan="4" style="padding:2px 0 1px 0;"><div style="display:flex;align-items:center;gap:5px;"><span style="color:#777;font-size:11px;">-</span><input id="ug-bot-drug-classic-route" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /><span style="color:#ddd;font-size:12px;">Classic route - England - USA</span></div></td></tr>
+                    <tr><td></td><td colspan="4" style="padding:1px 0 3px 0;"><div style="display:flex;align-items:center;gap:5px;"><span style="color:#777;font-size:11px;">-</span><input id="ug-bot-drug-high-profit-route" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /><span style="color:#ddd;font-size:12px;">New route - England - Russia - Mexico</span></div></td></tr>
+                    <tr><td colspan="5"><div id="ug-bot-drug-deposit-calc" class="ug-drug-calc-info"></div></td></tr>
+                    <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-drug-comp" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td colspan="4" style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">Comp mode - Spam buys 1 unit</td></tr>
+                    <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-leave-cash-enabled" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;white-space:nowrap;">Leave cash on hand</td><td colspan="3" style="vertical-align:middle;white-space:nowrap;padding:3px 0;"><input id="ug-bot-leave-cash-on-hand" type="text" inputmode="numeric" class="ug-compact-input" placeholder="5,000,000,000" style="width:130px !important;max-width:130px !important;" /></td></tr>
                     <tr><td colspan="4" style="padding:4px 0 2px;">
                         <button id="ug-bot-sell-all-drugs" class="ug-action-btn">Sell All Drugs</button>
                         <div id="ug-bot-sell-all-status" class="ug-helptext" style="margin-top:2px;"></div>
@@ -17774,6 +19440,8 @@ async function doQTPerkRedeem() {
                         <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-kill-player-finder" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">Player Searcher</td><td colspan="2" style="vertical-align:middle;white-space:nowrap;padding:3px 0;width:1px;"><select id="ug-bot-kill-player-finder-mode" data-role="none" class="ug-compact-select"><option value="first">1st half</option><option value="second">2nd half</option><option value="all">All</option></select></td></tr>
                         <tr><td></td><td colspan="3" style="color:#666;font-size:10px;padding:1px 0 1px 0;vertical-align:middle;white-space:nowrap;"><span style="margin-right:3px;">Delay</span><input id="ug-bot-kill-player-finder-delay" type="text" inputmode="numeric" class="ug-compact-input-sm" style="width:42px!important;max-width:42px!important;" placeholder="200" /><span style="margin:0 8px 0 3px;">ms</span><span style="margin-right:3px;">Every</span><input id="ug-bot-kill-player-finder-every" type="text" inputmode="numeric" class="ug-compact-input-sm" style="width:42px!important;max-width:42px!important;" placeholder="360" /><span style="margin-left:3px;">min</span></td></tr>
                         <tr><td></td><td colspan="3" style="font-size:10px;color:#666;padding:0 0 4px 0;"><span id="ug-bot-kill-player-finder-status" style="color:#888;"></span></td></tr>
+
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-kill-jail-monitor" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">Jail Monitor</td><td colspan="2" style="vertical-align:middle;white-space:nowrap;padding:3px 0;width:1px;"><input id="ug-bot-kill-jail-monitor-poll-ms" type="text" inputmode="numeric" class="ug-compact-input-sm" style="width:52px!important;max-width:52px!important;" placeholder="2000" /><span style="color:#666;font-size:10px;padding-left:3px;">ms</span></td></tr>
 
                         <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-kill-protected-recheck" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">Search protected</td><td style="vertical-align:middle;white-space:nowrap;padding:3px 0;width:1px;"><select id="ug-bot-kill-protected-recheck-mins" data-role="none" class="ug-compact-select">
                                 <option value="1">1 min</option>
@@ -17970,10 +19638,10 @@ async function doQTPerkRedeem() {
                             <input id="ug-bot-acc-enabled" type="checkbox" style="width:13px;height:13px;min-width:13px;margin:0;padding:0;cursor:pointer;" />
                             <span style="color:#ddd;font-size:12px;">Auto account creation</span>
                         </div>
-                        <div style="margin-top:6px;display:flex;gap:6px;">
-                            <input id="ug-bot-acc-email" type="text" placeholder="Login email" class="ug-input" style="flex:1;min-width:0;" />
-                            <input id="ug-bot-acc-password" type="password" placeholder="Password" class="ug-input" style="flex:1;min-width:0;" />
-                        </div>
+                        <form id="ug-bot-acc-credentials-form" autocomplete="on" style="margin-top:6px;display:flex;gap:6px;" onsubmit="return false;">
+                            <input id="ug-bot-acc-email" name="username" type="text" autocomplete="username" placeholder="Login email" class="ug-input" style="flex:1;min-width:0;" />
+                            <input id="ug-bot-acc-password" name="password" type="password" autocomplete="current-password" placeholder="Password" class="ug-input" style="flex:1;min-width:0;" />
+                        </form>
                         <div class="ug-helptext" style="margin-top:3px;">Stored locally — never sent anywhere except the game's login form.</div>
                         <div style="border-top:1px solid #333;margin:6px 0;"></div>
                         <div style="display:flex;align-items:center;gap:6px;padding:3px 0;">
@@ -18445,7 +20113,9 @@ async function doQTPerkRedeem() {
                 font-size: 11px;
                 color: #9fe79f;
                 line-height: 1.4;
-                min-height: 14px;
+                min-height: 28px;
+                white-space: pre-line;
+                overflow-wrap: anywhere;
             }
             .ug-kill-list {
                 max-height: 280px;
@@ -18558,6 +20228,80 @@ async function doQTPerkRedeem() {
         document.head.appendChild(style);
         document.body.appendChild(panel);
 
+        // Leave Auto Account Creation's original email/password fields untouched so
+        // Chrome can continue offering saved-login/autofill choices there. All other
+        // editable UG Bot fields are settings, not login credentials, so explicitly
+        // mark those ordinary inputs as non-credential fields.
+        const ugCredentialInputIds = new Set(['ug-bot-acc-email', 'ug-bot-acc-password']);
+        const markUGBotNonCredentialInput = el => {
+            if (!el || ugCredentialInputIds.has(el.id)) return;
+            const tag = String(el.tagName || '').toLowerCase();
+            const type = String(el.getAttribute?.('type') || 'text').toLowerCase();
+            const editable = tag === 'textarea' || (
+                tag === 'input' && ['text', 'search', 'tel', 'url', 'email', 'password', 'number'].includes(type)
+            );
+            if (!editable) return;
+            el.setAttribute('autocomplete', 'off');
+            el.setAttribute('data-form-type', 'other');
+        };
+        panel.querySelectorAll('input, textarea').forEach(markUGBotNonCredentialInput);
+
+        // Apply the same rule to settings inputs that are rendered later (for example
+        // QT Cars rows), without touching the two intentional credential fields.
+        const ugBotInputObserver = new MutationObserver(mutations => {
+            for (const mutation of mutations) {
+                for (const node of mutation.addedNodes) {
+                    if (!(node instanceof Element)) continue;
+                    if (node.matches?.('input, textarea')) markUGBotNonCredentialInput(node);
+                    node.querySelectorAll?.('input, textarea').forEach(markUGBotNonCredentialInput);
+                }
+            }
+        });
+        ugBotInputObserver.observe(panel, { childList: true, subtree: true });
+        panel._ugBotInputObserver = ugBotInputObserver;
+
+        // Keep Chrome's saved-login/autofill behaviour confined to two places only:
+        //   1) the game's real login page (left completely untouched), and
+        //   2) the dedicated Auto Account Creation credential form above.
+        // On every other game page, explicitly mark native text-like fields/forms as
+        // non-credential so Chrome does not offer or save account logins in Player
+        // Search, chat, QT settings, or any other unrelated input.
+        const markGameNonCredentialInput = el => {
+            if (!el || isLoginPage() || panel.contains(el)) return;
+            const tag = String(el.tagName || '').toLowerCase();
+            const type = String(el.getAttribute?.('type') || 'text').toLowerCase();
+            const editable = tag === 'textarea' || (
+                tag === 'input' && ['text', 'search', 'tel', 'url', 'email', 'password', 'number'].includes(type)
+            );
+            if (!editable) return;
+            el.setAttribute('autocomplete', 'off');
+            el.setAttribute('data-form-type', 'other');
+            const form = el.closest?.('form');
+            if (form && !panel.contains(form)) form.setAttribute('autocomplete', 'off');
+        };
+
+        const suppressGameCredentialAutofill = root => {
+            if (isLoginPage()) return;
+            if (root?.matches?.('input, textarea')) markGameNonCredentialInput(root);
+            root?.querySelectorAll?.('input, textarea').forEach(markGameNonCredentialInput);
+        };
+
+        suppressGameCredentialAutofill(document.body);
+
+        const ugGameInputObserver = new MutationObserver(mutations => {
+            if (isLoginPage()) return;
+            for (const mutation of mutations) {
+                for (const node of mutation.addedNodes) {
+                    if (!(node instanceof Element)) continue;
+                    if (panel.contains(node)) continue;
+                    suppressGameCredentialAutofill(node);
+                }
+            }
+        });
+        ugGameInputObserver.observe(document.body, { childList: true, subtree: true });
+        panel._ugGameInputObserver = ugGameInputObserver;
+
+
         toggleBtn               = document.querySelector('#ug-bot-toggle');
         autoDepositInput        = document.querySelector('#ug-bot-autodeposit');
         depositThresholdEl           = document.querySelector('#ug-bot-deposit-threshold');
@@ -18577,6 +20321,8 @@ async function doQTPerkRedeem() {
         autoMissionsInput       = document.querySelector('#ug-bot-automissions');
         autoGiveCarsInput       = document.querySelector('#ug-bot-autogivecars');
         autoDrugsInput          = document.querySelector('#ug-bot-autodrugs');
+        drugClassicRouteInput    = document.querySelector('#ug-bot-drug-classic-route');
+        drugHighProfitRouteInput = document.querySelector('#ug-bot-drug-high-profit-route');
         drugDepositMultiplierEl = document.querySelector('#ug-bot-drug-deposit-multiplier');
         leaveJailInput          = document.querySelector('#ug-bot-leavejail');
         leaveJailMinPointsEl    = document.querySelector('#ug-bot-leavejail-minpoints');
@@ -18758,6 +20504,8 @@ async function doQTPerkRedeem() {
         killPlayerFinderDelayEl  = document.querySelector('#ug-bot-kill-player-finder-delay');
         killPlayerFinderRunEveryEl = document.querySelector('#ug-bot-kill-player-finder-every');
         killPlayerFinderStatusEl = document.querySelector('#ug-bot-kill-player-finder-status');
+        jailMonitorInput         = document.querySelector('#ug-bot-kill-jail-monitor');
+        jailMonitorPollMsEl      = document.querySelector('#ug-bot-kill-jail-monitor-poll-ms');
         killBgCheckInput         = document.querySelector('#ug-bot-kill-bgcheck');
         killBgSpamInput          = document.querySelector('#ug-bot-kill-bg-spam');
         killBgSpamIntervalEl     = document.querySelector('#ug-bot-kill-bg-spam-interval');
@@ -18870,6 +20618,8 @@ async function doQTPerkRedeem() {
         if (autoMissionsInput)           autoMissionsInput.checked          = state.autoMissionsEnabled;
         if (autoGiveCarsInput)           autoGiveCarsInput.checked          = state.autoGiveCarMissionsEnabled;
         if (autoDrugsInput)              autoDrugsInput.checked             = state.autoDrugsEnabled;
+        if (drugClassicRouteInput)       drugClassicRouteInput.checked      = !state.drugHighProfitRouteEnabled;
+        if (drugHighProfitRouteInput)    drugHighProfitRouteInput.checked   = state.drugHighProfitRouteEnabled;
         if (drugDepositMultiplierEl)     drugDepositMultiplierEl.value      = String(state.drugDepositMultiplier);
         if (bustNoReloadInput)           bustNoReloadInput.checked          = state.bustNoReload;
         if (bustPollMinEl)               bustPollMinEl.value                = state.bustPollMin;
@@ -19086,7 +20836,7 @@ async function doQTPerkRedeem() {
                     </td>
                     <td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">${t.name}</td>
                     <td style="vertical-align:middle;white-space:nowrap;padding:3px 0;width:1px;">
-                        <input id="ug-bot-qt-car-price-${t.b}" type="text" inputmode="numeric" value="${t.maxPrice > 0 ? formatNumberWithCommas(t.maxPrice) : ''}"
+                        <input id="ug-bot-qt-car-price-${t.b}" type="text" inputmode="numeric" autocomplete="off" data-form-type="other" value="${t.maxPrice > 0 ? formatNumberWithCommas(t.maxPrice) : ''}"
                             class="ug-compact-input" style="width:110px;max-width:110px;" />
                     </td>
                 </tr>
@@ -19132,6 +20882,8 @@ async function doQTPerkRedeem() {
         if (killPlayerFinderDelayEl)    killPlayerFinderDelayEl.value = String(state.killPlayerFinderDelayMs);
         if (killPlayerFinderRunEveryEl) killPlayerFinderRunEveryEl.value = String(state.killPlayerFinderRunEveryMins);
         updateKillPlayerFinderStatusEl();
+        if (jailMonitorInput) jailMonitorInput.checked = state.jailMonitorEnabled;
+        if (jailMonitorPollMsEl) jailMonitorPollMsEl.value = String(getJailMonitorPollMs());
         if (killBgCheckInput)     killBgCheckInput.checked    = state.killBgCheckEnabled;
         if (killBgSpamInput)      killBgSpamInput.checked         = state.killBgSpamEnabled;
         if (killBgSpamIntervalEl) killBgSpamIntervalEl.value      = String(state.killBgSpamIntervalSecs);
@@ -19176,6 +20928,23 @@ async function doQTPerkRedeem() {
 
         // Auto-save on checkbox/number changes
         document.querySelector('#ug-bot-extra').addEventListener('change', e => {
+            if (e.target.id === 'ug-bot-drug-classic-route' || e.target.id === 'ug-bot-drug-high-profit-route') {
+                const classic = document.querySelector('#ug-bot-drug-classic-route');
+                const newer   = document.querySelector('#ug-bot-drug-high-profit-route');
+                if (classic && newer) {
+                    // Exactly one route must stay selected. Clicking the other route switches
+                    // immediately; clicking the active route cannot leave Drug Run route-less.
+                    if (e.target.id === 'ug-bot-drug-classic-route') {
+                        if (classic.checked) newer.checked = false;
+                        else classic.checked = true;
+                    } else {
+                        if (newer.checked) classic.checked = false;
+                        else newer.checked = true;
+                    }
+                }
+                saveSettings();
+                return;
+            }
             if (e.target.matches('.ug-reset-cb')) {
                 // Handle mutual exclusivity for timer reset checkboxes
                 handleResetCheckboxChange(e.target.dataset.reset);
@@ -19210,6 +20979,7 @@ async function doQTPerkRedeem() {
                 clearAllReloadState();
                 updatePanel();
                 syncKillPlayerFinderScheduler();
+                syncJailMonitorState();
                 startHeartbeat();
             }
         }
@@ -20224,6 +21994,7 @@ async function doQTPerkRedeem() {
         state.gtaResetLoopActive   = state.resetGTAEnabled;
         state.meltResetLoopActive  = state.resetMeltEnabled;
         if (state.bustNoReload) { startNoReloadBust(); } else { stopNoReloadBust(); }
+        syncJailMonitorState();
 
         // Start QT sniper on every page load if any QT option is enabled
         if (state.qtBgEnabled || state.qtBulletsEnabled || state.qtPointsEnabled) {
@@ -20465,6 +22236,8 @@ async function doQTPerkRedeem() {
         autoMissionsInput       = document.querySelector('#ug-bot-automissions');
         autoGiveCarsInput       = document.querySelector('#ug-bot-autogivecars');
         autoDrugsInput          = document.querySelector('#ug-bot-autodrugs');
+        drugClassicRouteInput    = document.querySelector('#ug-bot-drug-classic-route');
+        drugHighProfitRouteInput = document.querySelector('#ug-bot-drug-high-profit-route');
         drugDepositMultiplierEl = document.querySelector('#ug-bot-drug-deposit-multiplier');
         leaveJailInput          = document.querySelector('#ug-bot-leavejail');
         leaveJailMinPointsEl    = document.querySelector('#ug-bot-leavejail-minpoints');
@@ -20484,6 +22257,8 @@ async function doQTPerkRedeem() {
         killPlayerFinderDelayEl = document.querySelector('#ug-bot-kill-player-finder-delay');
         killPlayerFinderRunEveryEl = document.querySelector('#ug-bot-kill-player-finder-every');
         killPlayerFinderStatusEl = document.querySelector('#ug-bot-kill-player-finder-status');
+        jailMonitorInput         = document.querySelector('#ug-bot-kill-jail-monitor');
+        jailMonitorPollMsEl      = document.querySelector('#ug-bot-kill-jail-monitor-poll-ms');
         killBgCheckInput        = document.querySelector('#ug-bot-kill-bgcheck');
         killBgSpamInput          = document.querySelector('#ug-bot-kill-bg-spam');
         killBgSpamIntervalEl     = document.querySelector('#ug-bot-kill-bg-spam-interval');
