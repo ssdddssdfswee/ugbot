@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Full UG Bot
+// @name         Full UG Bot (player2)
 // @namespace    ug-bot
-// @version      3.0.51
+// @version      3.0.62
 // @description  Auto-runs crimes, GTA, melting, repair, missions, drug running with Swiss Bank management, live log, session stats, action checkboxes, jail handling, runtime tracking, melt pagination, repair cycles, automatic CTC solving, and point-spending features.
 // @match        *://www.underworldgangsters.com/*
 // @match        *://underworldgangsters.com/*
@@ -12,8 +12,6 @@
 // @grant        unsafeWindow
 // @run-at       document-start
 // @require      https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js
-// @updateURL    https://raw.githubusercontent.com/ssdddssdfswee/ugbot/main/ug-bot.user.js
-// @downloadURL  https://raw.githubusercontent.com/ssdddssdfswee/ugbot/main/ug-bot.user.js
 // ==/UserScript==
 
 (function () {
@@ -1359,7 +1357,7 @@
     // BOT CONFIG
     // =========================================================================
 
-    const SCRIPT_VERSION = '3.0.51';
+    const SCRIPT_VERSION = '3.0.62';
 
 
     // =========================================================================
@@ -1370,11 +1368,28 @@
     // checkboxes, timers, pending kill actions, BG flags, or local status data.
     const KILL_SHARED_SYNC = {
         enabled: true,
-        playerId: 'player2', // Your friend should use 'player2'
+        playerId: 'player2', // Controlled-handover identity for this browser profile
         intervalMs: 2 * 60 * 1000,
         tableName: 'shared_kill_players',
         deadTableName: 'shared_kill_dead_players',
         suppressedTableName: 'shared_kill_suppressed_players',
+        profileTableName: 'shared_kill_player_profiles',
+        botStateTableName: 'shared_kill_bot_state',
+        activeSearchTableName: 'shared_kill_active_searches',
+        assignmentTableName: 'shared_kill_search_assignments',
+        telegramCommandTableName: 'shared_kill_telegram_commands',
+        telegramCommandPollMs: 3 * 1000,
+        profileLookupBatchSize: 200,
+        coordinationLookupBatchSize: 200,
+        presenceHeartbeatMs: 60 * 1000,
+        coordinationHeartbeatWarningMins: 10,
+        coordinationOfflineMins: 30,
+        coordinationReturnStableMins: 5,
+        handoverStartWindowMins: 210,
+        handoverMinimumStartMins: 195,
+        sameOwnerRenewalMins: 165,
+        handoverFallbackMins: 20,
+        profileMaxAgeMins: 30,
         supabaseUrl: 'https://vphqofqlrjplbsthhfvv.supabase.co',
         supabaseKey: 'sb_publishable_LdG4Ud1lJyV6pzVgEOjyHA_OaxGT11o',
 
@@ -1495,8 +1510,12 @@
     // KILL SCANNER CONSTANTS
     // =========================================================================
 
-    const KILL_SCANNER_SEARCH_HOURS  = 24;   // Always search for 24 hours
-    const KILL_SCANNER_RESCAN_MS     = 23 * 60 * 60 * 1000; // Re-search alive players after 23hrs (1hr buffer before 24hr expiry)
+    // Routine Player List searches request 7 hours. UG turns that into an
+    // effective 8-hour timer. Forced BG/BG Farm/kill-chain searches stay at 24h.
+    const KILL_ROUTINE_SEARCH_REQUEST_HOURS = 7;
+    const KILL_SCANNER_SEARCH_HOURS         = 8;   // Effective routine timer shown by UG
+    const KILL_FORCED_SEARCH_HOURS          = 24;
+    const KILL_SCANNER_RESCAN_MS            = 165 * 60 * 1000; // Renew at ~2h45 remaining
     const KILL_SCANNER_PROTECTED_RESCAN_MS = 60 * 60 * 1000; // Re-check original targets every 1hr (failsafe)
 
     // Player statuses
@@ -1651,6 +1670,8 @@
         killScanOnlineEnabled:  false,
         killScanOnlineInterval: 1,    // minutes between Players Online checks
         killSearchEnabled:      false,
+        killSearchMinRank:      'Civilian',
+        killSearchAssignment:   'coordinated', // permanent automatic coordination
         killProtectedRecheckEnabled:  false,
         killProtectedRecheckMins:     5,
 
@@ -1704,9 +1725,6 @@
         loopBackoffReloadMin:   2500,
         loopBackoffReloadMax:   4500,
 
-        repairAfterLoadMs:      700,
-        repairAfterSelectAllMs: 400,
-        repairAfterSubmitMs:    1000
     };
 
     const MELT_PROTECTED_NAME_PARTS = [
@@ -2478,6 +2496,23 @@
 
         get killSearchEnabled()       { return !!getSetting('killSearchEnabled', DEFAULTS.killSearchEnabled); },
         set killSearchEnabled(v)      { setSetting('killSearchEnabled', !!v); },
+        get killSearchMinRank() {
+            const rank = String(getSetting('killSearchMinRank', DEFAULTS.killSearchMinRank) || DEFAULTS.killSearchMinRank).trim();
+            return RANKS.includes(rank) ? rank : DEFAULTS.killSearchMinRank;
+        },
+        set killSearchMinRank(v) {
+            const rank = String(v || DEFAULTS.killSearchMinRank).trim();
+            setSetting('killSearchMinRank', RANKS.includes(rank) ? rank : DEFAULTS.killSearchMinRank);
+        },
+        get killSearchAssignment() {
+            // Migrate every older manual mode to permanent automatic coordination.
+            const raw = String(getSetting('killSearchAssignment', DEFAULTS.killSearchAssignment) || '').toLowerCase();
+            if (raw !== 'coordinated') setSetting('killSearchAssignment', 'coordinated');
+            return 'coordinated';
+        },
+        set killSearchAssignment(v) {
+            setSetting('killSearchAssignment', 'coordinated');
+        },
         get killProtectedRecheckEnabled() { return !!getSetting('killProtectedRecheckEnabled', DEFAULTS.killProtectedRecheckEnabled); },
         set killProtectedRecheckEnabled(v){ setSetting('killProtectedRecheckEnabled', !!v); },
         get killProtectedRecheckMins()    { return Number(getSetting('killProtectedRecheckMins', DEFAULTS.killProtectedRecheckMins)) || DEFAULTS.killProtectedRecheckMins; },
@@ -2524,6 +2559,8 @@
         // Username currently being searched (persists across page reload)
         get killCurrentSearch()       { return getSetting('killCurrentSearch', ''); },
         set killCurrentSearch(v)      { setSetting('killCurrentSearch', String(v || '')); },
+        get killCurrentSearchMode()   { return String(getSetting('killCurrentSearchMode', '') || ''); },
+        set killCurrentSearchMode(v)  { setSetting('killCurrentSearchMode', String(v || '')); },
 
         // Last kill-search submit tracking — used to avoid duplicate submissions during lag/reloads
         get killSearchSubmitAt()      { return Number(getSetting('killSearchSubmitAt', 0)); },
@@ -2973,6 +3010,8 @@
     let killScanOnlineInput         = null;
     let killScanIntervalEl          = null;
     let killSearchInput             = null;
+    let killSearchRankEl            = null;
+    let killSearchAssignmentEl      = null;
     let killPlayerFinderInput       = null;
     let killPlayerFinderModeEl      = null;
     let killPlayerFinderDelayEl     = null;
@@ -3093,6 +3132,7 @@
         state.killLoopActive       = false;
         state.killSearchIndex      = 0;
         state.killCurrentSearch    = '';
+        state.killCurrentSearchMode = '';
         state.pendingKillAction    = null;
         state.killBgShootPending   = null;
         clearPendingMeltResult();
@@ -3460,9 +3500,34 @@
         state.killSearchLoopActive = false;
         state.killLoopActive       = false;
         state.killCurrentSearch    = '';
+        state.killCurrentSearchMode = '';
         state.pendingKillAction    = null;
         updatePanel();
         addLiveLog(`Paused: ${reason}`);
+    }
+
+
+    function resumeBotAutomation(reason = '') {
+        if (state.enabled) {
+            if (reason) addLiveLog(`Resume ignored: bot is already running (${reason})`);
+            return false;
+        }
+
+        // Mirrors the panel Start button. Coordination/Telegram timers are
+        // intentionally independent, so a remotely paused bot can still be resumed.
+        activateBotWindowIdentity();
+        cancelCurrentRun();
+        state.enabled = true;
+        state.pausedReason = '';
+        state.sessionStartedAt = state.sessionStartedAt || now();
+        clearAllReloadState();
+        updatePanel();
+        syncKillPlayerFinderScheduler();
+        syncJailMonitorState();
+        startHeartbeat();
+        scheduleKillCoordinationSync(0);
+        if (reason) addLiveLog(`Resumed: ${reason}`);
+        return true;
     }
 
     function hasCTCChallenge() {
@@ -3850,6 +3915,234 @@
         'Global Don', 'Godfather', 'Regional Godfather', 'Global Godfather',
         'Underworld Gangster'
     ];
+
+
+    function normaliseKillProfileRankName(rawRank) {
+        const cleaned = String(rawRank || '')
+            .replace(/\s*\([^)]+\)\s*/g, ' ')
+            .replace(/\s*\d+(?:\.\d+)?%\s*/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+        if (!cleaned) return '';
+        return RANKS.find(rank => rank.toLowerCase() === cleaned.toLowerCase()) || '';
+    }
+
+    function getKillSearchMinimumRankIndex() {
+        const idx = RANKS.indexOf(state.killSearchMinRank);
+        return idx >= 0 ? idx + 1 : 1; // profile rank indexes are stored one-based
+    }
+
+    function getKillProfileCheckedAtMs(player) {
+        if (!player) return 0;
+        const raw = player.profileCheckedAt;
+        if (typeof raw === 'number' && Number.isFinite(raw)) return raw;
+        const parsed = Date.parse(String(raw || ''));
+        return Number.isFinite(parsed) ? parsed : 0;
+    }
+
+    function getKillPlayerRankEligibility(player) {
+        const minimumRankIndex = getKillSearchMinimumRankIndex();
+        const minimumRankName = state.killSearchMinRank;
+        const checkedAt = getKillProfileCheckedAtMs(player);
+        const maxAgeMs = Math.max(1, Number(KILL_SHARED_SYNC.profileMaxAgeMins) || 30) * 60 * 1000;
+        const rankName = normaliseKillProfileRankName(player && player.profileRankName);
+        const storedIndex = Number(player && player.profileRankIndex);
+        const rankIndex = Number.isFinite(storedIndex) && storedIndex > 0
+            ? storedIndex
+            : (rankName ? RANKS.indexOf(rankName) + 1 : 0);
+
+        if (!player || player.profileExists === false) {
+            return { eligible: false, reason: 'profile unavailable', rankName, rankIndex, checkedAt, fresh: checkedAt > 0 };
+        }
+        if (!checkedAt || !rankIndex || !rankName) {
+            return { eligible: false, reason: 'awaiting profile worker', rankName, rankIndex, checkedAt, fresh: false };
+        }
+        const invalidatedAt = Number(player.profileInvalidatedAt) || 0;
+        if (invalidatedAt && checkedAt < invalidatedAt) {
+            return { eligible: false, reason: 'awaiting post-reset profile check', rankName, rankIndex, checkedAt, fresh: false };
+        }
+        if ((now() - checkedAt) > maxAgeMs) {
+            return { eligible: false, reason: 'profile result stale', rankName, rankIndex, checkedAt, fresh: false };
+        }
+        if (rankIndex < minimumRankIndex) {
+            return { eligible: false, reason: `below ${minimumRankName}`, rankName, rankIndex, checkedAt, fresh: true };
+        }
+        return { eligible: true, reason: `at or above ${minimumRankName}`, rankName, rankIndex, checkedAt, fresh: true };
+    }
+
+    function isKillCoordinationEnabled() {
+        return true;
+    }
+
+    function getKillSearchAssignmentLabel() {
+        return `Automatic ${getKillSharedSyncPlayerId()}`;
+    }
+
+    function getKillCoordinationLegacySlotForPlayerId(playerId = getKillSharedSyncPlayerId()) {
+        if (String(playerId).toLowerCase() === 'player1') return 1;
+        if (String(playerId).toLowerCase() === 'player2') return 2;
+        return 0;
+    }
+
+    function getKillCoordinationActiveRow(rawName, playerId) {
+        const key = getKillSharedSyncNameKey(rawName);
+        const byOwner = key ? killCoordinationActiveByName.get(key) : null;
+        return byOwner ? (byOwner.get(String(playerId || '').toLowerCase()) || null) : null;
+    }
+
+    function getKillCoordinationActiveRows(rawName) {
+        const key = getKillSharedSyncNameKey(rawName);
+        const byOwner = key ? killCoordinationActiveByName.get(key) : null;
+        return byOwner ? [...byOwner.values()] : [];
+    }
+
+    function getKillCoordinationRowExpiryMs(row) {
+        if (!row) return 0;
+        const parsed = Date.parse(String(row.search_expires_at || row.searchExpiresAt || ''));
+        return Number.isFinite(parsed) ? parsed : 0;
+    }
+
+    function isKillCoordinationBotAvailable(playerId, nowMs = now()) {
+        const row = killCoordinationBotStateById.get(String(playerId || '').toLowerCase());
+        if (!row || row.search_enabled === false || row.coordination_enabled === false) return false;
+        const availability = String(row.availability_state || '').toLowerCase();
+        if (availability) return availability === 'online';
+        // Compatibility fallback until the v3 migration/worker has populated
+        // explicit availability state.
+        const seenAt = Date.parse(String(row.last_seen || row.updated_at || '')) || 0;
+        const warningMs = Math.max(1, Number(KILL_SHARED_SYNC.coordinationHeartbeatWarningMins) || 10) * 60 * 1000;
+        return !!seenAt && (nowMs - seenAt) <= warningMs;
+    }
+
+    function getKillPlayerAssignmentDisplayLabel(player) {
+        const preferred = String(player && player.sharedPreferredOwner || '').toLowerCase();
+        const current = String(player && player.sharedCurrentOwner || '').toLowerCase();
+        const next = String(player && player.sharedNextOwner || '').toLowerCase();
+        const stateName = String(player && player.sharedHandoverState || 'none').toLowerCase();
+        if (current && next && stateName !== 'none') return `${preferred || current} · ${current}→${next}`;
+        if (preferred && current && preferred !== current) return `${preferred} · live ${current}`;
+        if (current) return current;
+        if (preferred) return `${preferred} · awaiting search`;
+        const legacySlot = Number(player && player.profileSearchSlot) || 0;
+        return legacySlot ? `legacy S${legacySlot}` : 'Awaiting owner';
+    }
+
+    function getKillPlayerAssignmentEligibility(player) {
+        const self = getKillSharedSyncPlayerId();
+        const preferredOwner = String(player && player.sharedPreferredOwner || '').toLowerCase();
+        const currentOwner = String(player && player.sharedCurrentOwner || '').toLowerCase();
+        const nextOwner = String(player && player.sharedNextOwner || '').toLowerCase();
+        const handoverState = String(player && player.sharedHandoverState || 'none').toLowerCase();
+
+        if (currentOwner) {
+            if (currentOwner === self) {
+                return { eligible: true, reason: `live owner ${self}`, preferredOwner, currentOwner, nextOwner, handoverState };
+            }
+            if (nextOwner === self && (handoverState === 'planned' || handoverState === 'overlapping')) {
+                return { eligible: false, reason: `incoming handover from ${currentOwner}`, preferredOwner, currentOwner, nextOwner, handoverState };
+            }
+            return { eligible: false, reason: `live owner ${currentOwner}`, preferredOwner, currentOwner, nextOwner, handoverState };
+        }
+
+        // Initial assignments may have a preferred owner before either account
+        // has submitted the first search.
+        if (preferredOwner) {
+            return {
+                eligible: preferredOwner === self,
+                reason: preferredOwner === self ? `preferred owner ${self}` : `preferred owner ${preferredOwner}`,
+                preferredOwner, currentOwner: '', nextOwner, handoverState
+            };
+        }
+
+        // Compatibility fallback while the new ownership table is first being
+        // populated. The old worker side remains usable for one cycle.
+        const assignedSlot = Number(player && player.profileSearchSlot) || 0;
+        const legacySlot = getKillCoordinationLegacySlotForPlayerId(self);
+        if (assignedSlot && legacySlot) {
+            return {
+                eligible: assignedSlot === legacySlot,
+                reason: assignedSlot === legacySlot ? `legacy Side ${assignedSlot} fallback` : `legacy Side ${assignedSlot}`,
+                preferredOwner: '', currentOwner: '', nextOwner: '', handoverState: 'none'
+            };
+        }
+
+        return { eligible: false, reason: 'awaiting shared owner', preferredOwner: '', currentOwner: '', nextOwner: '', handoverState: 'none' };
+    }
+
+    function isKillPlannedHandoverTargetForMe(player, nowMs = now()) {
+        if (!player) return false;
+        const self = getKillSharedSyncPlayerId();
+        const currentOwner = String(player.sharedCurrentOwner || '').toLowerCase();
+        const nextOwner = String(player.sharedNextOwner || '').toLowerCase();
+        const handoverState = String(player.sharedHandoverState || 'none').toLowerCase();
+        const reason = String(player.sharedHandoverReason || 'none').toLowerCase();
+        if (!currentOwner || currentOwner === self || nextOwner !== self) return false;
+        if (handoverState !== 'planned' && handoverState !== 'overlapping') return false;
+        if (!isKillCoordinationBotAvailable(self, nowMs)) return false;
+
+        const ownActive = getKillCoordinationActiveRow(player.name, self);
+        if (ownActive && getKillCoordinationRowExpiryMs(ownActive) > nowMs) return false;
+
+        const rank = getKillPlayerRankEligibility(player);
+        if (!rank.eligible) return false;
+
+        // Failover and stale-heartbeat protection are already time-gated by the
+        // one-minute worker, so the incoming account should start immediately.
+        if (reason === 'failover' || reason === 'protective') return true;
+
+        const outgoingActive = getKillCoordinationActiveRow(player.name, currentOwner);
+        const outgoingExpiry = getKillCoordinationRowExpiryMs(outgoingActive) || Number(player.sharedCurrentSearchExpiresAt) || 0;
+        const remaining = outgoingExpiry - nowMs;
+        const startWindow = Math.max(195, Number(KILL_SHARED_SYNC.handoverStartWindowMins) || 210) * 60 * 1000;
+        const minimumStart = Math.max(180, Number(KILL_SHARED_SYNC.handoverMinimumStartMins) || 195) * 60 * 1000;
+        return remaining >= minimumStart && remaining <= startWindow;
+    }
+
+    function shouldSkipKillRenewalForHandover(player, nowMs = now()) {
+        if (!isKillCoordinationEnabled() || !player) return false;
+        const self = getKillSharedSyncPlayerId();
+        const currentOwner = String(player.sharedCurrentOwner || '').toLowerCase();
+        const nextOwner = String(player.sharedNextOwner || '').toLowerCase();
+        const handoverState = String(player.sharedHandoverState || 'none').toLowerCase();
+        if (currentOwner !== self || !nextOwner || nextOwner === self) return false;
+        if (handoverState !== 'planned' && handoverState !== 'overlapping') return false;
+
+        const incomingActive = getKillCoordinationActiveRow(player.name, nextOwner);
+        if (incomingActive && getKillCoordinationRowExpiryMs(incomingActive) > nowMs) return true;
+
+        const ownActive = getKillCoordinationActiveRow(player.name, self);
+        const ownExpiry = getKillCoordinationRowExpiryMs(ownActive) || Number(player.searchExpiresAt) || 0;
+        const remaining = ownExpiry - nowMs;
+        const normalRenewalWindow = Math.max(120, Number(KILL_SHARED_SYNC.sameOwnerRenewalMins) || 165) * 60 * 1000;
+
+        // A plan is only trusted before the ordinary ~2h45 renewal point. If the
+        // incoming account has not published a replacement by then, the current
+        // owner renews normally rather than risking a gap.
+        return remaining > normalRenewalWindow && isKillCoordinationBotAvailable(nextOwner, nowMs);
+    }
+
+    function isRoutineKillSearchPlayerEligible(player) {
+        const rank = getKillPlayerRankEligibility(player);
+        if (!rank.eligible) return false;
+        return getKillPlayerAssignmentEligibility(player).eligible;
+    }
+
+    function isKillProtectedRecheckDue(player, nowMs = now()) {
+        if (!state.killProtectedRecheckEnabled || !player || player.status !== KILL_STATUS.PROTECTED) return false;
+        const rank = getKillPlayerRankEligibility(player);
+        if (!rank.eligible) return false;
+        if (!getKillPlayerAssignmentEligibility(player).eligible) return false;
+
+        // A protected result establishes a rank baseline only after the logged-out
+        // worker performs a profile check newer than that result. This prevents a
+        // cached pre-search rank from causing an immediate duplicate re-search.
+        const protectedAtRankIndex = Number(player.protectedAtRankIndex) || 0;
+        if (!protectedAtRankIndex || player.protectedRankBaselinePending) return false;
+        if (rank.rankIndex <= protectedAtRankIndex) return false;
+
+        const recheckMs = Math.max(1, Number(state.killProtectedRecheckMins) || DEFAULTS.killProtectedRecheckMins) * 60 * 1000;
+        return (nowMs - (player.lastChecked || 0)) >= recheckMs;
+    }
 
     const UNLOCK_RANK = {
         'gang': 'Assassin',
@@ -5614,9 +5907,22 @@
         return String(name || '').trim().toLowerCase();
     }
 
-    function isKillTargetEnabled(name) {
+    function isKillCoordinationActionAllowed(name) {
         const key = killNameKey(name);
         if (!key) return false;
+        const player = (state.killPlayers || []).find(p => p && killNameKey(p.name) === key);
+        if (!player) return true;
+        if (player.isBg && player.bgFor) return true;
+        if (killActionTouchesName(state.pendingKillAction, key) ||
+            killActionTouchesName(state.killBgShootPending, key) ||
+            killActionTouchesName(state.killPenaltyPendingAction, key)) return true;
+        const owner = String(player.sharedCurrentOwner || '').toLowerCase();
+        return !owner || owner === getKillSharedSyncPlayerId();
+    }
+
+    function isKillTargetEnabled(name) {
+        const key = killNameKey(name);
+        if (!key || !isKillCoordinationActionAllowed(key)) return false;
         return isPlayerShootEnabled(key) || isPlayerBgFarmEnabled(key) || isPlayerBgCheckEnabled(key);
     }
 
@@ -5953,7 +6259,11 @@
         const prestige = prestigeMatch ? parseInt(prestigeMatch[1], 10) : 0;
 
         // Extract rank name (remove prestige suffix)
-        const rankName = rankText.replace(/\s*\([^)]+\)\s*/g, '').trim();
+        const rankName = rankText
+            .replace(/\s*\([^)]+\)\s*/g, ' ')
+            .replace(/\s*\d+(?:\.\d+)?%\s*/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
 
         // Map to index (1-based)
         const idx = RANKS.indexOf(rankName);
@@ -6033,7 +6343,7 @@
             const prestige  = prestigeMatch ? parseInt(prestigeMatch[1], 10) : 0;
             const rankName  = rankText
                 .replace(/\s*\([^)]+\)\s*/g, '')  // strip (prestige) etc
-                .replace(/\s*\d+%\s*/g, '')        // strip percentage like "42%"
+                .replace(/\s*\d+(?:\.\d+)?%\s*/g, ' ') // strip progress like "42%" or "28.01%"
                 .trim();
             const rankIndex = RANKS.indexOf(rankName) + 1;
             if (rankIndex <= 0) return null;
@@ -6384,8 +6694,19 @@
     let killSharedSyncClient = null;
     let killSharedSyncTimer = null;
     let killSharedSyncRunning = false;
+    let killCoordinationSyncRunning = false;
+    let killCoordinationSyncTimer = null;
+    let killCoordinationPresenceTimer = null;
+    let killCoordinationTableWarned = false;
+    let killCoordinationLastSyncAt = 0;
+    let killTelegramCommandTimer = null;
+    let killTelegramCommandRunning = false;
+    const killCoordinationAssignmentByName = new Map();
+    const killCoordinationActiveByName = new Map();
+    const killCoordinationBotStateById = new Map();
     let killSharedSyncConfigWarned = false;
     let killSharedSyncLibraryWarned = false;
+    let killSharedProfileTableWarned = false;
 
     function cleanKillSharedSyncName(rawName) {
         const name = String(rawName || '').replace(/\s+/g, ' ').trim();
@@ -7006,6 +7327,711 @@
         return names;
     }
 
+    async function downloadSharedKillPlayerProfiles() {
+        const client = getKillSharedSyncClient();
+        if (!client) return [];
+
+        const keys = [...new Set(
+            getKillPlayers()
+                .map(player => getKillSharedSyncNameKey(player && player.name))
+                .filter(Boolean)
+        )];
+        if (!keys.length) return [];
+
+        const rows = [];
+        const batchSize = Math.max(1, Number(KILL_SHARED_SYNC.profileLookupBatchSize) || 200);
+
+        for (let i = 0; i < keys.length; i += batchSize) {
+            const batch = keys.slice(i, i + batchSize);
+            const { data, error } = await client
+                .from(KILL_SHARED_SYNC.profileTableName)
+                .select('name_key,name,rank_name,rank_index,prestige,is_vip,profile_exists,checked_at,checked_by,last_error,search_slot')
+                .in('name_key', batch);
+
+            if (error) {
+                if (!killSharedProfileTableWarned) {
+                    killSharedProfileTableWarned = true;
+                    addLiveLog(`Kill Sync: profile data unavailable — ${error.message || error}. Run the supplied Supabase profile-table SQL.`);
+                }
+                return [];
+            }
+
+            killSharedProfileTableWarned = false;
+            rows.push(...(data || []));
+        }
+
+        return rows;
+    }
+
+    function mergeSharedKillProfilesIntoLocalList(profileRows) {
+        if (!Array.isArray(profileRows) || !profileRows.length) return 0;
+
+        const rowByKey = new Map();
+        for (const row of profileRows) {
+            const key = getKillSharedSyncNameKey(row && (row.name_key || row.name));
+            if (key) rowByKey.set(key, row);
+        }
+
+        const players = state.killPlayers || [];
+        let updated = 0;
+
+        for (const player of players) {
+            const key = getKillSharedSyncNameKey(player && player.name);
+            const row = key ? rowByKey.get(key) : null;
+            if (!row) continue;
+
+            const rankName = normaliseKillProfileRankName(row.rank_name);
+            const rawRankIndex = Number(row.rank_index);
+            const rankIndex = Number.isFinite(rawRankIndex) && rawRankIndex > 0
+                ? rawRankIndex
+                : (rankName ? RANKS.indexOf(rankName) + 1 : 0);
+            const checkedAt = String(row.checked_at || '');
+            const checkedAtMs = Date.parse(checkedAt) || 0;
+            const next = {
+                profileRankName: rankName,
+                profileRankIndex: rankIndex,
+                profilePrestige: Math.max(0, Number(row.prestige) || 0),
+                profileIsVip: !!row.is_vip,
+                profileExists: row.profile_exists !== false,
+                profileCheckedAt: checkedAt,
+                profileCheckedBy: String(row.checked_by || ''),
+                profileCheckError: String(row.last_error || ''),
+                profileSearchSlot: [1, 2].includes(Number(row.search_slot)) ? Number(row.search_slot) : 0
+            };
+
+            let changed = false;
+            for (const [field, value] of Object.entries(next)) {
+                if (player[field] !== value) {
+                    player[field] = value;
+                    changed = true;
+                }
+            }
+            if (player.profileInvalidatedAt && checkedAtMs >= Number(player.profileInvalidatedAt)) {
+                delete player.profileInvalidatedAt;
+                changed = true;
+            }
+
+            // Establish the protected-rank baseline only from a worker result
+            // produced after the game confirmed protection.
+            if (player.status === KILL_STATUS.PROTECTED &&
+                (player.protectedRankBaselinePending || !(Number(player.protectedAtRankIndex) > 0)) &&
+                rankIndex > 0 && checkedAtMs > 0 && checkedAtMs >= (Number(player.lastChecked) || 0)) {
+                player.protectedAtRankIndex = rankIndex;
+                player.protectedAtRankName = rankName;
+                player.protectedRankBaselinePending = false;
+                changed = true;
+            }
+
+            if (changed) updated++;
+        }
+
+        if (updated > 0) {
+            saveKillPlayers(players);
+            if (document.querySelector('#ug-bot-kill-list')) renderKillList();
+        }
+
+        return updated;
+    }
+
+
+    function getKillCoordinationFullSearchExpiryMs(player, nowMs = now()) {
+        if (!player || player.status !== KILL_STATUS.ALIVE) return 0;
+
+        const storedFull = Number(player.sharedSearchFullExpiresAt) || 0;
+        if (storedFull > nowMs) return storedFull;
+
+        const expectedFoundAt = Number(player.expectedFoundAt) || 0;
+        if (player.pendingSearch && expectedFoundAt > nowMs) {
+            return expectedFoundAt + ((KILL_SCANNER_SEARCH_HOURS - 3) * 60 * 60 * 1000);
+        }
+
+        const localExpiry = Number(player.searchExpiresAt) || 0;
+        if (localExpiry <= nowMs) return 0;
+
+        // While pending, searchExpiresAt is deliberately shortened to the
+        // approximately three-hour found timer. Convert it back to the full
+        // full active-search lifetime for shared penalty accounting.
+        if (player.pendingSearch && (localExpiry - nowMs) <= (4 * 60 * 60 * 1000)) {
+            return localExpiry + ((KILL_SCANNER_SEARCH_HOURS - 3) * 60 * 60 * 1000);
+        }
+
+        return localExpiry;
+    }
+
+    function isKillCoordinationForcedPlayer(player) {
+        if (!player) return false;
+        return !!((player.isBg && player.bgFor) || player.sharedSearchForced);
+    }
+
+    function buildKillCoordinationActiveRows(nowMs = now()) {
+        const playerId = getKillSharedSyncPlayerId();
+        const seenAt = new Date(nowMs).toISOString();
+        const rows = [];
+
+        for (const player of getKillPlayers()) {
+            const name = cleanKillSharedSyncName(player && player.name);
+            const key = getKillSharedSyncNameKey(name);
+            const expiryMs = getKillCoordinationFullSearchExpiryMs(player, nowMs);
+            if (!name || !key || !expiryMs || expiryMs <= nowMs) continue;
+
+            const durationHours = Number(player.sharedSearchDurationHours) || (isKillCoordinationForcedPlayer(player) ? KILL_FORCED_SEARCH_HOURS : KILL_SCANNER_SEARCH_HOURS);
+            const startedAtMs = Number(player.sharedSearchStartedAt) || Math.max(0, expiryMs - (durationHours * 60 * 60 * 1000));
+            const rank = getKillPlayerRankEligibility(player);
+            rows.push({
+                player_id: playerId,
+                name_key: key,
+                name,
+                search_started_at: startedAtMs ? new Date(startedAtMs).toISOString() : null,
+                search_expires_at: new Date(expiryMs).toISOString(),
+                pending: !!player.pendingSearch,
+                forced: isKillCoordinationForcedPlayer(player),
+                rank_index: rank.rankIndex || null,
+                last_seen: seenAt,
+                updated_at: seenAt
+            });
+        }
+
+        return rows;
+    }
+
+    async function publishKillCoordinationSnapshot() {
+        const client = getKillSharedSyncClient();
+        if (!client) return { active: 0 };
+
+        const nowMs = now();
+        const nowIso = new Date(nowMs).toISOString();
+        const playerId = getKillSharedSyncPlayerId();
+        const activeRows = buildKillCoordinationActiveRows(nowMs);
+        const botRow = {
+            player_id: playerId,
+            search_enabled: !!state.killSearchEnabled,
+            coordination_enabled: isKillCoordinationEnabled(),
+            min_rank_name: state.killSearchMinRank,
+            min_rank_index: getKillSearchMinimumRankIndex(),
+            active_search_count: activeRows.length,
+            script_version: SCRIPT_VERSION,
+            automation_paused: !state.enabled,
+            paused_reason: !state.enabled ? String(state.pausedReason || 'Paused') : null,
+            last_seen: nowIso,
+            updated_at: nowIso
+        };
+
+        const { error: botError } = await client
+            .from(KILL_SHARED_SYNC.botStateTableName)
+            .upsert([botRow], { onConflict: 'player_id', ignoreDuplicates: false });
+        if (botError) throw new Error(`bot state: ${botError.message || botError}`);
+
+        if (activeRows.length) {
+            const { error: activeError } = await client
+                .from(KILL_SHARED_SYNC.activeSearchTableName)
+                .upsert(activeRows, { onConflict: 'player_id,name_key', ignoreDuplicates: false });
+            if (activeError) throw new Error(`active searches: ${activeError.message || activeError}`);
+        }
+
+        // Seed locally confirmed protected results into the shared ledger. This
+        // makes pre-existing protected players stop affecting the actionable
+        // rank split after upgrading, without allowing a non-owner's stale local
+        // state to overwrite the current owner's later result.
+        const protectedRows = [];
+        for (const player of getKillPlayers()) {
+            if (!player || player.status !== KILL_STATUS.PROTECTED) continue;
+            const name = cleanKillSharedSyncName(player.name);
+            const key = getKillSharedSyncNameKey(name);
+            if (!name || !key) continue;
+            const cached = killCoordinationAssignmentByName.get(key);
+            const cachedOwner = String(cached && cached.current_owner || '').toLowerCase();
+            if (cachedOwner && cachedOwner !== playerId) continue;
+            const rank = getKillPlayerRankEligibility(player);
+            protectedRows.push({
+                name_key: key,
+                name,
+                preferred_owner: String(player.sharedPreferredOwner || cachedOwner || playerId).toLowerCase(),
+                target_status: 'protected',
+                rank_name: rank.rankName || null,
+                rank_index: rank.rankIndex || null,
+                updated_by: playerId,
+                updated_at: nowIso
+            });
+        }
+        if (protectedRows.length) {
+            const { error: protectedError } = await client
+                .from(KILL_SHARED_SYNC.assignmentTableName)
+                .upsert(protectedRows, { onConflict: 'name_key', ignoreDuplicates: false });
+            if (protectedError) throw new Error(`protected assignments: ${protectedError.message || protectedError}`);
+        }
+
+        // Remove rows this account no longer considers active. Expired rows are
+        // also harmless, but prompt cleanup makes handover finalisation faster.
+        const { data: existing, error: existingError } = await client
+            .from(KILL_SHARED_SYNC.activeSearchTableName)
+            .select('name_key')
+            .eq('player_id', playerId);
+        if (existingError) throw new Error(`active-search cleanup read: ${existingError.message || existingError}`);
+
+        const liveKeys = new Set(activeRows.map(row => row.name_key));
+        const staleKeys = (existing || []).map(row => String(row.name_key || '')).filter(key => key && !liveKeys.has(key));
+        const batchSize = Math.max(1, Number(KILL_SHARED_SYNC.coordinationLookupBatchSize) || 200);
+        for (let i = 0; i < staleKeys.length; i += batchSize) {
+            const batch = staleKeys.slice(i, i + batchSize);
+            const { error } = await client
+                .from(KILL_SHARED_SYNC.activeSearchTableName)
+                .delete()
+                .eq('player_id', playerId)
+                .in('name_key', batch);
+            if (error) throw new Error(`active-search cleanup: ${error.message || error}`);
+        }
+
+        return { active: activeRows.length };
+    }
+
+    async function downloadKillCoordinationAssignments() {
+        const client = getKillSharedSyncClient();
+        if (!client) return [];
+        const keys = [...new Set(getKillPlayers().map(p => getKillSharedSyncNameKey(p && p.name)).filter(Boolean))];
+        if (!keys.length) return [];
+
+        const rows = [];
+        const batchSize = Math.max(1, Number(KILL_SHARED_SYNC.coordinationLookupBatchSize) || 200);
+        for (let i = 0; i < keys.length; i += batchSize) {
+            const batch = keys.slice(i, i + batchSize);
+            const { data, error } = await client
+                .from(KILL_SHARED_SYNC.assignmentTableName)
+                .select('name_key,name,preferred_owner,current_owner,next_owner,handover_state,handover_reason,handover_planned_at,handover_started_at,current_search_expires_at,next_search_expires_at,target_status,rank_name,rank_index,updated_by,updated_at')
+                .in('name_key', batch);
+            if (error) throw new Error(`assignments: ${error.message || error}`);
+            rows.push(...(data || []));
+        }
+        return rows;
+    }
+
+    async function downloadKillCoordinationActiveSearches() {
+        const client = getKillSharedSyncClient();
+        if (!client) return [];
+        const { data, error } = await client
+            .from(KILL_SHARED_SYNC.activeSearchTableName)
+            .select('player_id,name_key,name,search_started_at,search_expires_at,pending,forced,rank_index,last_seen,updated_at')
+            .gt('search_expires_at', new Date().toISOString());
+        if (error) throw new Error(`active searches: ${error.message || error}`);
+        return data || [];
+    }
+
+    async function downloadKillCoordinationBotStates() {
+        const client = getKillSharedSyncClient();
+        if (!client) return [];
+        const { data, error } = await client
+            .from(KILL_SHARED_SYNC.botStateTableName)
+            .select('player_id,search_enabled,coordination_enabled,min_rank_name,min_rank_index,active_search_count,script_version,automation_paused,paused_reason,availability_state,availability_since,offline_since,last_seen,updated_at');
+        if (error) throw new Error(`bot states: ${error.message || error}`);
+        return data || [];
+    }
+
+    function mergeKillCoordinationData(assignments, activeRows, botRows) {
+        killCoordinationAssignmentByName.clear();
+        killCoordinationActiveByName.clear();
+        killCoordinationBotStateById.clear();
+
+        for (const row of assignments || []) {
+            const key = getKillSharedSyncNameKey(row && (row.name_key || row.name));
+            if (key) killCoordinationAssignmentByName.set(key, row);
+        }
+        for (const row of activeRows || []) {
+            const key = getKillSharedSyncNameKey(row && (row.name_key || row.name));
+            const owner = String(row && row.player_id || '').toLowerCase();
+            if (!key || !owner) continue;
+            if (!killCoordinationActiveByName.has(key)) killCoordinationActiveByName.set(key, new Map());
+            killCoordinationActiveByName.get(key).set(owner, row);
+        }
+        for (const row of botRows || []) {
+            const playerId = String(row && row.player_id || '').toLowerCase();
+            if (playerId) killCoordinationBotStateById.set(playerId, row);
+        }
+
+        const players = state.killPlayers || [];
+        let changed = 0;
+        for (const player of players) {
+            const key = getKillSharedSyncNameKey(player && player.name);
+            const row = key ? killCoordinationAssignmentByName.get(key) : null;
+            const next = row ? {
+                sharedPreferredOwner: String(row.preferred_owner || '').toLowerCase(),
+                sharedCurrentOwner: String(row.current_owner || '').toLowerCase(),
+                sharedNextOwner: String(row.next_owner || '').toLowerCase(),
+                sharedHandoverState: String(row.handover_state || 'none').toLowerCase(),
+                sharedHandoverReason: String(row.handover_reason || 'none').toLowerCase(),
+                sharedTargetStatus: String(row.target_status || 'normal').toLowerCase(),
+                sharedCurrentSearchExpiresAt: Date.parse(String(row.current_search_expires_at || '')) || 0,
+                sharedNextSearchExpiresAt: Date.parse(String(row.next_search_expires_at || '')) || 0,
+                sharedAssignmentUpdatedAt: Date.parse(String(row.updated_at || '')) || 0
+            } : {
+                sharedPreferredOwner: '',
+                sharedCurrentOwner: '',
+                sharedNextOwner: '',
+                sharedHandoverState: 'none',
+                sharedHandoverReason: 'none',
+                sharedTargetStatus: 'normal',
+                sharedCurrentSearchExpiresAt: 0,
+                sharedNextSearchExpiresAt: 0,
+                sharedAssignmentUpdatedAt: 0
+            };
+            for (const [field, value] of Object.entries(next)) {
+                if (player[field] !== value) {
+                    player[field] = value;
+                    changed++;
+                }
+            }
+        }
+
+        if (changed) {
+            saveKillPlayers(players);
+            if (document.querySelector('#ug-bot-kill-list')) renderKillList();
+        }
+        killCoordinationLastSyncAt = now();
+        return changed;
+    }
+
+    async function runKillCoordinationSync({ silent = false } = {}) {
+        if (!KILL_SHARED_SYNC.enabled) return false;
+        if (killCoordinationSyncRunning) return true;
+        killCoordinationSyncRunning = true;
+        try {
+            const published = await publishKillCoordinationSnapshot();
+            const [assignments, activeRows, botRows] = await Promise.all([
+                downloadKillCoordinationAssignments(),
+                downloadKillCoordinationActiveSearches(),
+                downloadKillCoordinationBotStates()
+            ]);
+            const changed = mergeKillCoordinationData(assignments, activeRows, botRows);
+            killCoordinationTableWarned = false;
+            if (!silent && changed) addLiveLog(`Kill ownership: synced ${assignments.length} assignment(s), ${activeRows.length} active search(es)`);
+            return true;
+        } catch (error) {
+            if (!killCoordinationTableWarned) {
+                killCoordinationTableWarned = true;
+                addLiveLog(`Kill ownership unavailable — ${error && error.message ? error.message : error}. Run the controlled-handover Supabase migration.`);
+            }
+            return false;
+        } finally {
+            killCoordinationSyncRunning = false;
+        }
+    }
+
+    function scheduleKillCoordinationSync(delayMs = 1200) {
+        if (killCoordinationSyncTimer) clearTimeout(killCoordinationSyncTimer);
+        killCoordinationSyncTimer = setTimeout(() => {
+            killCoordinationSyncTimer = null;
+            runKillCoordinationSync({ silent: true });
+        }, Math.max(0, Number(delayMs) || 0));
+    }
+
+    async function recordKillCoordinationOutcome(rawName, outcome, mode = '') {
+        const client = getKillSharedSyncClient();
+        const name = cleanKillSharedSyncName(rawName);
+        const key = getKillSharedSyncNameKey(name);
+        const playerId = getKillSharedSyncPlayerId();
+        const searchMode = String(mode || '').toLowerCase();
+        if (!client || !name || !key) return false;
+
+        const nowMs = now();
+        const nowIso = new Date(nowMs).toISOString();
+        const durationHours = searchMode === 'forced' ? KILL_FORCED_SEARCH_HOURS : KILL_SCANNER_SEARCH_HOURS;
+        const fullExpiryMs = nowMs + (durationHours * 60 * 60 * 1000);
+        const fullExpiryIso = new Date(fullExpiryMs).toISOString();
+        const player = getKillPlayers().find(p => sameKillName(p.name, name));
+        const rank = getKillPlayerRankEligibility(player);
+
+        try {
+            if (outcome === 'alive') {
+                const activeRow = {
+                    player_id: playerId,
+                    name_key: key,
+                    name,
+                    search_started_at: nowIso,
+                    search_expires_at: fullExpiryIso,
+                    pending: true,
+                    forced: searchMode === 'forced' || isKillCoordinationForcedPlayer(player),
+                    rank_index: rank.rankIndex || null,
+                    last_seen: nowIso,
+                    updated_at: nowIso
+                };
+                const { error: activeError } = await client
+                    .from(KILL_SHARED_SYNC.activeSearchTableName)
+                    .upsert([activeRow], { onConflict: 'player_id,name_key', ignoreDuplicates: false });
+                if (activeError) throw activeError;
+
+                if (searchMode === 'handover') {
+                    const { error } = await client
+                        .from(KILL_SHARED_SYNC.assignmentTableName)
+                        .update({
+                            handover_state: 'overlapping',
+                            handover_started_at: nowIso,
+                            next_search_expires_at: fullExpiryIso,
+                            target_status: 'normal',
+                            updated_by: playerId,
+                            updated_at: nowIso
+                        })
+                        .eq('name_key', key)
+                        .eq('next_owner', playerId);
+                    if (error) throw error;
+                } else if (searchMode === 'normal') {
+                    const assignmentRow = {
+                        name_key: key,
+                        name,
+                        preferred_owner: String(player && player.sharedPreferredOwner || playerId).toLowerCase(),
+                        current_owner: playerId,
+                        next_owner: null,
+                        handover_state: 'none',
+                        handover_reason: 'none',
+                        handover_planned_at: null,
+                        handover_started_at: null,
+                        current_search_expires_at: fullExpiryIso,
+                        next_search_expires_at: null,
+                        target_status: 'normal',
+                        rank_name: rank.rankName || null,
+                        rank_index: rank.rankIndex || null,
+                        updated_by: playerId,
+                        updated_at: nowIso
+                    };
+                    const { error } = await client
+                        .from(KILL_SHARED_SYNC.assignmentTableName)
+                        .upsert([assignmentRow], { onConflict: 'name_key', ignoreDuplicates: false });
+                    if (error) throw error;
+                }
+            } else {
+                const { error: activeDeleteError } = await client
+                    .from(KILL_SHARED_SYNC.activeSearchTableName)
+                    .delete()
+                    .eq('player_id', playerId)
+                    .eq('name_key', key);
+                if (activeDeleteError) throw activeDeleteError;
+
+                if (outcome === 'protected' && searchMode !== 'forced') {
+                    const assignmentRow = {
+                        name_key: key,
+                        name,
+                        preferred_owner: String(player && player.sharedPreferredOwner || playerId).toLowerCase(),
+                        current_owner: playerId,
+                        next_owner: null,
+                        handover_state: 'none',
+                        handover_reason: 'none',
+                        handover_planned_at: null,
+                        handover_started_at: null,
+                        current_search_expires_at: null,
+                        next_search_expires_at: null,
+                        target_status: 'protected',
+                        rank_name: rank.rankName || null,
+                        rank_index: rank.rankIndex || null,
+                        updated_by: playerId,
+                        updated_at: nowIso
+                    };
+                    const { error } = await client
+                        .from(KILL_SHARED_SYNC.assignmentTableName)
+                        .upsert([assignmentRow], { onConflict: 'name_key', ignoreDuplicates: false });
+                    if (error) throw error;
+                } else if (outcome === 'dead' || outcome === 'nonexistent' || outcome === 'unkillable') {
+                    const { error: assignmentDeleteError } = await client
+                        .from(KILL_SHARED_SYNC.assignmentTableName)
+                        .delete()
+                        .eq('name_key', key);
+                    if (assignmentDeleteError) throw assignmentDeleteError;
+                }
+            }
+
+            scheduleKillCoordinationSync(250);
+            return true;
+        } catch (error) {
+            addLiveLog(`Kill ownership update failed for ${name} — ${error && error.message ? error.message : error}`);
+            return false;
+        }
+    }
+
+
+    // -------------------------------------------------------------------------
+    // Telegram remote command queue
+    // -------------------------------------------------------------------------
+    // Telegram itself talks only to a Supabase Edge Function. The userscript
+    // polls the shared queue, so the Telegram bot token never appears here.
+
+    async function updateKillTelegramCommand(commandId, patch, expectedStatus = '') {
+        const client = getKillSharedSyncClient();
+        if (!client || !commandId) return null;
+        let query = client
+            .from(KILL_SHARED_SYNC.telegramCommandTableName)
+            .update({ ...patch, updated_at: new Date().toISOString() })
+            .eq('id', commandId);
+        if (expectedStatus) query = query.eq('status', expectedStatus);
+        const { data, error } = await query.select('id,status,target_player_id').maybeSingle();
+        if (error) throw new Error(`Telegram command update: ${error.message || error}`);
+        return data || null;
+    }
+
+    async function claimKillTelegramCommand(row) {
+        const playerId = getKillSharedSyncPlayerId();
+        const claimedAt = new Date().toISOString();
+        return updateKillTelegramCommand(row.id, {
+            status: 'claimed',
+            claimed_by: playerId,
+            claimed_at: claimedAt,
+            result_text: null,
+            error_text: null
+        }, 'pending');
+    }
+
+    async function finishKillTelegramCommand(row, status, resultText = '', errorText = '') {
+        const playerId = getKillSharedSyncPlayerId();
+        const completedAt = new Date().toISOString();
+        return updateKillTelegramCommand(row.id, {
+            status,
+            claimed_by: playerId,
+            completed_at: completedAt,
+            result_text: resultText || null,
+            error_text: errorText || null
+        });
+    }
+
+    async function rerouteKillTelegramCommand(row, targetPlayerId, reason = '') {
+        const target = String(targetPlayerId || '').toLowerCase();
+        if (!['player1', 'player2'].includes(target)) return false;
+        const client = getKillSharedSyncClient();
+        if (!client) return false;
+        const { error } = await client
+            .from(KILL_SHARED_SYNC.telegramCommandTableName)
+            .update({
+                target_player_id: target,
+                status: 'pending',
+                claimed_by: null,
+                claimed_at: null,
+                completed_at: null,
+                result_text: reason || null,
+                error_text: null,
+                updated_at: new Date().toISOString()
+            })
+            .eq('id', row.id)
+            .eq('status', 'claimed');
+        if (error) throw new Error(`Telegram command reroute: ${error.message || error}`);
+        return true;
+    }
+
+    function ensureTelegramKillPlayer(rawName) {
+        const name = cleanKillSharedSyncName(rawName);
+        const key = getKillSharedSyncNameKey(name);
+        if (!name || !key) return null;
+
+        const players = state.killPlayers || [];
+        let player = players.find(p => p && getKillSharedSyncNameKey(p.name) === key);
+        if (!player) {
+            player = {
+                name,
+                status: KILL_STATUS.UNKNOWN,
+                lastChecked: 0,
+                firstSeen: now(),
+                searchCount: 0,
+                sharedSync: true
+            };
+            players.push(player);
+            saveKillPlayers(players);
+        }
+        return player;
+    }
+
+    async function executeKillTelegramCommand(row) {
+        const command = String(row.command || '').toLowerCase();
+        const playerId = getKillSharedSyncPlayerId();
+
+        if (command === 'kill') {
+            const player = ensureTelegramKillPlayer(row.target_name);
+            if (!player) throw new Error('Invalid player name');
+
+            // The Edge Function routes to the best owner, but ownership may have
+            // changed during the polling delay. Hand the command to the latest live
+            // owner instead of allowing both accounts to toggle the same target.
+            const currentOwner = String(player.sharedCurrentOwner || '').toLowerCase();
+            if (currentOwner && currentOwner !== playerId && ['player1', 'player2'].includes(currentOwner)) {
+                await rerouteKillTelegramCommand(row, currentOwner, `Ownership changed; rerouted from ${playerId}`);
+                addLiveLog(`Telegram: /kill ${player.name} rerouted to ${currentOwner}`);
+                return { rerouted: true };
+            }
+
+            setPlayerShootEnabled(player.name, true);
+            if (state.enabled && !isKillPenaltyTooHigh()) state.killLoopActive = true;
+            renderKillList();
+            addLiveLog(`Telegram: Kill enabled for ${player.name}`);
+            await finishKillTelegramCommand(row, 'completed', `Kill enabled for ${player.name} on ${playerId}`);
+            return { completed: true };
+        }
+
+        if (command === 'pause') {
+            await finishKillTelegramCommand(row, 'completed', `${playerId} paused`);
+            setPaused('Telegram /pause');
+            scheduleKillCoordinationSync(0);
+            return { completed: true };
+        }
+
+        if (command === 'resume') {
+            const changed = resumeBotAutomation('Telegram /resume');
+            await finishKillTelegramCommand(row, 'completed', changed ? `${playerId} resumed` : `${playerId} was already running`);
+            scheduleKillCoordinationSync(0);
+            return { completed: true };
+        }
+
+        await finishKillTelegramCommand(row, 'failed', '', `Unsupported command: ${command}`);
+        return { completed: true };
+    }
+
+    async function runKillTelegramCommandPoll() {
+        if (killTelegramCommandRunning || !KILL_SHARED_SYNC.enabled) return;
+        const client = getKillSharedSyncClient();
+        if (!client) return;
+
+        killTelegramCommandRunning = true;
+        try {
+            const playerId = getKillSharedSyncPlayerId();
+            const { data, error } = await client
+                .from(KILL_SHARED_SYNC.telegramCommandTableName)
+                .select('id,command,target_player_id,target_name,status,created_at')
+                .eq('target_player_id', playerId)
+                .eq('status', 'pending')
+                .order('id', { ascending: true })
+                .limit(10);
+            if (error) throw new Error(error.message || error);
+
+            for (const row of data || []) {
+                const claimed = await claimKillTelegramCommand(row);
+                if (!claimed) continue;
+                try {
+                    await executeKillTelegramCommand({ ...row, status: 'claimed' });
+                } catch (commandError) {
+                    await finishKillTelegramCommand(row, 'failed', '', commandError && commandError.message ? commandError.message : String(commandError));
+                    addLiveLog(`Telegram command failed: ${commandError && commandError.message ? commandError.message : commandError}`);
+                }
+            }
+        } catch (error) {
+            // A missing migration is logged sparingly; ordinary empty polls are silent.
+            const lastLogAt = Number(getSetting('killTelegramCommandLastErrorLogAt', 0));
+            if (!lastLogAt || (now() - lastLogAt) > 60000) {
+                setSetting('killTelegramCommandLastErrorLogAt', now());
+                addLiveLog(`Telegram command sync unavailable — ${error && error.message ? error.message : error}. Run the Telegram SQL migration.`);
+            }
+        } finally {
+            killTelegramCommandRunning = false;
+        }
+    }
+
+    function startKillTelegramCommandSync() {
+        if (killTelegramCommandTimer || !KILL_SHARED_SYNC.enabled) return;
+        setTimeout(runKillTelegramCommandPoll, 1500);
+        killTelegramCommandTimer = setInterval(
+            runKillTelegramCommandPoll,
+            Math.max(1000, Number(KILL_SHARED_SYNC.telegramCommandPollMs) || 3000)
+        );
+        addLiveLog(`Telegram commands: polling every ${Math.round((Number(KILL_SHARED_SYNC.telegramCommandPollMs) || 3000) / 1000)}s`);
+    }
+
+    function stopKillTelegramCommandSync() {
+        if (killTelegramCommandTimer) {
+            clearInterval(killTelegramCommandTimer);
+            killTelegramCommandTimer = null;
+        }
+    }
+
     function mergeSharedKillNamesIntoLocalList(sharedNames, deadNameKeys = null, suppressedNameKeys = null) {
         const players = getKillPlayers();
         const existing = new Set(
@@ -7037,7 +8063,7 @@
         if (added > 0) {
             saveKillPlayers(players);
             if (document.querySelector('#ug-bot-kill-list')) renderKillList();
-            if (state.killSearchEnabled) state.killSearchLoopActive = true;
+            if (state.killSearchEnabled && getNextKillTarget()) state.killSearchLoopActive = true;
         }
 
         return added;
@@ -7080,8 +8106,11 @@
 
             const sharedNames = await downloadSharedKillPlayerNames(deadNameKeys, suppressedNameKeys);
             const added = mergeSharedKillNamesIntoLocalList(sharedNames, deadNameKeys, suppressedNameKeys);
+            const sharedProfiles = await downloadSharedKillPlayerProfiles();
+            const profilesUpdated = mergeSharedKillProfilesIntoLocalList(sharedProfiles);
+            const ownershipSynced = await runKillCoordinationSync({ silent: true });
 
-            addLiveLog(`Kill Sync: uploaded ${upload.uploaded} active username(s), suppressed synced ${suppressionUpload.uploaded}, suppressed known ${suppressedNameKeys.size}, unsuppressed ${unsuppress.deleted}, dead synced ${deadUpload.uploaded}, dead known ${deadNameKeys.size}, active cleanup ${activeSuppressedCleanup.deleted + activeDeadCleanup.deleted}, downloaded ${sharedNames.length}, added ${added} missing${removedLocalSuppressed ? `, removed ${removedLocalSuppressed} local suppressed` : ''}${removedLocalDead ? `, removed ${removedLocalDead} local dead` : ''}`);
+            addLiveLog(`Kill Sync: uploaded ${upload.uploaded} active username(s), suppressed synced ${suppressionUpload.uploaded}, suppressed known ${suppressedNameKeys.size}, unsuppressed ${unsuppress.deleted}, dead synced ${deadUpload.uploaded}, dead known ${deadNameKeys.size}, active cleanup ${activeSuppressedCleanup.deleted + activeDeadCleanup.deleted}, downloaded ${sharedNames.length}, added ${added} missing, profiles ${sharedProfiles.length}, profile rows updated ${profilesUpdated}, ownership ${ownershipSynced ? 'synced' : 'unavailable'}${removedLocalSuppressed ? `, removed ${removedLocalSuppressed} local suppressed` : ''}${removedLocalDead ? `, removed ${removedLocalDead} local dead` : ''}`);
         } catch (e) {
             addLiveLog(`Kill Sync: failed — ${e && e.message ? e.message : e}`);
         } finally {
@@ -7093,21 +8122,32 @@
         if (!KILL_SHARED_SYNC.enabled) return;
         if (killSharedSyncTimer) return;
 
-        // Run once soon after page load, then repeat every few minutes.
+        // Run once soon after page load. Presence/active-search state is
+        // then published independently every minute without touching the main
+        // 600ms bot heartbeat.
+        setTimeout(() => runKillCoordinationSync({ silent: true }), 3000);
         setTimeout(runKillSharedPlayerListSync, 5000);
+        killCoordinationPresenceTimer = setInterval(
+            () => runKillCoordinationSync({ silent: true }),
+            Math.max(30000, Number(KILL_SHARED_SYNC.presenceHeartbeatMs) || 60000)
+        );
         killSharedSyncTimer = setInterval(
             runKillSharedPlayerListSync,
             Math.max(30000, Number(KILL_SHARED_SYNC.intervalMs) || (2 * 60 * 1000))
         );
 
         const mins = Math.round((Math.max(30000, Number(KILL_SHARED_SYNC.intervalMs) || (2 * 60 * 1000)) / 60000) * 10) / 10;
-        addLiveLog(`Kill Sync: started username-only sync every ${mins} minute(s)`);
+        addLiveLog(`Kill Sync: started ${Math.round((Number(KILL_SHARED_SYNC.presenceHeartbeatMs) || 60000) / 1000)}s coordination heartbeat + ${mins}m full sync`);
     }
 
     function stopKillSharedPlayerListSync() {
         if (killSharedSyncTimer) {
             clearInterval(killSharedSyncTimer);
             killSharedSyncTimer = null;
+        }
+        if (killCoordinationPresenceTimer) {
+            clearInterval(killCoordinationPresenceTimer);
+            killCoordinationPresenceTimer = null;
         }
     }
 
@@ -7398,7 +8438,7 @@
         if (added > 0) {
             saveKillPlayers(players);
             if (document.querySelector('#ug-bot-kill-list')) renderKillList();
-            if (state.killSearchEnabled) state.killSearchLoopActive = true;
+            if (state.killSearchEnabled && getNextKillTarget()) state.killSearchLoopActive = true;
         }
 
         return added;
@@ -7530,15 +8570,9 @@
         }
     }
 
-    // Returns the next player to search based on priority:
-    // 1. Unknown — search immediately
-    // 2. Protected — always search whenever the loop runs for any reason
-    // 3. Alive with 3hrs or less remaining — re-search to keep active
-    // 4. Protected standalone 1hr failsafe — handled by #2 above since
-    //    original targets are always priority when the loop activates
-    // 5. Unkillable — never search
-    // Pending players (searchExpiresAt > now+2.5hrs) are skipped — they're already
-    // in the game's search queue and just need time to complete.
+    // Returns the next routine Player List search target. Every normal search
+    // requires a fresh rank result from the separate logged-out profile worker.
+    // Forced BG/BG Farm/kill-chain searches bypass this function and remain unchanged.
     function getNextKillTarget() {
         const players = getKillPlayers();
         if (!players.length) return null;
@@ -7546,33 +8580,37 @@
         const nowMs = now();
         const PENDING_SKIP_MS = 2.5 * 60 * 60 * 1000;
 
-        const RECENTLY_SEARCHED_MS = (state.killProtectedRecheckEnabled && state.killSearchEnabled)
-            ? state.killProtectedRecheckMins * 60 * 1000
-            : 5 * 60 * 1000;
+        // Priority 1: controlled handovers are time-sensitive. The receiving
+        // owner begins a new three-hour search before the outgoing search expires.
+        const handover = players.find(p => isKillPlannedHandoverTargetForMe(p, nowMs));
+        if (handover) return handover;
 
-        // Priority 1: Protected players due for recheck — always before unknowns
-        const nextProtected = players.find(p =>
-            p.status === KILL_STATUS.PROTECTED &&
-            (nowMs - (p.lastChecked || 0)) >= RECENTLY_SEARCHED_MS
-        );
+        // Priority 2: protected players are re-searched only after a confirmed
+        // rank increase beyond the rank at which protection was last observed.
+        const nextProtected = players.find(p => isKillProtectedRecheckDue(p, nowMs));
         if (nextProtected) return nextProtected;
 
-        // Priority 2: Unknown players — search immediately
+        // Priority 3: unknown players at or above the selected minimum rank.
         const unknown = players.find(p => {
             if (p.status !== KILL_STATUS.UNKNOWN) return false;
             if (p.searchExpiresAt && (p.searchExpiresAt - nowMs) > PENDING_SKIP_MS) return false;
-            return true;
+            // Bodyguards discovered by an active BG/Kill chain are operational
+            // searches, not routine Player List scans, so never block them on rank.
+            if (p.isBg && p.bgFor) return true;
+            if (shouldSkipKillRenewalForHandover(p, nowMs)) return false;
+            const ownActive = getKillCoordinationActiveRow(p.name, getKillSharedSyncPlayerId());
+            if (ownActive && getKillCoordinationRowExpiryMs(ownActive) > nowMs) return false;
+            return isRoutineKillSearchPlayerEligible(p);
         });
         if (unknown) return unknown;
 
-        // Priority 3: Alive players with 3hrs or less remaining — re-search
-        // to keep their location permanently active with no gap.
-        // If no searchExpiresAt is stored, the player has dropped out of Players Found
-        // (expired or dead) — re-search immediately to discover their status.
-        const RESCAN_BUFFER_MS = 3 * 60 * 60 * 1000; // 3hr buffer before expiry
+        // Priority 4: keep eligible alive players found before their search expires.
+        const RESCAN_BUFFER_MS = Math.max(120, Number(KILL_SHARED_SYNC.sameOwnerRenewalMins) || 165) * 60 * 1000;
         const expiredAlive = players.find(p => {
             if (p.status !== KILL_STATUS.ALIVE) return false;
-            if (!p.searchExpiresAt) return true; // No timer = dropped out, re-search immediately
+            if (!(p.isBg && p.bgFor) && !isRoutineKillSearchPlayerEligible(p)) return false;
+            if (!(p.isBg && p.bgFor) && shouldSkipKillRenewalForHandover(p, nowMs)) return false;
+            if (!p.searchExpiresAt) return true;
             return (p.searchExpiresAt - nowMs) < RESCAN_BUFFER_MS;
         });
         if (expiredAlive) return expiredAlive;
@@ -7610,12 +8648,29 @@
             players[idx].lastChecked = now();
             players[idx].searchCount = (players[idx].searchCount || 0) + 1;
 
+            if (status === KILL_STATUS.PROTECTED) {
+                // Wait for a worker profile result newer than this protection
+                // response before establishing the rank baseline.
+                players[idx].protectedAtRankIndex = 0;
+                players[idx].protectedAtRankName = '';
+                players[idx].protectedRankBaselinePending = true;
+            } else {
+                delete players[idx].protectedAtRankIndex;
+                delete players[idx].protectedAtRankName;
+                delete players[idx].protectedRankBaselinePending;
+            }
+
             if (status === KILL_STATUS.ALIVE) {
-                // Set searchExpiresAt immediately to now+24hrs so the bot
-                // doesn't re-search this player before syncKillExpiryFromPage
-                // has a chance to read the accurate timer from the page.
-                // syncKillExpiryFromPage will overwrite this with the real value.
-                players[idx].searchExpiresAt = now() + (KILL_SCANNER_SEARCH_HOURS * 60 * 60 * 1000);
+                // Store a conservative placeholder until syncKillExpiryFromPage
+                // reads the game's accurate timer. Routine searches are effective
+                // eight-hour leases; forced operational searches remain 24h.
+                const searchStartedAt = now();
+                const durationHours = state.killCurrentSearchMode === 'forced' ? KILL_FORCED_SEARCH_HOURS : KILL_SCANNER_SEARCH_HOURS;
+                const fullExpiryAt = searchStartedAt + (durationHours * 60 * 60 * 1000);
+                players[idx].searchExpiresAt = fullExpiryAt;
+                players[idx].sharedSearchStartedAt = searchStartedAt;
+                players[idx].sharedSearchFullExpiresAt = fullExpiryAt;
+                players[idx].sharedSearchDurationHours = durationHours;
                 // Search was just submitted/confirmed. Until the player appears
                 // in Players Found, treat them as pending so BG Farm cannot
                 // monopolise the kill page and starve the normal search loop.
@@ -7623,6 +8678,9 @@
             } else {
                 // Clear stored expiry when status changes to non-alive
                 delete players[idx].searchExpiresAt;
+                delete players[idx].sharedSearchStartedAt;
+                delete players[idx].sharedSearchFullExpiresAt;
+                delete players[idx].sharedSearchDurationHours;
                 delete players[idx].pendingSearch;
             }
         }
@@ -7714,6 +8772,7 @@
         state.killSearchSubmitAt = 0;
         state.killSearchSubmitName = '';
         state.killSearchWaitLogAt = 0;
+        state.killCurrentSearchMode = '';
     }
 
     // Scrapes all usernames from the Players Online page
@@ -7778,7 +8837,7 @@
     // Returns the real completion deadline for a player that is still in the
     // game's pending "Your men are out searching for" queue. Do not use
     // searchExpiresAt for this: immediately after submitting a search the bot
-    // stores a 24h placeholder there until the player is actually found, so it
+    // stores a effective-timer placeholder there until the player is actually found, so it
     // can look like "found in ~1320m" even when the visible pending timer is
     // only ~45m. expectedFoundAt and the visible pending row are the true source
     // for pending-search completion.
@@ -7943,6 +9002,11 @@
                 if (!players[idx].searchExpiresAt || players[idx].searchExpiresAt < pending3hr) {
                     players[idx].searchExpiresAt = pending3hr;
                 }
+                const pendingDurationHours = Number(players[idx].sharedSearchDurationHours) || KILL_SCANNER_SEARCH_HOURS;
+                players[idx].sharedSearchFullExpiresAt = pending3hr + ((pendingDurationHours - 3) * 60 * 60 * 1000);
+                if (!players[idx].sharedSearchStartedAt) {
+                    players[idx].sharedSearchStartedAt = players[idx].sharedSearchFullExpiresAt - (pendingDurationHours * 60 * 60 * 1000);
+                }
                 players[idx].status = KILL_STATUS.ALIVE;
                 players[idx].pendingSearch = true;
             }
@@ -8038,6 +9102,9 @@
                     firstSeen:       now(),
                     searchCount:     1,
                     searchExpiresAt: expiresAt,
+                    sharedSearchFullExpiresAt: expiresAt,
+                    sharedSearchStartedAt: Math.max(0, expiresAt - (KILL_SCANNER_SEARCH_HOURS * 60 * 60 * 1000)),
+                    sharedSearchDurationHours: KILL_SCANNER_SEARCH_HOURS,
                     country:         rowCountry,
                     pendingSearch:   false
                 });
@@ -8047,6 +9114,12 @@
                 if (players[idx].status !== KILL_STATUS.DEAD) {
                     const wasPendingSearch = !!players[idx].pendingSearch || !!players[idx].expectedFoundAt;
                     players[idx].searchExpiresAt = expiresAt;
+                    players[idx].sharedSearchFullExpiresAt = expiresAt;
+                    if (!players[idx].sharedSearchStartedAt) {
+                        const inferredDurationHours = Number(players[idx].sharedSearchDurationHours) || KILL_SCANNER_SEARCH_HOURS;
+                        players[idx].sharedSearchStartedAt = Math.max(0, expiresAt - (inferredDurationHours * 60 * 60 * 1000));
+                    }
+                    if (!players[idx].sharedSearchDurationHours) players[idx].sharedSearchDurationHours = KILL_SCANNER_SEARCH_HOURS;
                     players[idx].status          = KILL_STATUS.ALIVE;
                     players[idx].pendingSearch   = false;
                     if (rowCountry) players[idx].country = rowCountry;
@@ -8067,10 +9140,11 @@
             }
         }
 
-        if (updated > 0 || added > 0) {
+        if (updated > 0 || added > 0 || pendingNames.size > 0) {
             saveKillPlayers(players);
             if (added > 0) addLiveLog(`Kill scanner: synced ${added} player(s) from Players found section`);
             renderKillList(); // Always refresh — country data may have changed
+            scheduleKillCoordinationSync(750);
         }
 
         // Check if any bodyguard players are now alive (found) — trigger bg_shoot
@@ -8229,6 +9303,7 @@
             if (!foundNames.has(nameLower) && !pendingNames.has(nameLower)) {
                 p.status = KILL_STATUS.UNKNOWN;
                 p.lastChecked = 0;
+                p.profileInvalidatedAt = now();
                 delete p.searchExpiresAt;
                 delete p.expectedFoundAt;
                 resetCount++;
@@ -8339,9 +9414,9 @@
         // Only go directly to kill page if new unknown players were found.
         // If no new unknowns, return to normal script — the 1hr failsafe and
         // 3hr alive window will activate the loop via init() when due.
-        if (state.killSearchEnabled && added > 0) {
+        if (state.killSearchEnabled && added > 0 && getNextKillTarget()) {
             state.killSearchLoopActive = true;
-            addLiveLog('Kill scanner: new unknown players found — going directly to kill page');
+            addLiveLog('Kill scanner: new rank-eligible players found — going directly to kill page');
             gotoPage('kill');
             return;
         }
@@ -8478,6 +9553,7 @@
                 if (nowSearching) {
                     killSearchResultHandledThisLoad = true;
                     updateKillPlayerStatus(current, KILL_STATUS.ALIVE);
+                    await recordKillCoordinationOutcome(current, 'alive', state.killCurrentSearchMode);
                     addLiveLog(`Kill scanner: ${current} — search confirmed (post-CTC)`);
                     state.killCurrentSearch = '';
                     clearKillSearchSubmitTracking();
@@ -8485,8 +9561,9 @@
                 } else if (nowFound) {
                     // syncKillExpiryFromPage() already read the accurate Players Found
                     // timer on this page. Just clear the submit guard; do not overwrite
-                    // it with the 24h placeholder from updateKillPlayerStatus().
+                    // it with the effective-timer placeholder from updateKillPlayerStatus().
                     killSearchResultHandledThisLoad = true;
+                    await recordKillCoordinationOutcome(current, 'alive', state.killCurrentSearchMode);
                     addLiveLog(`Kill scanner: ${current} — found confirmed (post-CTC)`);
                     state.killCurrentSearch = '';
                     clearKillSearchSubmitTracking();
@@ -8508,6 +9585,7 @@
                 if (hasKillNonexistentMessage()) {
                     killSearchResultHandledThisLoad = true;
                     const suppressionShared = await publishKillSuppressionNow(current);
+                    await recordKillCoordinationOutcome(current, 'nonexistent', state.killCurrentSearchMode);
                     addLiveLog(suppressionShared
                         ? `Kill scanner: ${current} does not exist — shared suppression added and player removed`
                         : `Kill scanner: ${current} does not exist — removed locally; shared suppression queued for retry`);
@@ -8522,6 +9600,7 @@
                     const deadPlayer = allPlayers.find(p => p.name.toLowerCase() === current.toLowerCase());
                     const bgForName = deadPlayer?.bgFor || null;
                     updateKillPlayerStatus(current, KILL_STATUS.DEAD);
+                    await recordKillCoordinationOutcome(current, 'dead', state.killCurrentSearchMode);
                     state.killCurrentSearch = '';
                     clearKillSearchSubmitTracking();
                     renderKillList();
@@ -8551,6 +9630,7 @@
                 } else if (hasKillUncillableMessage()) {
                     killSearchResultHandledThisLoad = true;
                     updateKillPlayerStatus(current, KILL_STATUS.UNKILLABLE);
+                    await recordKillCoordinationOutcome(current, 'unkillable', state.killCurrentSearchMode);
                     addLiveLog(`Kill scanner: ${current} cannot be killed — marked unkillable`);
                     state.killCurrentSearch = '';
                     clearKillSearchSubmitTracking();
@@ -8558,6 +9638,7 @@
                 } else if (hasKillSelfSearchMessage()) {
                     killSearchResultHandledThisLoad = true;
                     updateKillPlayerStatus(current, KILL_STATUS.UNKILLABLE);
+                    await recordKillCoordinationOutcome(current, 'unkillable', state.killCurrentSearchMode);
                     addLiveLog(`Kill scanner: ${current} is you — marked unkillable, will never search again`);
                     state.killCurrentSearch = '';
                     clearKillSearchSubmitTracking();
@@ -8565,6 +9646,7 @@
                 } else if (hasKillProtectedMessage()) {
                     killSearchResultHandledThisLoad = true;
                     updateKillPlayerStatus(current, KILL_STATUS.PROTECTED);
+                    await recordKillCoordinationOutcome(current, 'protected', state.killCurrentSearchMode);
                     addLiveLog(`Kill scanner: ${current} is protected`);
                     state.killCurrentSearch = '';
                     clearKillSearchSubmitTracking();
@@ -8572,6 +9654,7 @@
                 } else if (hasKillSearchStartedMessage()) {
                     killSearchResultHandledThisLoad = true;
                     updateKillPlayerStatus(current, KILL_STATUS.ALIVE);
+                    await recordKillCoordinationOutcome(current, 'alive', state.killCurrentSearchMode);
                     addLiveLog(`Kill scanner: ${current} — search started`);
                     state.killCurrentSearch = '';
                     clearKillSearchSubmitTracking();
@@ -8695,13 +9778,24 @@
         }
 
         freshUsernameInput.value = target.name;
-        if (freshHoursInput) freshHoursInput.value = String(KILL_SCANNER_SEARCH_HOURS);
+
+        const plannedHandover = !forceKillSearchTargetName && !(target.isBg && target.bgFor) && isKillPlannedHandoverTargetForMe(target, now());
+        const searchMode = (forceKillSearchTargetName || (target.isBg && target.bgFor))
+            ? 'forced'
+            : (plannedHandover ? 'handover' : 'normal');
+        const requestedHours = searchMode === 'forced' ? KILL_FORCED_SEARCH_HOURS : KILL_ROUTINE_SEARCH_REQUEST_HOURS;
+        if (freshHoursInput) freshHoursInput.value = String(requestedHours);
+        target.sharedSearchDurationHours = searchMode === 'forced' ? KILL_FORCED_SEARCH_HOURS : KILL_SCANNER_SEARCH_HOURS;
+        saveKillPlayers(getKillPlayers());
 
         state.killCurrentSearch = target.name;
+        state.killCurrentSearchMode = searchMode;
         state.killSearchSubmitName = target.name;
         state.killSearchSubmitAt = now();
         state.killSearchWaitLogAt = 0;
-        addLiveLog(`Kill scanner: searching ${target.name} (status: ${target.status})`);
+        const targetRank = getKillPlayerRankEligibility(target);
+        const ownershipNote = plannedHandover ? `, handover ${target.sharedCurrentOwner}→${getKillSharedSyncPlayerId()}` : '';
+        addLiveLog(`Kill scanner: searching ${target.name} for ${requestedHours}h (${searchMode === 'forced' ? '24h forced' : '8h effective'}, status: ${target.status}, rank: ${targetRank.rankName || 'unknown'}${ownershipNote})`);
 
         humanClickForPageLoad(freshSearchBtn, `kill-search-${target.name}`);
         // Page reloads — result handled on next load
@@ -8755,6 +9849,15 @@
             }
 
             for (const p of group.players) {
+                const rankState = getKillPlayerRankEligibility(p);
+                const rankLabel = rankState.rankName || (p.profileExists === false ? 'No profile' : 'Awaiting rank');
+                const rankAge = rankState.checkedAt ? formatTimeSince(rankState.checkedAt) : 'never';
+                const assignmentState = getKillPlayerAssignmentEligibility(p);
+                const assignmentLabel = getKillPlayerAssignmentDisplayLabel(p);
+                const rankColour = rankState.eligible && (assignmentState.eligible || isKillPlannedHandoverTargetForMe(p)) ? '#86b786' : (rankState.rankName ? '#777' : '#666');
+                const rankBadge = `<span style="font-size:9px;color:${rankColour};"> · ${escapeHtml(rankLabel)}${rankState.rankName && !rankState.fresh ? ' (stale)' : ''} · ${escapeHtml(assignmentLabel)}</span>`;
+                const rankTooltip = `${p.name} | Rank: ${rankLabel} | Search ownership: ${assignmentLabel} | Profile checked: ${rankAge} | ${rankState.reason}; ${assignmentState.reason}`;
+
                 // Time meta
                 let meta = '';
                 if (p.status === KILL_STATUS.ALIVE && p.searchExpiresAt) {
@@ -8802,7 +9905,7 @@
 
                 if (canBgCheck) {
                     html += `<tr>
-                        <td style="font-size:11px;color:${group.colour};padding:1px 4px 1px 0 !important;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;width:auto !important;" title="${escapeHtml(p.name)}">${escapeHtml(p.name)}</td>
+                        <td style="font-size:11px;color:${group.colour};padding:1px 4px 1px 0 !important;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;width:auto !important;" title="${escapeHtml(rankTooltip)}">${escapeHtml(p.name)}${rankBadge}</td>
                         <td style="font-size:9px;color:#888;padding:1px 4px 1px 0 !important;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;width:62px !important;min-width:62px !important;max-width:62px !important;">${escapeHtml(country)}</td>
                         <td style="font-size:9px;color:#ccc;text-align:right;padding:1px 4px 1px 0 !important;white-space:nowrap;width:36px !important;min-width:36px !important;max-width:36px !important;">${escapeHtml(meta)}${bgDue}</td>
                         <td style="text-align:center;padding:1px 2px !important;width:22px !important;min-width:22px !important;max-width:22px !important;"><div class="ug-kcb ug-kill-shoot-cb ${shootChecked ? 'checked' : ''}" data-name="${escapeHtml(p.name)}"></div></td>
@@ -8811,14 +9914,14 @@
                     </tr>`;
                 } else if (status === KILL_STATUS.UNKILLABLE) {
                     html += `<tr>
-                        <td style="font-size:11px;color:${group.colour};padding:1px 0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:0;" title="${escapeHtml(p.name)}">${escapeHtml(p.name)}</td>
+                        <td style="font-size:11px;color:${group.colour};padding:1px 0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:0;" title="${escapeHtml(rankTooltip)}">${escapeHtml(p.name)}${rankBadge}</td>
                         <td style="font-size:9px;color:#888;padding:1px 4px 1px 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(country)}</td>
                         <td style="font-size:9px;color:#ccc;text-align:right;padding:1px 4px 1px 0;white-space:nowrap;">${escapeHtml(meta)}</td>
                         <td style="text-align:center;padding:1px 0;"><span class="ug-kill-remove" data-name="${escapeHtml(p.name)}" title="Reset to unknown — will be re-searched" style="cursor:pointer;color:#f88;font-size:11px;line-height:1;">✕</span></td>
                     </tr>`;
                 } else {
                     html += `<tr>
-                        <td style="font-size:11px;color:${group.colour};padding:1px 0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:0;" title="${escapeHtml(p.name)}">${escapeHtml(p.name)}</td>
+                        <td style="font-size:11px;color:${group.colour};padding:1px 0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:0;" title="${escapeHtml(rankTooltip)}">${escapeHtml(p.name)}${rankBadge}</td>
                         <td style="font-size:9px;color:#888;padding:1px 4px 1px 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(country)}</td>
                         <td style="font-size:9px;color:#ccc;text-align:right;padding:1px 0;white-space:nowrap;">${escapeHtml(meta)}</td>
                     </tr>`;
@@ -12345,17 +13448,19 @@ async function doQTPerkRedeem() {
             return true;
         }
 
-        await wait(SAFETY.repairAfterLoadMs);
-
         const freshSelectAll = getCarsSelectAllLink();
         if (!freshSelectAll) return false;
 
-        humanClick(freshSelectAll);
-        addLiveLog('Cars: Select All clicked');
+        // The game's Select All control is a javascript: link. A synthetic click can
+        // return before the link's default javascript action has toggled the checkboxes,
+        // so checking selection immediately can falsely report zero selected cars and
+        // abort the repair cycle. Select the same checkboxes directly and synchronously
+        // instead; this is exactly the form state Repair needs and adds no timing delay.
+        const freshCheckboxes = getCarsCheckboxes();
+        for (const cb of freshCheckboxes) cb.checked = true;
+        addLiveLog('Cars: Select All applied');
 
-        await wait(SAFETY.repairAfterSelectAllMs);
-
-        const checkedNow  = getCarsCheckboxes().filter(cb => cb.checked);
+        const checkedNow  = freshCheckboxes.filter(cb => cb.checked);
         const freshRepair = getCarsRepairButton();
         if (!freshRepair || !checkedNow.length) {
             addLiveLog('Repair cycle failed — no cars selected after Select All');
@@ -12373,7 +13478,6 @@ async function doQTPerkRedeem() {
 
         state.meltsSinceRepair = 0;
 
-        await wait(SAFETY.repairAfterSubmitMs);
         return true;
     }
 
@@ -12793,7 +13897,7 @@ async function doQTPerkRedeem() {
 
         if (addedNames.length) {
             saveKillPlayers(players);
-            if (state.killSearchEnabled) state.killSearchLoopActive = true;
+            if (state.killSearchEnabled && getNextKillTarget()) state.killSearchLoopActive = true;
             if (document.querySelector('#ug-bot-kill-list')) renderKillList();
             for (const name of addedNames) {
                 addLiveLog(`Jail Monitor: new player found — ${name}`);
@@ -13688,6 +14792,7 @@ async function doQTPerkRedeem() {
         GM_setValue('killLoopActive', false);
         GM_setValue('killSearchIndex', 0);
         GM_setValue('killCurrentSearch', '');
+        GM_setValue('killCurrentSearchMode', '');
         GM_setValue('killLastOnlineScan', 0);
         setSetting('killSearchSubmitAt', 0);
         setSetting('killSearchSubmitName', '');
@@ -13717,14 +14822,9 @@ async function doQTPerkRedeem() {
             return np;
         });
         setSetting('killPlayers', _cleared);
-        // Clear GB disable flag and restore all crimes so new account starts fresh
+        // Clear only the one-shot Global Boss disable guard for the new account.
+        // User-configured action toggles and Background Crimes must survive death unchanged.
         setSetting('gbDisableFired', false);
-        setSetting('bgCrimeEnabled', true);
-        if (bgCrimeEnabledInput) bgCrimeEnabledInput.checked = true;
-        const _allCrimeIds = ['gang', '1', '2', 'drug', '3', '4', '5', '6', '7', 'gta', 'melt'];
-        const _cur = getSetting('enabledActions', _allCrimeIds);
-        const _restored = [...new Set([..._cur, ..._allCrimeIds])];
-        setSetting('enabledActions', _restored);
     }
 
     async function handleLoginPage() {
@@ -13920,12 +15020,9 @@ async function doQTPerkRedeem() {
             GM_setValue('killLoopActive', false);
             GM_setValue('killSearchIndex', 0);
             GM_setValue('killCurrentSearch', '');
-            // Re-enable bullet factory after death unless BG Spam is active
-            // (BG Spam requires staying in one country so bullet factory is incompatible)
-            if (!state.killBgSpamEnabled || !state.killBgSpamTarget) {
-                GM_setValue('bulletFactoryEnabled', true);
-                addLiveLog('Post-death: bullet factory re-enabled');
-            }
+            GM_setValue('killCurrentSearchMode', '');
+            // Preserve the user's Bullet Factory setting across death.
+            // Death/account recreation must not force persistent feature toggles on.
             if (state.accRetrieve) {
                 GM_setValue('accPendingRetrieve', true);
             }
@@ -14879,6 +15976,7 @@ async function doQTPerkRedeem() {
             if (hasKillProtectedMessage()) {
                 killSearchResultHandledThisLoad = true;
                 updateKillPlayerStatus(cur, KILL_STATUS.PROTECTED);
+                await recordKillCoordinationOutcome(cur, 'protected', state.killCurrentSearchMode);
                 addLiveLog(`Kill scanner: ${cur} is protected`);
                 state.killCurrentSearch = '';
                 clearKillSearchSubmitTracking();
@@ -14889,6 +15987,7 @@ async function doQTPerkRedeem() {
                 const _deadEntry = _deadPlayers.find(p => p.name.toLowerCase() === cur.toLowerCase());
                 const _deadBgFor = _deadEntry?.bgFor || null;
                 updateKillPlayerStatus(cur, KILL_STATUS.DEAD);
+                await recordKillCoordinationOutcome(cur, 'dead', state.killCurrentSearchMode);
                 state.killCurrentSearch = '';
                 clearKillSearchSubmitTracking();
                 renderKillList();
@@ -14899,6 +15998,7 @@ async function doQTPerkRedeem() {
             } else if (hasKillSearchStartedMessage()) {
                 killSearchResultHandledThisLoad = true;
                 updateKillPlayerStatus(cur, KILL_STATUS.ALIVE);
+                await recordKillCoordinationOutcome(cur, 'alive', state.killCurrentSearchMode);
                 addLiveLog(`Kill scanner: ${cur} — search started`);
                 state.killCurrentSearch = '';
                 clearKillSearchSubmitTracking();
@@ -14910,6 +16010,7 @@ async function doQTPerkRedeem() {
                 if (nowSearching) {
                     killSearchResultHandledThisLoad = true;
                     updateKillPlayerStatus(cur, KILL_STATUS.ALIVE);
+                    await recordKillCoordinationOutcome(cur, 'alive', state.killCurrentSearchMode);
                     addLiveLog(`Kill scanner: ${cur} — search confirmed (post-CTC)`);
                     state.killCurrentSearch = '';
                     clearKillSearchSubmitTracking();
@@ -15429,6 +16530,7 @@ async function doQTPerkRedeem() {
                                     usernameInput.value = bgName;
                                     if (hoursInput) hoursInput.value = '24';
                                     state.killCurrentSearch = bgName;
+                                    state.killCurrentSearchMode = 'forced';
                                     state.pendingKillAction = null;
                                     state.killLoopActive    = false;
                                     // Non-BG-Farm targets can wait for the BG search to resolve.
@@ -15536,6 +16638,7 @@ async function doQTPerkRedeem() {
                                             usernameInput.value = bgName;
                                             if (hoursInput) hoursInput.value = '24';
                                             state.killCurrentSearch = bgName;
+                                            state.killCurrentSearchMode = 'forced';
                                             state.pendingKillAction = null;
                                             state.killLoopActive    = false;
                                             state.killBgWaitUntil   = isPlayerBgFarmEnabled(target) ? 0 : now() + (3 * 60 * 60 * 1000);
@@ -17464,24 +18567,8 @@ async function doQTPerkRedeem() {
 
         // Auto re-activate kill search loop if due targets exist but loop was deactivated
         // Runs regardless of killLoopActive — search and kill loops are independent
-        if (state.killSearchEnabled && !state.killSearchLoopActive) {
-            const nowMs = now();
-            const players = getKillPlayers();
-            const hasUnknowns = players.some(p => p.status === KILL_STATUS.UNKNOWN);
-            const RESCAN_BUFFER_MS = 3 * 60 * 60 * 1000;
-            const hasExpiringAlives = players.some(p => {
-                if (p.status !== KILL_STATUS.ALIVE) return false;
-                if (p.searchExpiresAt) return (p.searchExpiresAt - nowMs) < RESCAN_BUFFER_MS;
-                return (nowMs - p.lastChecked) >= KILL_SCANNER_RESCAN_MS;
-            });
-            const protectedIntervalMs = state.killProtectedRecheckEnabled ? state.killProtectedRecheckMins * 60 * 1000 : KILL_SCANNER_PROTECTED_RESCAN_MS;
-            const hasProtectedDue = players.some(p =>
-                p.status === KILL_STATUS.PROTECTED &&
-                (nowMs - p.lastChecked) >= protectedIntervalMs
-            );
-            if (hasUnknowns || hasExpiringAlives || hasProtectedDue) {
-                state.killSearchLoopActive = true;
-            }
+        if (state.killSearchEnabled && !state.killSearchLoopActive && getNextKillTarget()) {
+            state.killSearchLoopActive = true;
         }
 
         // Re-activate kill loop if there are kill-only players already found (in Players Found)
@@ -18537,13 +19624,9 @@ async function doQTPerkRedeem() {
             if (!state.enabled || !state.killProtectedRecheckEnabled || !state.killSearchEnabled) return;
             if (shouldDeferKillSearchForPassiveBulletWait()) return;
             if (state.killSearchLoopActive || state.killLoopActive) return;
-            const recheckMs = state.killProtectedRecheckMins * 60 * 1000;
             const nowMs = now();
             const players = getKillPlayers();
-            const hasProtectedDue = players.some(p =>
-                p.status === KILL_STATUS.PROTECTED &&
-                (nowMs - (p.lastChecked || 0)) >= recheckMs
-            );
+            const hasProtectedDue = players.some(p => isKillProtectedRecheckDue(p, nowMs));
             if (hasProtectedDue) {
                 const noTargetUntil = Number(getSetting('killSearchNoTargetUntil', 0));
                 if (Date.now() >= noTargetUntil) {
@@ -18551,7 +19634,7 @@ async function doQTPerkRedeem() {
                     const gtaReady  = isGTAEnabled() && !isGTALocked() && isInternalGTAReady();
                     const meltReady = isMeltUsable() && isInternalMeltReady();
                     if (!gtaReady && !meltReady) {
-                        addLiveLog('Kill scanner: protected recheck due — activating search');
+                        addLiveLog('Kill scanner: protected player ranked up — activating re-search');
                         state.killSearchLoopActive = true;
                     }
                 }
@@ -18695,6 +19778,7 @@ async function doQTPerkRedeem() {
 
 
     function saveSettings() {
+        const previousKillBgCheckEnabled = state.killBgCheckEnabled;
         const checked            = [...document.querySelectorAll('.ug-action-cb:checked')].map(cb => cb.dataset.id);
         const thresholdValue     = Math.max(0, parseFormattedNumber(depositThresholdEl ? depositThresholdEl.value : '0'));
         const repairEveryValue   = Math.max(1, Number(repairEveryEl ? repairEveryEl.value : DEFAULTS.repairEveryMelts) || DEFAULTS.repairEveryMelts);
@@ -18895,6 +19979,9 @@ async function doQTPerkRedeem() {
         state.killScanOnlineEnabled  = killScanOnlineInput   ? killScanOnlineInput.checked   : state.killScanOnlineEnabled;
         state.killScanOnlineInterval = killScanIntervalEl    ? Number(killScanIntervalEl.value) : state.killScanOnlineInterval;
         state.killSearchEnabled      = killSearchInput       ? killSearchInput.checked       : state.killSearchEnabled;
+        state.killSearchMinRank      = killSearchRankEl      ? killSearchRankEl.value          : state.killSearchMinRank;
+        state.killSearchAssignment   = killSearchAssignmentEl ? killSearchAssignmentEl.value    : state.killSearchAssignment;
+        scheduleKillCoordinationSync(200);
         state.killPlayerFinderEnabled = killPlayerFinderInput ? killPlayerFinderInput.checked : state.killPlayerFinderEnabled;
         state.killPlayerFinderMode    = killPlayerFinderModeEl ? killPlayerFinderModeEl.value : state.killPlayerFinderMode;
         state.killPlayerFinderDelayMs = killPlayerFinderDelayEl ? Number(String(killPlayerFinderDelayEl.value).replace(/[^0-9]/g, '')) : state.killPlayerFinderDelayMs;
@@ -18930,31 +20017,30 @@ async function doQTPerkRedeem() {
         }
         state.killPenaltyThreshold = newThreshold;
 
-        // Activate kill loop if BG check is enabled and there are ticked players.
-        // Also force scan and search on — the kill loop requires both to function.
+        // When BG/Kill Loop is newly enabled, turn routine scan/search on as
+        // convenient defaults. They remain independent controls afterwards, so
+        // the user may untick either one while leaving BG/Kill Loop enabled.
+        const killBgJustEnabled = state.killBgCheckEnabled && !previousKillBgCheckEnabled;
         if (state.killBgCheckEnabled) {
             const hasBgTargets = ((state.killBgCheckPlayers || []).length > 0 || (state.killBgFarmPlayers || []).length > 0) &&
                 getKillPlayers().some(p =>
                     (isPlayerBgCheckEnabled(p.name) || isPlayerBgFarmEnabled(p.name)) &&
                     p.status === KILL_STATUS.ALIVE &&
-                    !p.bodyguard // skip if BG currently being searched
+                    !p.bodyguard
                 );
-            // Clear killBgWaitUntil if a bg_shoot is already queued — BG was found
             if (state.pendingKillAction?.stage === 'bg_shoot') state.killBgWaitUntil = 0;
-            // Don't re-enable kill loop if we're explicitly waiting for a BG search to complete
             const waitingForBg = state.killBgWaitUntil > Date.now();
             if (hasBgTargets && !waitingForBg && !state.killBgSpamPaused && !state.killLoopActive) {
-                // Only re-activate if there's actually something to do right now
-                // (don't set killLoopActive=true without a pendingKillAction — causes stuck state)
+                // The scheduler starts the precise pending action when one is due.
             }
-            // Force scan online and search players on
-            state.killScanOnlineEnabled = true;
-            state.killSearchEnabled     = true;
-            // Also force the search loop active if not already
-            state.killSearchLoopActive  = true;
-            // Update UI checkboxes to reflect forced state
-            if (killScanOnlineInput)  killScanOnlineInput.checked = true;
-            if (killSearchInput)      killSearchInput.checked     = true;
+
+            if (killBgJustEnabled) {
+                state.killScanOnlineEnabled = true;
+                state.killSearchEnabled = true;
+                state.killSearchLoopActive = true;
+                if (killScanOnlineInput) killScanOnlineInput.checked = true;
+                if (killSearchInput) killSearchInput.checked = true;
+            }
         } else {
             state.killLoopActive = false;
         }
@@ -18982,21 +20068,7 @@ async function doQTPerkRedeem() {
             // Loop was already running — keep it active, don't second-guess it
             state.killSearchLoopActive = true;
         } else {
-            // Loop was inactive — check if there are targets to start it
-            const nowMs = now();
-            const players = getKillPlayers();
-            const hasUnknowns = players.some(p => p.status === KILL_STATUS.UNKNOWN);
-            const RESCAN_BUFFER_MS = 3 * 60 * 60 * 1000;
-            const hasExpiringAlives = players.some(p => {
-                if (p.status !== KILL_STATUS.ALIVE) return false;
-                if (p.searchExpiresAt) return (p.searchExpiresAt - nowMs) < RESCAN_BUFFER_MS;
-                return (nowMs - p.lastChecked) >= KILL_SCANNER_RESCAN_MS;
-            });
-            const hasProtectedDue = players.some(p =>
-                p.status === KILL_STATUS.PROTECTED &&
-                (nowMs - p.lastChecked) >= (state.killProtectedRecheckEnabled ? state.killProtectedRecheckMins * 60 * 1000 : KILL_SCANNER_PROTECTED_RESCAN_MS)
-            );
-            state.killSearchLoopActive = hasUnknowns || hasExpiringAlives || hasProtectedDue;
+            state.killSearchLoopActive = !!getNextKillTarget();
         }
 
         if (depositThresholdEl)      depositThresholdEl.value      = formatNumberWithCommas(thresholdValue);
@@ -19435,7 +20507,10 @@ async function doQTPerkRedeem() {
                                 <option value="5">5 mins</option>
                             </select></td></tr>
 
-                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-kill-search" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">Search players</td></tr>
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-kill-search" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">Search players at rank</td><td colspan="2" style="vertical-align:middle;white-space:nowrap;padding:3px 0;width:1px;"><select id="ug-bot-kill-search-rank" data-role="none" class="ug-compact-select"><option value="Civilian">Civilian</option><option value="Vandal">Vandal</option><option value="Hustler">Hustler</option><option value="Riff-Raff">Riff-Raff</option><option value="Ruffian">Ruffian</option><option value="Homeboy">Homeboy</option><option value="Homie">Homie</option><option value="Criminal">Criminal</option><option value="Hitman">Hitman</option><option value="Trusted Hitman">Trusted Hitman</option><option value="Assassin">Assassin</option><option value="Trusted Assassin">Trusted Assassin</option><option value="Gangster">Gangster</option><option value="Original Gangster">Original Gangster</option><option value="Boss">Boss</option><option value="Regional Boss">Regional Boss</option><option value="Global Boss">Global Boss</option><option value="Don">Don</option><option value="Regional Don">Regional Don</option><option value="Global Don">Global Don</option><option value="Godfather">Godfather</option><option value="Regional Godfather">Regional Godfather</option><option value="Global Godfather">Global Godfather</option><option value="Underworld Gangster">Underworld Gangster</option></select></td></tr>
+                        <tr><td></td><td colspan="3" style="font-size:10px;color:#666;padding:0 0 2px 0;">Requires a fresh result from the logged-out Profile Worker</td></tr>
+                        <tr><td></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">Search ownership</td><td colspan="2" style="vertical-align:middle;white-space:nowrap;padding:3px 0;width:1px;"><select id="ug-bot-kill-search-assignment" data-role="none" class="ug-compact-select"><option value="coordinated">Automatic coordination</option></select></td></tr>
+                        <tr><td></td><td colspan="3" style="font-size:10px;color:#666;padding:0 0 4px 0;">${escapeHtml(getKillSharedSyncPlayerId())} · automatic failover · 8h routine searches · controlled handovers</td></tr>
 
                         <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-kill-player-finder" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">Player Searcher</td><td colspan="2" style="vertical-align:middle;white-space:nowrap;padding:3px 0;width:1px;"><select id="ug-bot-kill-player-finder-mode" data-role="none" class="ug-compact-select"><option value="first">1st half</option><option value="second">2nd half</option><option value="all">All</option></select></td></tr>
                         <tr><td></td><td colspan="3" style="color:#666;font-size:10px;padding:1px 0 1px 0;vertical-align:middle;white-space:nowrap;"><span style="margin-right:3px;">Delay</span><input id="ug-bot-kill-player-finder-delay" type="text" inputmode="numeric" class="ug-compact-input-sm" style="width:42px!important;max-width:42px!important;" placeholder="200" /><span style="margin:0 8px 0 3px;">ms</span><span style="margin-right:3px;">Every</span><input id="ug-bot-kill-player-finder-every" type="text" inputmode="numeric" class="ug-compact-input-sm" style="width:42px!important;max-width:42px!important;" placeholder="360" /><span style="margin-left:3px;">min</span></td></tr>
@@ -19443,7 +20518,7 @@ async function doQTPerkRedeem() {
 
                         <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-kill-jail-monitor" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">Jail Monitor</td><td colspan="2" style="vertical-align:middle;white-space:nowrap;padding:3px 0;width:1px;"><input id="ug-bot-kill-jail-monitor-poll-ms" type="text" inputmode="numeric" class="ug-compact-input-sm" style="width:52px!important;max-width:52px!important;" placeholder="2000" /><span style="color:#666;font-size:10px;padding-left:3px;">ms</span></td></tr>
 
-                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-kill-protected-recheck" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">Search protected</td><td style="vertical-align:middle;white-space:nowrap;padding:3px 0;width:1px;"><select id="ug-bot-kill-protected-recheck-mins" data-role="none" class="ug-compact-select">
+                        <tr><td style="width:22px;min-width:22px;padding:3px 4px 3px 0;vertical-align:middle;"><input id="ug-bot-kill-protected-recheck" type="checkbox" style="width:13px;height:13px;margin:0;padding:0;cursor:pointer;display:block;" /></td><td style="color:#ddd;font-size:12px;padding:3px 6px 3px 0;vertical-align:middle;text-align:left;">Protected rank-up re-search</td><td style="vertical-align:middle;white-space:nowrap;padding:3px 0;width:1px;"><select id="ug-bot-kill-protected-recheck-mins" data-role="none" class="ug-compact-select">
                                 <option value="1">1 min</option>
                                 <option value="2">2 mins</option>
                                 <option value="3">3 mins</option>
@@ -20499,6 +21574,8 @@ async function doQTPerkRedeem() {
         killScanOnlineInput      = document.querySelector('#ug-bot-kill-scan-online');
         killScanIntervalEl       = document.querySelector('#ug-bot-kill-scan-interval');
         killSearchInput          = document.querySelector('#ug-bot-kill-search');
+        killSearchRankEl         = document.querySelector('#ug-bot-kill-search-rank');
+        killSearchAssignmentEl   = document.querySelector('#ug-bot-kill-search-assignment');
         killPlayerFinderInput    = document.querySelector('#ug-bot-kill-player-finder');
         killPlayerFinderModeEl   = document.querySelector('#ug-bot-kill-player-finder-mode');
         killPlayerFinderDelayEl  = document.querySelector('#ug-bot-kill-player-finder-delay');
@@ -20540,16 +21617,22 @@ async function doQTPerkRedeem() {
         }
         if (killBgCheckInput) {
             killBgCheckInput.addEventListener('change', () => {
-                const on = killBgCheckInput.checked;
+                // Auto-enable routine scan/search only at the moment BG/Kill Loop
+                // is switched on. Do not lock the controls; they can be unticked
+                // independently afterwards.
+                if (killBgCheckInput.checked) {
+                    if (killScanOnlineInput) killScanOnlineInput.checked = true;
+                    if (killSearchInput) killSearchInput.checked = true;
+                }
                 if (killScanOnlineInput) {
-                    killScanOnlineInput.disabled = on;
+                    killScanOnlineInput.disabled = false;
                     const lbl = killScanOnlineInput.closest('label');
-                    if (lbl) { lbl.style.opacity = on ? '0.4' : ''; lbl.style.cursor = on ? 'default' : ''; }
+                    if (lbl) { lbl.style.opacity = ''; lbl.style.cursor = ''; }
                 }
                 if (killSearchInput) {
-                    killSearchInput.disabled = on;
+                    killSearchInput.disabled = false;
                     const lbl = killSearchInput.closest('label');
-                    if (lbl) { lbl.style.opacity = on ? '0.4' : ''; lbl.style.cursor = on ? 'default' : ''; }
+                    if (lbl) { lbl.style.opacity = ''; lbl.style.cursor = ''; }
                 }
             });
         }
@@ -20698,6 +21781,8 @@ async function doQTPerkRedeem() {
         if (bgCrimeEnabledInput)        bgCrimeEnabledInput.checked        = state.bgCrimeEnabled;
         if (killProtectedRecheckInput)  killProtectedRecheckInput.checked  = state.killProtectedRecheckEnabled;
         if (killProtectedRecheckMinsEl) killProtectedRecheckMinsEl.value   = String(state.killProtectedRecheckMins);
+        if (killSearchRankEl)           killSearchRankEl.value             = state.killSearchMinRank;
+        if (killSearchAssignmentEl)     killSearchAssignmentEl.value       = state.killSearchAssignment;
 
         // QT
         if (qtPollMinEl)                 qtPollMinEl.value                  = String(state.qtPollMin);
@@ -20852,31 +21937,28 @@ async function doQTPerkRedeem() {
             });
         }
 
-        // Grey out scan/search when BG loop is on.
-        // Must sync the checkbox first so its .checked reflects persisted state,
-        // then read it back — this way unticking immediately re-enables them
-        // AND the persisted on state greys them out on page load.
+        // BG/Kill Loop auto-enables scan/search when first switched on, but the
+        // controls remain editable on every subsequent page load.
         if (killBgCheckInput) killBgCheckInput.checked = state.killBgCheckEnabled;
         if (killBgSpamInput)      killBgSpamInput.checked         = state.killBgSpamEnabled;
         if (killBgSpamIntervalEl) killBgSpamIntervalEl.value      = String(state.killBgSpamIntervalSecs);
         updateBgSpamDropdown();
-        const bgLoopCurrentlyOn = killBgCheckInput ? killBgCheckInput.checked : state.killBgCheckEnabled;
 
         if (killScanOnlineInput) {
-            killScanOnlineInput.checked  = state.killScanOnlineEnabled;
-            killScanOnlineInput.disabled = bgLoopCurrentlyOn;
+            killScanOnlineInput.checked = state.killScanOnlineEnabled;
+            killScanOnlineInput.disabled = false;
             const scanLabel = killScanOnlineInput.closest('label');
-            if (scanLabel) scanLabel.style.opacity = bgLoopCurrentlyOn ? '0.4' : '';
-            if (scanLabel) scanLabel.style.cursor  = bgLoopCurrentlyOn ? 'default' : '';
+            if (scanLabel) { scanLabel.style.opacity = ''; scanLabel.style.cursor = ''; }
         }
-        if (killScanIntervalEl)   killScanIntervalEl.value    = String(state.killScanOnlineInterval);
+        if (killScanIntervalEl) killScanIntervalEl.value = String(state.killScanOnlineInterval);
         if (killSearchInput) {
-            killSearchInput.checked  = state.killSearchEnabled;
-            killSearchInput.disabled = bgLoopCurrentlyOn;
+            killSearchInput.checked = state.killSearchEnabled;
+            killSearchInput.disabled = false;
             const searchLabel = killSearchInput.closest('label');
-            if (searchLabel) searchLabel.style.opacity = bgLoopCurrentlyOn ? '0.4' : '';
-            if (searchLabel) searchLabel.style.cursor  = bgLoopCurrentlyOn ? 'default' : '';
+            if (searchLabel) { searchLabel.style.opacity = ''; searchLabel.style.cursor = ''; }
         }
+        if (killSearchRankEl) killSearchRankEl.value = state.killSearchMinRank;
+        if (killSearchAssignmentEl) killSearchAssignmentEl.value = state.killSearchAssignment;
         if (killPlayerFinderInput)      killPlayerFinderInput.checked = state.killPlayerFinderEnabled;
         if (killPlayerFinderModeEl)     killPlayerFinderModeEl.value = state.killPlayerFinderMode;
         if (killPlayerFinderDelayEl)    killPlayerFinderDelayEl.value = String(state.killPlayerFinderDelayMs);
@@ -20971,16 +22053,7 @@ async function doQTPerkRedeem() {
             if (state.enabled) {
                 setPaused('Stopped manually');
             } else {
-                // Designate this window as the bot window
-                activateBotWindowIdentity();
-                cancelCurrentRun();
-                state.enabled      = true;
-                state.pausedReason = '';
-                clearAllReloadState();
-                updatePanel();
-                syncKillPlayerFinderScheduler();
-                syncJailMonitorState();
-                startHeartbeat();
+                resumeBotAutomation('Started manually');
             }
         }
 
@@ -21412,7 +22485,7 @@ async function doQTPerkRedeem() {
                         saveKillPlayers(players);
                         renderKillList();
                         // Activate search loop to pick up the new unknowns
-                        if (state.killSearchEnabled) state.killSearchLoopActive = true;
+                        if (state.killSearchEnabled && getNextKillTarget()) state.killSearchLoopActive = true;
                         addLiveLog(`Kill scanner: imported ${added} player(s) — ${skipped} already in list`);
                     }
 
@@ -21506,7 +22579,7 @@ async function doQTPerkRedeem() {
                         setSetting('killSearchWaitLogAt', 0);
                         state.killSearchIndex = 0;
                         state.killCurrentSearch = '';
-                        state.killSearchLoopActive = true;
+                        state.killSearchLoopActive = !!getNextKillTarget();
                         addLiveLog('Kill scanner: cleared transient search markers for new account');
                         _reenabled.push(_labels[key]);
                     } else if (key === 'killProtectedRecheck' && !state.killProtectedRecheckEnabled) {
@@ -21704,7 +22777,7 @@ async function doQTPerkRedeem() {
                         const mins = Math.floor(msUntil / 60000);
                         const secs = Math.floor((msUntil % 60000) / 1000);
                         return mins > 0 ? mins + 'm ' + secs + 's' : secs + 's';
-                    })()} | Search: ${state.killSearchEnabled ? 'on' : 'off'} | Players: ${getKillPlayers().length}</div>
+                    })()} | Search: ${state.killSearchEnabled ? `on (${escapeHtml(state.killSearchMinRank)}+, ${escapeHtml(getKillSearchAssignmentLabel())})` : 'off'} | Players: ${getKillPlayers().length}</div>
                     ${state.killPenaltyThreshold > 0 ? `<div class="ug-status-line"><b>Kill penalty:</b> ${(() => {
                         const penalty = Number(getSetting('cachedKillPenalty', 1.0));
                         const penStr = penalty > 1.0 ? `${penalty.toFixed(2)}x` : 'none';
@@ -22036,21 +23109,7 @@ async function doQTPerkRedeem() {
         } else if (state.killSearchLoopActive) {
             // Was already running — keep it active
         } else {
-            const nowMs = now();
-            const players = getKillPlayers();
-            const hasUnknowns = players.some(p => p.status === KILL_STATUS.UNKNOWN);
-            const RESCAN_BUFFER_MS = 3 * 60 * 60 * 1000;
-            const hasExpiringAlives = players.some(p => {
-                if (p.status !== KILL_STATUS.ALIVE) return false;
-                if (p.searchExpiresAt) return (p.searchExpiresAt - nowMs) < RESCAN_BUFFER_MS;
-                return (nowMs - p.lastChecked) >= KILL_SCANNER_RESCAN_MS;
-            });
-            const protectedIntervalMs = state.killProtectedRecheckEnabled ? state.killProtectedRecheckMins * 60 * 1000 : KILL_SCANNER_PROTECTED_RESCAN_MS;
-            const hasProtectedDue = players.some(p =>
-                p.status === KILL_STATUS.PROTECTED &&
-                (nowMs - p.lastChecked) >= protectedIntervalMs
-            );
-            state.killSearchLoopActive = hasUnknowns || hasExpiringAlives || hasProtectedDue;
+            state.killSearchLoopActive = !!getNextKillTarget();
         }
 
         // Kill loop (BG check/shoot) activation — activates on page load if toggle is on,
@@ -22252,6 +23311,8 @@ async function doQTPerkRedeem() {
         killScanOnlineInput     = document.querySelector('#ug-bot-kill-scan-online');
         killScanIntervalEl      = document.querySelector('#ug-bot-kill-scan-interval');
         killSearchInput         = document.querySelector('#ug-bot-kill-search');
+        killSearchRankEl        = document.querySelector('#ug-bot-kill-search-rank');
+        killSearchAssignmentEl   = document.querySelector('#ug-bot-kill-search-assignment');
         killPlayerFinderInput   = document.querySelector('#ug-bot-kill-player-finder');
         killPlayerFinderModeEl  = document.querySelector('#ug-bot-kill-player-finder-mode');
         killPlayerFinderDelayEl = document.querySelector('#ug-bot-kill-player-finder-delay');
@@ -22408,7 +23469,7 @@ async function doQTPerkRedeem() {
                                     const secs = Math.floor((msUntil % 60000) / 1000);
                                     return mins > 0 ? mins + 'm ' + secs + 's' : secs + 's';
                                 })();
-                            el.innerHTML = `<b>Kill scan:</b> ${escapeHtml(killScanStatus)} | Search: ${state.killSearchEnabled ? 'on' : 'off'} | Players: ${getKillPlayers().length}`;
+                            el.innerHTML = `<b>Kill scan:</b> ${escapeHtml(killScanStatus)} | Search: ${state.killSearchEnabled ? `on (${escapeHtml(state.killSearchMinRank)}+, ${escapeHtml(getKillSearchAssignmentLabel())})` : 'off'} | Players: ${getKillPlayers().length}`;
                         }
                     });
                 }
@@ -22425,6 +23486,7 @@ async function doQTPerkRedeem() {
         CTC.attachObserver(handleCTCMessage);
 
         startKillSharedPlayerListSync();
+        startKillTelegramCommandSync();
         syncKillPlayerFinderScheduler();
 
         // Expose console-accessible helper functions on the real page window.
