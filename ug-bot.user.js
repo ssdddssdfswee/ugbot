@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Full UG Bot (player2)
 // @namespace    ug-bot
-// @version      3.0.62
+// @version      3.0.63
 // @description  Auto-runs crimes, GTA, melting, repair, missions, drug running with Swiss Bank management, live log, session stats, action checkboxes, jail handling, runtime tracking, melt pagination, repair cycles, automatic CTC solving, and point-spending features.
 // @match        *://www.underworldgangsters.com/*
 // @match        *://underworldgangsters.com/*
@@ -1357,7 +1357,7 @@
     // BOT CONFIG
     // =========================================================================
 
-    const SCRIPT_VERSION = '3.0.62';
+    const SCRIPT_VERSION = '3.0.63';
 
 
     // =========================================================================
@@ -1385,10 +1385,10 @@
         coordinationHeartbeatWarningMins: 10,
         coordinationOfflineMins: 30,
         coordinationReturnStableMins: 5,
-        handoverStartWindowMins: 210,
-        handoverMinimumStartMins: 195,
         sameOwnerRenewalMins: 165,
-        handoverFallbackMins: 20,
+        // A planned handover is authoritative. The outgoing owner only resumes
+        // renewal inside this final safety window if no replacement appeared.
+        handoverFallbackMins: 60,
         profileMaxAgeMins: 30,
         supabaseUrl: 'https://vphqofqlrjplbsthhfvv.supabase.co',
         supabaseKey: 'sb_publishable_LdG4Ud1lJyV6pzVgEOjyHA_OaxGT11o',
@@ -4075,7 +4075,6 @@
         const currentOwner = String(player.sharedCurrentOwner || '').toLowerCase();
         const nextOwner = String(player.sharedNextOwner || '').toLowerCase();
         const handoverState = String(player.sharedHandoverState || 'none').toLowerCase();
-        const reason = String(player.sharedHandoverReason || 'none').toLowerCase();
         if (!currentOwner || currentOwner === self || nextOwner !== self) return false;
         if (handoverState !== 'planned' && handoverState !== 'overlapping') return false;
         if (!isKillCoordinationBotAvailable(self, nowMs)) return false;
@@ -4086,16 +4085,9 @@
         const rank = getKillPlayerRankEligibility(player);
         if (!rank.eligible) return false;
 
-        // Failover and stale-heartbeat protection are already time-gated by the
-        // one-minute worker, so the incoming account should start immediately.
-        if (reason === 'failover' || reason === 'protective') return true;
-
-        const outgoingActive = getKillCoordinationActiveRow(player.name, currentOwner);
-        const outgoingExpiry = getKillCoordinationRowExpiryMs(outgoingActive) || Number(player.sharedCurrentSearchExpiresAt) || 0;
-        const remaining = outgoingExpiry - nowMs;
-        const startWindow = Math.max(195, Number(KILL_SHARED_SYNC.handoverStartWindowMins) || 210) * 60 * 1000;
-        const minimumStart = Math.max(180, Number(KILL_SHARED_SYNC.handoverMinimumStartMins) || 195) * 60 * 1000;
-        return remaining >= minimumStart && remaining <= startWindow;
+        // The logged-out worker is the handover authority. Once it assigns this
+        // account as next owner, accept the plan regardless of the outgoing timer.
+        return true;
     }
 
     function shouldSkipKillRenewalForHandover(player, nowMs = now()) {
@@ -4110,15 +4102,18 @@
         const incomingActive = getKillCoordinationActiveRow(player.name, nextOwner);
         if (incomingActive && getKillCoordinationRowExpiryMs(incomingActive) > nowMs) return true;
 
+        if (!isKillCoordinationBotAvailable(nextOwner, nowMs)) return false;
+
         const ownActive = getKillCoordinationActiveRow(player.name, self);
         const ownExpiry = getKillCoordinationRowExpiryMs(ownActive) || Number(player.searchExpiresAt) || 0;
         const remaining = ownExpiry - nowMs;
-        const normalRenewalWindow = Math.max(120, Number(KILL_SHARED_SYNC.sameOwnerRenewalMins) || 165) * 60 * 1000;
+        const safetyFallbackWindow = Math.max(15, Number(KILL_SHARED_SYNC.handoverFallbackMins) || 60) * 60 * 1000;
 
-        // A plan is only trusted before the ordinary ~2h45 renewal point. If the
-        // incoming account has not published a replacement by then, the current
-        // owner renews normally rather than risking a gap.
-        return remaining > normalRenewalWindow && isKillCoordinationBotAvailable(nextOwner, nowMs);
+        // Keep the outgoing search unrenewed while the replacement bot is online.
+        // Only reclaim it inside the final safety hour if the incoming search has
+        // still not appeared, preventing an accidental gap without defeating the
+        // ownership handover several hours early.
+        return remaining > safetyFallbackWindow;
     }
 
     function isRoutineKillSearchPlayerEligible(player) {
@@ -8580,9 +8575,19 @@
         const nowMs = now();
         const PENDING_SKIP_MS = 2.5 * 60 * 60 * 1000;
 
-        // Priority 1: controlled handovers are time-sensitive. The receiving
-        // owner begins a new three-hour search before the outgoing search expires.
-        const handover = players.find(p => isKillPlannedHandoverTargetForMe(p, nowMs));
+        // Priority 1: persistent handovers. Process the outgoing search with
+        // the least time remaining first; unlike earlier versions, a valid plan
+        // cannot expire merely because this bot missed a narrow timer window.
+        const handover = players
+            .filter(p => isKillPlannedHandoverTargetForMe(p, nowMs))
+            .sort((left, right) => {
+                const expiryFor = (player) => {
+                    const owner = String(player && player.sharedCurrentOwner || '').toLowerCase();
+                    const active = owner ? getKillCoordinationActiveRow(player.name, owner) : null;
+                    return getKillCoordinationRowExpiryMs(active) || Number(player.sharedCurrentSearchExpiresAt) || Number.MAX_SAFE_INTEGER;
+                };
+                return expiryFor(left) - expiryFor(right) || String(left.name || '').localeCompare(String(right.name || ''));
+            })[0] || null;
         if (handover) return handover;
 
         // Priority 2: protected players are re-searched only after a confirmed
