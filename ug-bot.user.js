@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Full UG Bot (player2)
 // @namespace    ug-bot
-// @version      3.0.63
+// @version      3.0.64
 // @description  Auto-runs crimes, GTA, melting, repair, missions, drug running with Swiss Bank management, live log, session stats, action checkboxes, jail handling, runtime tracking, melt pagination, repair cycles, automatic CTC solving, and point-spending features.
 // @match        *://www.underworldgangsters.com/*
 // @match        *://underworldgangsters.com/*
@@ -1357,7 +1357,7 @@
     // BOT CONFIG
     // =========================================================================
 
-    const SCRIPT_VERSION = '3.0.63';
+    const SCRIPT_VERSION = '3.0.64';
 
 
     // =========================================================================
@@ -8565,6 +8565,22 @@
         }
     }
 
+    // Returns the most urgent incoming controlled handover for this account.
+    // This helper is also used by the main scheduler so handovers can pre-empt
+    // ordinary crimes/GTA/melt work instead of being starved behind routine actions.
+    function getNextKillPlannedHandoverTarget(nowMs = now()) {
+        return getKillPlayers()
+            .filter(player => isKillPlannedHandoverTargetForMe(player, nowMs))
+            .sort((left, right) => {
+                const expiryFor = (player) => {
+                    const owner = String(player && player.sharedCurrentOwner || '').toLowerCase();
+                    const active = owner ? getKillCoordinationActiveRow(player.name, owner) : null;
+                    return getKillCoordinationRowExpiryMs(active) || Number(player.sharedCurrentSearchExpiresAt) || Number.MAX_SAFE_INTEGER;
+                };
+                return expiryFor(left) - expiryFor(right) || String(left.name || '').localeCompare(String(right.name || ''));
+            })[0] || null;
+    }
+
     // Returns the next routine Player List search target. Every normal search
     // requires a fresh rank result from the separate logged-out profile worker.
     // Forced BG/BG Farm/kill-chain searches bypass this function and remain unchanged.
@@ -8578,16 +8594,7 @@
         // Priority 1: persistent handovers. Process the outgoing search with
         // the least time remaining first; unlike earlier versions, a valid plan
         // cannot expire merely because this bot missed a narrow timer window.
-        const handover = players
-            .filter(p => isKillPlannedHandoverTargetForMe(p, nowMs))
-            .sort((left, right) => {
-                const expiryFor = (player) => {
-                    const owner = String(player && player.sharedCurrentOwner || '').toLowerCase();
-                    const active = owner ? getKillCoordinationActiveRow(player.name, owner) : null;
-                    return getKillCoordinationRowExpiryMs(active) || Number(player.sharedCurrentSearchExpiresAt) || Number.MAX_SAFE_INTEGER;
-                };
-                return expiryFor(left) - expiryFor(right) || String(left.name || '').localeCompare(String(right.name || ''));
-            })[0] || null;
+        const handover = getNextKillPlannedHandoverTarget(nowMs);
         if (handover) return handover;
 
         // Priority 2: protected players are re-searched only after a confirmed
@@ -18742,19 +18749,28 @@ async function doQTPerkRedeem() {
         // Urgent Kill/BG work is handled above by the kill loop and can still pause BF;
         // this guard prevents low-priority search/protected rechecks from fighting the
         // car/factory travel flow during lag.
+        const urgentKillHandoverTarget = state.killSearchEnabled
+            ? getNextKillPlannedHandoverTarget(now())
+            : null;
+        const urgentKillHandover = !!urgentKillHandoverTarget;
         const bulletFactoryBlocksNormalKillSearch = !!state.pendingBulletRun;
-        const passiveBulletWaitBlocksNormalKillSearch = shouldDeferKillSearchForPassiveBulletWait();
+        // A passive bullet wait is unrelated to searching and must never block an
+        // incoming ownership handover. Active Bullet Factory runs remain protected
+        // so we do not interrupt an in-flight car/factory navigation sequence.
+        const passiveBulletWaitBlocksNormalKillSearch = !urgentKillHandover && shouldDeferKillSearchForPassiveBulletWait();
         if (state.killSearchLoopActive && !killLoopBlocksSearch && !bulletFactoryBlocksNormalKillSearch && !passiveBulletWaitBlocksNormalKillSearch) {
-            // Don't intercept GTA or melt pages — let them complete
+            // Don't interrupt a GTA or melt form/page that is already in progress.
+            // The urgent handover takes priority as soon as the bot returns elsewhere.
             if (isGTAPage() || hasGTAPageMarkers() || isMeltPage() || hasMeltPageMarkers()) {
                 // Fall through to normal page handling
             } else if (isCrimesPage() || hasCrimePageMarkers()) {
-                // On crimes page — let GTA/melt fire first if ready, then kill scanner can run
+                // Incoming handovers are coordination-critical and pre-empt routine
+                // crimes/GTA/melt readiness. Normal searches retain the old priority.
                 const gtaReady   = isGTAEnabled() && !isGTALocked() && isInternalGTAReady();
                 const meltReady  = isMeltUsable() && isInternalMeltReady();
                 let crimesReady  = false;
                 try { crimesReady = getAvailableCrimes().length > 0; } catch (_) { crimesReady = false; }
-                if (!crimesReady && !gtaReady && !meltReady) {
+                if (urgentKillHandover || (!crimesReady && !gtaReady && !meltReady)) {
             // Don't intercept jail page — kill page is accessible whilst jailed,
             // so continue searching. Jail observer handles release separately.
             if (hasCTCChallenge()) {
@@ -18767,7 +18783,11 @@ async function doQTPerkRedeem() {
                 if (isKillPenaltyPage()) {
                     // Let penalty page handle first
                 } else {
-                    addLiveLog('Kill search: navigating to kill page');
+                    if (urgentKillHandoverTarget) {
+                        addLiveLog(`Kill handover: prioritising ${urgentKillHandoverTarget.name} — navigating to kill page`);
+                    } else {
+                        addLiveLog('Kill search: navigating to kill page');
+                    }
                     gotoPage('kill');
                     return;
                 }
@@ -18776,7 +18796,7 @@ async function doQTPerkRedeem() {
                 try { updatePanel(); await handleKillPage(); } finally { loopBusy = false; }
                 return;
             }
-                } // end !gtaReady && !meltReady
+                } // end urgent handover or no routine action ready
             } else {
                 // Not on crimes/GTA/melt page — handle kill search normally
                 if (hasCTCChallenge()) {
