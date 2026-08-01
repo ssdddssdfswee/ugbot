@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Full UG Bot (player2)
 // @namespace    ug-bot
-// @version      3.0.68
+// @version      3.0.69
 // @description  Auto-runs crimes, GTA, melting, repair, missions, drug running with Swiss Bank management, live log, session stats, action checkboxes, jail handling, runtime tracking, melt pagination, repair cycles, automatic CTC solving, and point-spending features.
 // @match        *://www.underworldgangsters.com/*
 // @match        *://underworldgangsters.com/*
@@ -1357,7 +1357,7 @@
     // BOT CONFIG
     // =========================================================================
 
-    const SCRIPT_VERSION = '3.0.68';
+    const SCRIPT_VERSION = '3.0.69';
 
 
     // =========================================================================
@@ -4082,6 +4082,23 @@
         const handoverState = String(player.sharedHandoverState || 'none').toLowerCase();
         if (!currentOwner || currentOwner === self || nextOwner !== self) return false;
         if (handoverState !== 'planned' && handoverState !== 'overlapping') return false;
+
+        // A stale worker/assignment row must never override a definitive local
+        // result. In particular, self-search and cannot-be-killed responses are
+        // stored locally even when Supabase is temporarily unreachable.
+        if (player.status === KILL_STATUS.UNKILLABLE ||
+            player.status === KILL_STATUS.PROTECTED ||
+            player.status === KILL_STATUS.DEAD) return false;
+
+        // Local search evidence is authoritative during coordination outages.
+        // Once this account has submitted/confirmed the replacement search, do
+        // not resubmit it merely because the active-search upsert/read failed.
+        const localExpiry = Math.max(
+            Number(player.searchExpiresAt) || 0,
+            Number(player.sharedSearchFullExpiresAt) || 0
+        );
+        const localFoundDue = Number(player.expectedFoundAt) || 0;
+        if (player.pendingSearch || localFoundDue > nowMs || localExpiry > nowMs) return false;
 
         const ownActive = getKillCoordinationActiveRow(player.name, self);
         if (ownActive && getKillCoordinationRowExpiryMs(ownActive) > nowMs) return false;
@@ -8734,6 +8751,9 @@
 
     function getKillPendingHandoverCompletionDueAt(player, nowMs = now()) {
         if (!player || !state.enabled || !state.killSearchEnabled) return 0;
+        if (player.status === KILL_STATUS.UNKILLABLE ||
+            player.status === KILL_STATUS.PROTECTED ||
+            player.status === KILL_STATUS.DEAD) return 0;
         const self = getKillSharedSyncPlayerId();
         const nextOwner = String(player.sharedNextOwner || '').toLowerCase();
         const handoverState = String(player.sharedHandoverState || 'none').toLowerCase();
