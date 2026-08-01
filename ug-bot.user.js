@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Full UG Bot (player2)
 // @namespace    ug-bot
-// @version      3.0.66
+// @version      3.0.67
 // @description  Auto-runs crimes, GTA, melting, repair, missions, drug running with Swiss Bank management, live log, session stats, action checkboxes, jail handling, runtime tracking, melt pagination, repair cycles, automatic CTC solving, and point-spending features.
 // @match        *://www.underworldgangsters.com/*
 // @match        *://underworldgangsters.com/*
@@ -1357,7 +1357,7 @@
     // BOT CONFIG
     // =========================================================================
 
-    const SCRIPT_VERSION = '3.0.66';
+    const SCRIPT_VERSION = '3.0.67';
 
 
     // =========================================================================
@@ -7533,32 +7533,76 @@
         // makes pre-existing protected players stop affecting the actionable
         // rank split after upgrading, without allowing a non-owner's stale local
         // state to overwrite the current owner's later result.
-        const protectedRows = [];
+        // Seed locally confirmed protected results without partially upserting
+        // the full assignment row. A partial upsert can overwrite newer ownership
+        // or handover fields with missing/null values, especially when it races the
+        // logged-out worker. Existing rows therefore receive a narrow UPDATE; only
+        // genuinely missing rows are inserted with a complete ownership state.
         for (const player of getKillPlayers()) {
             if (!player || player.status !== KILL_STATUS.PROTECTED) continue;
             const name = cleanKillSharedSyncName(player.name);
             const key = getKillSharedSyncNameKey(name);
             if (!name || !key) continue;
-            const cached = killCoordinationAssignmentByName.get(key);
+
+            const cached = killCoordinationAssignmentByName.get(key) || null;
             const cachedOwner = String(cached && cached.current_owner || '').toLowerCase();
             if (cachedOwner && cachedOwner !== playerId) continue;
+
             const rank = getKillPlayerRankEligibility(player);
-            protectedRows.push({
-                name_key: key,
+            const rankName = rank.rankName || null;
+            const rankIndex = rank.rankIndex || null;
+            const alreadyCurrent = !!cached &&
+                String(cached.target_status || '').toLowerCase() === 'protected' &&
+                String(cached.rank_name || '') === String(rankName || '') &&
+                Number(cached.rank_index || 0) === Number(rankIndex || 0);
+            if (alreadyCurrent) continue;
+
+            const protectedPatch = {
                 name,
-                preferred_owner: String(player.sharedPreferredOwner || cachedOwner || playerId).toLowerCase(),
                 target_status: 'protected',
-                rank_name: rank.rankName || null,
-                rank_index: rank.rankIndex || null,
+                rank_name: rankName,
+                rank_index: rankIndex,
                 updated_by: playerId,
                 updated_at: nowIso
-            });
-        }
-        if (protectedRows.length) {
-            const { error: protectedError } = await client
+            };
+
+            if (cached) {
+                const { error: protectedUpdateError } = await client
+                    .from(KILL_SHARED_SYNC.assignmentTableName)
+                    .update(protectedPatch)
+                    .eq('name_key', key);
+                if (protectedUpdateError) throw new Error(`protected assignment update: ${protectedUpdateError.message || protectedUpdateError}`);
+                continue;
+            }
+
+            const assignmentRow = {
+                name_key: key,
+                preferred_owner: String(player.sharedPreferredOwner || playerId).toLowerCase(),
+                current_owner: playerId,
+                next_owner: null,
+                handover_state: 'none',
+                handover_reason: 'none',
+                handover_planned_at: null,
+                handover_started_at: null,
+                current_search_expires_at: null,
+                next_search_expires_at: null,
+                ...protectedPatch
+            };
+            const { error: protectedInsertError } = await client
                 .from(KILL_SHARED_SYNC.assignmentTableName)
-                .upsert(protectedRows, { onConflict: 'name_key', ignoreDuplicates: false });
-            if (protectedError) throw new Error(`protected assignments: ${protectedError.message || protectedError}`);
+                .insert([assignmentRow]);
+            if (protectedInsertError && String(protectedInsertError.code || '') !== '23505') {
+                throw new Error(`protected assignment insert: ${protectedInsertError.message || protectedInsertError}`);
+            }
+            if (protectedInsertError && String(protectedInsertError.code || '') === '23505') {
+                // A worker/bot created the row between our cache read and insert.
+                // Update only protection evidence so its newer ownership survives.
+                const { error: protectedRaceUpdateError } = await client
+                    .from(KILL_SHARED_SYNC.assignmentTableName)
+                    .update(protectedPatch)
+                    .eq('name_key', key);
+                if (protectedRaceUpdateError) throw new Error(`protected assignment race update: ${protectedRaceUpdateError.message || protectedRaceUpdateError}`);
+            }
         }
 
         // Remove rows this account no longer considers active. Expired rows are
