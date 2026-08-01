@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Full UG Bot (player2)
 // @namespace    ug-bot
-// @version      3.0.67
+// @version      3.0.68
 // @description  Auto-runs crimes, GTA, melting, repair, missions, drug running with Swiss Bank management, live log, session stats, action checkboxes, jail handling, runtime tracking, melt pagination, repair cycles, automatic CTC solving, and point-spending features.
 // @match        *://www.underworldgangsters.com/*
 // @match        *://underworldgangsters.com/*
@@ -18945,7 +18945,16 @@ async function doQTPerkRedeem() {
             ? bulletFactoryBlocksUrgentKillCoordination()
             : !!state.pendingBulletRun;
         const passiveBulletWaitBlocksNormalKillSearch = !urgentKillCoordinationActive && shouldDeferKillSearchForPassiveBulletWait();
-        if (state.killSearchLoopActive && !killLoopBlocksSearch && !bulletFactoryBlocksNormalKillSearch && !passiveBulletWaitBlocksNormalKillSearch) {
+        // A due bulk-repair cycle owns the Cars list for one uninterrupted tick.
+        // Without this guard, the kill-search router sees Cars as an unrelated page,
+        // redirects to Kill before handleCarsPage() can submit Repair, then Crimes
+        // immediately sends us back to Cars because meltsSinceRepair is still due.
+        // That creates a Cars → Kill → Crimes → Cars navigation loop.
+        const repairCycleOwnsCarsPage =
+            shouldRunRepairCycle() &&
+            (isCarsPage() || hasCarsPageMarkers());
+
+        if (state.killSearchLoopActive && !repairCycleOwnsCarsPage && !killLoopBlocksSearch && !bulletFactoryBlocksNormalKillSearch && !passiveBulletWaitBlocksNormalKillSearch) {
             const onGtaOrMelt = isGTAPage() || hasGTAPageMarkers() || isMeltPage() || hasMeltPageMarkers();
             // Give a just-submitted GTA/melt page one brief result-processing tick,
             // then allow coordination to pre-empt reset loops instead of starving.
