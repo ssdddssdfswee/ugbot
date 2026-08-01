@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Full UG Bot (player2)
 // @namespace    ug-bot
-// @version      3.0.70
+// @version      3.0.71
 // @description  Auto-runs crimes, GTA, melting, repair, missions, drug running with Swiss Bank management, live log, session stats, action checkboxes, jail handling, runtime tracking, melt pagination, repair cycles, automatic CTC solving, and point-spending features.
 // @match        *://www.underworldgangsters.com/*
 // @match        *://underworldgangsters.com/*
@@ -1357,7 +1357,7 @@
     // BOT CONFIG
     // =========================================================================
 
-    const SCRIPT_VERSION = '3.0.70';
+    const SCRIPT_VERSION = '3.0.71';
 
 
     // =========================================================================
@@ -4088,7 +4088,14 @@
         // stored locally even when Supabase is temporarily unreachable.
         if (player.status === KILL_STATUS.UNKILLABLE ||
             player.status === KILL_STATUS.PROTECTED ||
-            player.status === KILL_STATUS.DEAD) return false;
+            player.status === KILL_STATUS.DEAD ||
+            String(player.sharedTargetStatus || '').toLowerCase() === 'protected') return false;
+
+        // Defence in depth: the worker is authoritative for handover planning, but
+        // a stale/legacy row must not make this bot search a player whose fresh
+        // profile rank is below this account's current minimum setting.
+        const localRank = getKillPlayerRankEligibility(player);
+        if (localRank.fresh && localRank.rankIndex > 0 && localRank.rankIndex < getKillSearchMinimumRankIndex()) return false;
 
         // Local search evidence is authoritative during coordination outages.
         // Once this account has submitted/confirmed the replacement search, do
@@ -7565,7 +7572,7 @@
             const cachedOwner = String(cached && cached.current_owner || '').toLowerCase();
             if (cachedOwner && cachedOwner !== playerId) continue;
 
-            const cachedEvidence = String(cached && cached.updated_by || '').match(/^logged-out-profile:(protected|normal):(\d+)$/i);
+            const cachedEvidence = String(cached && cached.updated_by || '').match(/^(?:logged-out-profile|kill-page):(protected|normal):(\d+)$/i);
             const cachedEvidenceStatus = cachedEvidence ? cachedEvidence[1].toLowerCase() : '';
             const cachedEvidenceAt = cachedEvidence ? Number(cachedEvidence[2]) || 0 : 0;
             if (cachedEvidenceStatus === 'normal' && cachedEvidenceAt >= (Number(player.lastChecked) || 0)) {
@@ -7588,7 +7595,12 @@
                 target_status: 'protected',
                 rank_name: rankName,
                 rank_index: rankIndex,
-                updated_by: playerId,
+                // Preserve authoritative profile/Kill-page evidence when this is
+                // only a rank-field refresh. For a genuinely local protected result,
+                // publish its own timestamped evidence marker.
+                updated_by: cachedEvidence
+                    ? String(cached.updated_by || '')
+                    : `kill-page:protected:${Number(player.lastChecked) || nowMs}`,
                 updated_at: nowIso
             };
 
@@ -7754,7 +7766,7 @@
 
             const sharedStatus = next.sharedTargetStatus === 'protected' ? 'protected' : 'normal';
             const evidenceMarker = next.sharedAssignmentUpdatedBy;
-            const evidenceMatch = evidenceMarker.match(/^logged-out-profile:(protected|normal):(\d+)$/i);
+            const evidenceMatch = evidenceMarker.match(/^(?:logged-out-profile|kill-page):(protected|normal):(\d+)$/i);
             const profileEvidenceStatus = evidenceMatch ? evidenceMatch[1].toLowerCase() : '';
             const profileEvidenceAt = evidenceMatch ? Number(evidenceMatch[2]) || 0 : 0;
 
@@ -7902,7 +7914,7 @@
                             handover_started_at: nowIso,
                             next_search_expires_at: fullExpiryIso,
                             target_status: 'normal',
-                            updated_by: playerId,
+                            updated_by: `kill-page:normal:${nowMs}`,
                             updated_at: nowIso
                         })
                         .eq('name_key', key)
@@ -7936,7 +7948,7 @@
                             target_status: 'normal',
                             rank_name: rank.rankName || null,
                             rank_index: rank.rankIndex || null,
-                            updated_by: playerId,
+                            updated_by: `kill-page:normal:${nowMs}`,
                             updated_at: nowIso
                         };
                         const { error } = await client
@@ -7953,7 +7965,7 @@
                             target_status: 'normal',
                             rank_name: rank.rankName || null,
                             rank_index: rank.rankIndex || null,
-                            updated_by: playerId,
+                            updated_by: `kill-page:normal:${nowMs}`,
                             updated_at: nowIso
                         };
                         if (!assignment.preferred_owner) patch.preferred_owner = String(player && player.sharedPreferredOwner || playerId).toLowerCase();
@@ -7973,7 +7985,7 @@
                                 handover_started_at: nowIso,
                                 next_search_expires_at: fullExpiryIso,
                                 target_status: 'normal',
-                                updated_by: playerId,
+                                updated_by: `kill-page:normal:${nowMs}`,
                                 updated_at: nowIso
                             })
                             .eq('name_key', key)
@@ -8006,7 +8018,7 @@
                         next_search_expires_at: null,
                         rank_name: rank.rankName || null,
                         rank_index: rank.rankIndex || null,
-                        updated_by: playerId,
+                        updated_by: `kill-page:protected:${nowMs}`,
                         updated_at: nowIso
                     };
 
