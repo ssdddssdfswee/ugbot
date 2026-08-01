@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Full UG Bot (player2)
 // @namespace    ug-bot
-// @version      3.0.69
+// @version      3.0.70
 // @description  Auto-runs crimes, GTA, melting, repair, missions, drug running with Swiss Bank management, live log, session stats, action checkboxes, jail handling, runtime tracking, melt pagination, repair cycles, automatic CTC solving, and point-spending features.
 // @match        *://www.underworldgangsters.com/*
 // @match        *://underworldgangsters.com/*
@@ -1357,7 +1357,7 @@
     // BOT CONFIG
     // =========================================================================
 
-    const SCRIPT_VERSION = '3.0.69';
+    const SCRIPT_VERSION = '3.0.70';
 
 
     // =========================================================================
@@ -7565,6 +7565,15 @@
             const cachedOwner = String(cached && cached.current_owner || '').toLowerCase();
             if (cachedOwner && cachedOwner !== playerId) continue;
 
+            const cachedEvidence = String(cached && cached.updated_by || '').match(/^logged-out-profile:(protected|normal):(\d+)$/i);
+            const cachedEvidenceStatus = cachedEvidence ? cachedEvidence[1].toLowerCase() : '';
+            const cachedEvidenceAt = cachedEvidence ? Number(cachedEvidence[2]) || 0 : 0;
+            if (cachedEvidenceStatus === 'normal' && cachedEvidenceAt >= (Number(player.lastChecked) || 0)) {
+                // The profile worker has newer proof that protection ended. The
+                // merge step will already have queued this player for a fresh search.
+                continue;
+            }
+
             const rank = getKillPlayerRankEligibility(player);
             const rankName = rank.rankName || null;
             const rankIndex = rank.rankIndex || null;
@@ -7584,10 +7593,13 @@
             };
 
             if (cached) {
-                const { error: protectedUpdateError } = await client
+                let protectedUpdate = client
                     .from(KILL_SHARED_SYNC.assignmentTableName)
                     .update(protectedPatch)
                     .eq('name_key', key);
+                const cachedUpdatedBy = String(cached.updated_by || '');
+                if (cachedUpdatedBy) protectedUpdate = protectedUpdate.eq('updated_by', cachedUpdatedBy);
+                const { error: protectedUpdateError } = await protectedUpdate;
                 if (protectedUpdateError) throw new Error(`protected assignment update: ${protectedUpdateError.message || protectedUpdateError}`);
                 continue;
             }
@@ -7612,13 +7624,10 @@
                 throw new Error(`protected assignment insert: ${protectedInsertError.message || protectedInsertError}`);
             }
             if (protectedInsertError && String(protectedInsertError.code || '') === '23505') {
-                // A worker/bot created the row between our cache read and insert.
-                // Update only protection evidence so its newer ownership survives.
-                const { error: protectedRaceUpdateError } = await client
-                    .from(KILL_SHARED_SYNC.assignmentTableName)
-                    .update(protectedPatch)
-                    .eq('name_key', key);
-                if (protectedRaceUpdateError) throw new Error(`protected assignment race update: ${protectedRaceUpdateError.message || protectedRaceUpdateError}`);
+                // A worker/bot created the row after our cache read. Do not write
+                // over an unknown newer profile result; the next sync will download
+                // the row and retry only if the local evidence is still newer.
+                continue;
             }
         }
 
@@ -7722,6 +7731,7 @@
                 sharedTargetStatus: String(row.target_status || 'normal').toLowerCase(),
                 sharedCurrentSearchExpiresAt: Date.parse(String(row.current_search_expires_at || '')) || 0,
                 sharedNextSearchExpiresAt: Date.parse(String(row.next_search_expires_at || '')) || 0,
+                sharedAssignmentUpdatedBy: String(row.updated_by || ''),
                 sharedAssignmentUpdatedAt: Date.parse(String(row.updated_at || '')) || 0
             } : {
                 sharedPreferredOwner: '',
@@ -7732,6 +7742,7 @@
                 sharedTargetStatus: 'normal',
                 sharedCurrentSearchExpiresAt: 0,
                 sharedNextSearchExpiresAt: 0,
+                sharedAssignmentUpdatedBy: '',
                 sharedAssignmentUpdatedAt: 0
             };
             for (const [field, value] of Object.entries(next)) {
@@ -7739,6 +7750,67 @@
                     player[field] = value;
                     changed++;
                 }
+            }
+
+            const sharedStatus = next.sharedTargetStatus === 'protected' ? 'protected' : 'normal';
+            const evidenceMarker = next.sharedAssignmentUpdatedBy;
+            const evidenceMatch = evidenceMarker.match(/^logged-out-profile:(protected|normal):(\d+)$/i);
+            const profileEvidenceStatus = evidenceMatch ? evidenceMatch[1].toLowerCase() : '';
+            const profileEvidenceAt = evidenceMatch ? Number(evidenceMatch[2]) || 0 : 0;
+
+            // Protection is shared evidence. A Kill-page result from either bot or
+            // a valid logged-out profile marker immediately protects both local
+            // lists and removes any stale active-search lease.
+            if (sharedStatus === 'protected' &&
+                player.status !== KILL_STATUS.PROTECTED &&
+                player.status !== KILL_STATUS.UNKILLABLE &&
+                player.status !== KILL_STATUS.DEAD) {
+                player.status = KILL_STATUS.PROTECTED;
+                player.lastChecked = Math.max(Number(player.lastChecked) || 0, profileEvidenceAt || next.sharedAssignmentUpdatedAt || now());
+                delete player.searchExpiresAt;
+                delete player.sharedSearchStartedAt;
+                delete player.sharedSearchFullExpiresAt;
+                delete player.sharedSearchDurationHours;
+                delete player.pendingSearch;
+                delete player.expectedFoundAt;
+
+                const sharedRankIndex = Number(row.rank_index) || Number(player.profileRankIndex) || 0;
+                const sharedRankName = normaliseKillProfileRankName(row.rank_name) || player.profileRankName || '';
+                if (sharedRankIndex > 0) {
+                    player.protectedAtRankIndex = sharedRankIndex;
+                    player.protectedAtRankName = sharedRankName;
+                    player.protectedRankBaselinePending = false;
+                } else {
+                    player.protectedAtRankIndex = 0;
+                    player.protectedAtRankName = '';
+                    player.protectedRankBaselinePending = true;
+                }
+                changed++;
+            }
+
+            // Only an explicit, timestamped logged-out profile observation may
+            // clear protection. Generic target_status=normal rows and routine
+            // coordinator updates are not enough, so a newer Kill-page protected
+            // result cannot be undone by stale worker data or a failed DB write.
+            if (sharedStatus === 'normal' &&
+                profileEvidenceStatus === 'normal' &&
+                profileEvidenceAt > 0 &&
+                player.status === KILL_STATUS.PROTECTED &&
+                profileEvidenceAt >= (Number(player.lastChecked) || 0)) {
+                player.status = KILL_STATUS.UNKNOWN;
+                player.lastChecked = profileEvidenceAt;
+                player.protectionLostAt = profileEvidenceAt;
+                delete player.protectedAtRankIndex;
+                delete player.protectedAtRankName;
+                delete player.protectedRankBaselinePending;
+                delete player.searchExpiresAt;
+                delete player.sharedSearchStartedAt;
+                delete player.sharedSearchFullExpiresAt;
+                delete player.sharedSearchDurationHours;
+                delete player.pendingSearch;
+                delete player.expectedFoundAt;
+                changed++;
+                addLiveLog(`Kill protection: ${player.name} is no longer protected — queued for search`);
             }
         }
 
@@ -7755,13 +7827,16 @@
         if (killCoordinationSyncRunning) return true;
         killCoordinationSyncRunning = true;
         try {
-            const published = await publishKillCoordinationSnapshot();
+            // Consume authoritative worker/profile evidence before publishing the
+            // local snapshot. Publishing first allowed a stale local PROTECTED
+            // value to overwrite a freshly detected protection loss.
             const [assignments, activeRows, botRows] = await Promise.all([
                 downloadKillCoordinationAssignments(),
                 downloadKillCoordinationActiveSearches(),
                 downloadKillCoordinationBotStates()
             ]);
             const changed = mergeKillCoordinationData(assignments, activeRows, botRows);
+            const published = await publishKillCoordinationSnapshot();
             killCoordinationTableWarned = false;
             if (!silent && changed) addLiveLog(`Kill ownership: synced ${assignments.length} assignment(s), ${activeRows.length} active search(es)`);
             return true;
