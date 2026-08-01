@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Full UG Bot (player2)
 // @namespace    ug-bot
-// @version      3.0.64
+// @version      3.0.66
 // @description  Auto-runs crimes, GTA, melting, repair, missions, drug running with Swiss Bank management, live log, session stats, action checkboxes, jail handling, runtime tracking, melt pagination, repair cycles, automatic CTC solving, and point-spending features.
 // @match        *://www.underworldgangsters.com/*
 // @match        *://underworldgangsters.com/*
@@ -1357,7 +1357,7 @@
     // BOT CONFIG
     // =========================================================================
 
-    const SCRIPT_VERSION = '3.0.64';
+    const SCRIPT_VERSION = '3.0.66';
 
 
     // =========================================================================
@@ -4004,14 +4004,19 @@
 
     function isKillCoordinationBotAvailable(playerId, nowMs = now()) {
         const row = killCoordinationBotStateById.get(String(playerId || '').toLowerCase());
-        if (!row || row.search_enabled === false || row.coordination_enabled === false) return false;
-        const availability = String(row.availability_state || '').toLowerCase();
-        if (availability) return availability === 'online';
-        // Compatibility fallback until the v3 migration/worker has populated
-        // explicit availability state.
+        if (!row || row.search_enabled === false || row.coordination_enabled === false || row.automation_paused === true) return false;
+
+        // Never trust a previously written "online" label without a recent
+        // heartbeat. The logged-out worker may not have run since a browser was
+        // closed, paused, or lost connectivity.
         const seenAt = Date.parse(String(row.last_seen || row.updated_at || '')) || 0;
         const warningMs = Math.max(1, Number(KILL_SHARED_SYNC.coordinationHeartbeatWarningMins) || 10) * 60 * 1000;
-        return !!seenAt && (nowMs - seenAt) <= warningMs;
+        if (!seenAt || (nowMs - seenAt) > warningMs) return false;
+
+        const availability = String(row.availability_state || '').toLowerCase();
+        if (availability) return availability === 'online';
+        // Compatibility fallback until the worker has populated explicit state.
+        return true;
     }
 
     function getKillPlayerAssignmentDisplayLabel(player) {
@@ -4070,23 +4075,20 @@
     }
 
     function isKillPlannedHandoverTargetForMe(player, nowMs = now()) {
-        if (!player) return false;
+        if (!player || !state.enabled || !state.killSearchEnabled) return false;
         const self = getKillSharedSyncPlayerId();
         const currentOwner = String(player.sharedCurrentOwner || '').toLowerCase();
         const nextOwner = String(player.sharedNextOwner || '').toLowerCase();
         const handoverState = String(player.sharedHandoverState || 'none').toLowerCase();
         if (!currentOwner || currentOwner === self || nextOwner !== self) return false;
         if (handoverState !== 'planned' && handoverState !== 'overlapping') return false;
-        if (!isKillCoordinationBotAvailable(self, nowMs)) return false;
 
         const ownActive = getKillCoordinationActiveRow(player.name, self);
         if (ownActive && getKillCoordinationRowExpiryMs(ownActive) > nowMs) return false;
 
-        const rank = getKillPlayerRankEligibility(player);
-        if (!rank.eligible) return false;
-
-        // The logged-out worker is the handover authority. Once it assigns this
-        // account as next owner, accept the plan regardless of the outgoing timer.
+        // The worker has already checked this account's configured minimum rank
+        // before assigning next_owner. Do not let a delayed local profile refresh
+        // reject an otherwise valid handover.
         return true;
     }
 
@@ -7455,7 +7457,11 @@
 
     function isKillCoordinationForcedPlayer(player) {
         if (!player) return false;
-        return !!((player.isBg && player.bgFor) || player.sharedSearchForced);
+        // Operational targets must stay with the account currently running their
+        // Kill/BG chain. These toggles are intentionally local and are not safe to
+        // transfer silently to another browser profile.
+        return !!((player.isBg && player.bgFor) || player.sharedSearchForced ||
+            isPlayerShootEnabled(player.name) || isPlayerBgFarmEnabled(player.name) || isPlayerBgCheckEnabled(player.name));
     }
 
     function buildKillCoordinationActiveRows(nowMs = now()) {
@@ -7767,28 +7773,77 @@
                         .eq('next_owner', playerId);
                     if (error) throw error;
                 } else if (searchMode === 'normal') {
-                    const assignmentRow = {
-                        name_key: key,
-                        name,
-                        preferred_owner: String(player && player.sharedPreferredOwner || playerId).toLowerCase(),
-                        current_owner: playerId,
-                        next_owner: null,
-                        handover_state: 'none',
-                        handover_reason: 'none',
-                        handover_planned_at: null,
-                        handover_started_at: null,
-                        current_search_expires_at: fullExpiryIso,
-                        next_search_expires_at: null,
-                        target_status: 'normal',
-                        rank_name: rank.rankName || null,
-                        rank_index: rank.rankIndex || null,
-                        updated_by: playerId,
-                        updated_at: nowIso
-                    };
-                    const { error } = await client
+                    // A normal renewal must not erase a worker-planned handover.
+                    // Read the authoritative row and update only the current lease.
+                    const { data: assignment, error: assignmentReadError } = await client
                         .from(KILL_SHARED_SYNC.assignmentTableName)
-                        .upsert([assignmentRow], { onConflict: 'name_key', ignoreDuplicates: false });
-                    if (error) throw error;
+                        .select('name_key,preferred_owner,current_owner,next_owner,handover_state')
+                        .eq('name_key', key)
+                        .maybeSingle();
+                    if (assignmentReadError) throw assignmentReadError;
+
+                    const authoritativeCurrent = String(assignment && assignment.current_owner || '').toLowerCase();
+                    const authoritativeNext = String(assignment && assignment.next_owner || '').toLowerCase();
+                    if (!assignment) {
+                        const assignmentRow = {
+                            name_key: key,
+                            name,
+                            preferred_owner: String(player && player.sharedPreferredOwner || playerId).toLowerCase(),
+                            current_owner: playerId,
+                            next_owner: null,
+                            handover_state: 'none',
+                            handover_reason: 'none',
+                            handover_planned_at: null,
+                            handover_started_at: null,
+                            current_search_expires_at: fullExpiryIso,
+                            next_search_expires_at: null,
+                            target_status: 'normal',
+                            rank_name: rank.rankName || null,
+                            rank_index: rank.rankIndex || null,
+                            updated_by: playerId,
+                            updated_at: nowIso
+                        };
+                        const { error } = await client
+                            .from(KILL_SHARED_SYNC.assignmentTableName)
+                            .insert([assignmentRow]);
+                        // The worker may create the row between our read and insert.
+                        // Keep the active-search evidence and let the next sync merge it.
+                        if (error && String(error.code || '') !== '23505') throw error;
+                    } else if (!authoritativeCurrent || authoritativeCurrent === playerId) {
+                        const patch = {
+                            name,
+                            current_owner: authoritativeCurrent || playerId,
+                            current_search_expires_at: fullExpiryIso,
+                            target_status: 'normal',
+                            rank_name: rank.rankName || null,
+                            rank_index: rank.rankIndex || null,
+                            updated_by: playerId,
+                            updated_at: nowIso
+                        };
+                        if (!assignment.preferred_owner) patch.preferred_owner = String(player && player.sharedPreferredOwner || playerId).toLowerCase();
+                        const { error } = await client
+                            .from(KILL_SHARED_SYNC.assignmentTableName)
+                            .update(patch)
+                            .eq('name_key', key)
+                            .or(`current_owner.is.null,current_owner.eq.${playerId}`);
+                        if (error) throw error;
+                    } else if (authoritativeNext === playerId && ['planned', 'overlapping'].includes(String(assignment.handover_state || '').toLowerCase())) {
+                        // The local assignment cache was one sync behind. Preserve the
+                        // worker plan and register this search as the incoming overlap.
+                        const { error } = await client
+                            .from(KILL_SHARED_SYNC.assignmentTableName)
+                            .update({
+                                handover_state: 'overlapping',
+                                handover_started_at: nowIso,
+                                next_search_expires_at: fullExpiryIso,
+                                target_status: 'normal',
+                                updated_by: playerId,
+                                updated_at: nowIso
+                            })
+                            .eq('name_key', key)
+                            .eq('next_owner', playerId);
+                        if (error) throw error;
+                    }
                 }
             } else {
                 const { error: activeDeleteError } = await client
@@ -7799,28 +7854,81 @@
                 if (activeDeleteError) throw activeDeleteError;
 
                 if (outcome === 'protected' && searchMode !== 'forced') {
-                    const assignmentRow = {
-                        name_key: key,
+                    const { data: assignment, error: assignmentReadError } = await client
+                        .from(KILL_SHARED_SYNC.assignmentTableName)
+                        .select('name_key,preferred_owner,current_owner,next_owner,handover_state')
+                        .eq('name_key', key)
+                        .maybeSingle();
+                    if (assignmentReadError) throw assignmentReadError;
+
+                    const currentOwner = String(assignment && assignment.current_owner || '').toLowerCase();
+                    const nextOwner = String(assignment && assignment.next_owner || '').toLowerCase();
+                    const protectedPatch = {
                         name,
-                        preferred_owner: String(player && player.sharedPreferredOwner || playerId).toLowerCase(),
-                        current_owner: playerId,
-                        next_owner: null,
-                        handover_state: 'none',
-                        handover_reason: 'none',
-                        handover_planned_at: null,
-                        handover_started_at: null,
+                        target_status: 'protected',
                         current_search_expires_at: null,
                         next_search_expires_at: null,
-                        target_status: 'protected',
                         rank_name: rank.rankName || null,
                         rank_index: rank.rankIndex || null,
                         updated_by: playerId,
                         updated_at: nowIso
                     };
-                    const { error } = await client
-                        .from(KILL_SHARED_SYNC.assignmentTableName)
-                        .upsert([assignmentRow], { onConflict: 'name_key', ignoreDuplicates: false });
-                    if (error) throw error;
+
+                    if (!assignment) {
+                        const assignmentRow = {
+                            name_key: key,
+                            preferred_owner: String(player && player.sharedPreferredOwner || playerId).toLowerCase(),
+                            current_owner: playerId,
+                            next_owner: null,
+                            handover_state: 'none',
+                            handover_reason: 'none',
+                            handover_planned_at: null,
+                            handover_started_at: null,
+                            ...protectedPatch
+                        };
+                        const { error } = await client
+                            .from(KILL_SHARED_SYNC.assignmentTableName)
+                            .insert([assignmentRow]);
+                        if (error && String(error.code || '') !== '23505') throw error;
+                    } else if (nextOwner === playerId) {
+                        const { error } = await client
+                            .from(KILL_SHARED_SYNC.assignmentTableName)
+                            .update({
+                                ...protectedPatch,
+                                current_owner: playerId,
+                                next_owner: null,
+                                handover_state: 'none',
+                                handover_reason: 'none',
+                                handover_planned_at: null,
+                                handover_started_at: null
+                            })
+                            .eq('name_key', key)
+                            .eq('next_owner', playerId);
+                        if (error) throw error;
+                    } else if (!currentOwner || currentOwner === playerId) {
+                        const { error } = await client
+                            .from(KILL_SHARED_SYNC.assignmentTableName)
+                            .update({
+                                ...protectedPatch,
+                                current_owner: currentOwner || playerId,
+                                next_owner: null,
+                                handover_state: 'none',
+                                handover_reason: 'none',
+                                handover_planned_at: null,
+                                handover_started_at: null
+                            })
+                            .eq('name_key', key)
+                            .or(`current_owner.is.null,current_owner.eq.${playerId}`);
+                        if (error) throw error;
+                    } else {
+                        // Protection is global evidence, but a stale non-owner must
+                        // not steal current_owner from the authoritative account.
+                        const { error } = await client
+                            .from(KILL_SHARED_SYNC.assignmentTableName)
+                            .update(protectedPatch)
+                            .eq('name_key', key);
+                        if (error) throw error;
+                    }
                 } else if (outcome === 'dead' || outcome === 'nonexistent' || outcome === 'unkillable') {
                     const { error: assignmentDeleteError } = await client
                         .from(KILL_SHARED_SYNC.assignmentTableName)
@@ -8565,9 +8673,8 @@
         }
     }
 
-    // Returns the most urgent incoming controlled handover for this account.
-    // This helper is also used by the main scheduler so handovers can pre-empt
-    // ordinary crimes/GTA/melt work instead of being starved behind routine actions.
+    // Returns the most urgent incoming controlled handover which still needs
+    // this account to submit the replacement search.
     function getNextKillPlannedHandoverTarget(nowMs = now()) {
         return getKillPlayers()
             .filter(player => isKillPlannedHandoverTargetForMe(player, nowMs))
@@ -8579,6 +8686,54 @@
                 };
                 return expiryFor(left) - expiryFor(right) || String(left.name || '').localeCompare(String(right.name || ''));
             })[0] || null;
+    }
+
+    function getKillPendingHandoverCompletionDueAt(player, nowMs = now()) {
+        if (!player || !state.enabled || !state.killSearchEnabled) return 0;
+        const self = getKillSharedSyncPlayerId();
+        const nextOwner = String(player.sharedNextOwner || '').toLowerCase();
+        const handoverState = String(player.sharedHandoverState || 'none').toLowerCase();
+        if (nextOwner !== self || (handoverState !== 'planned' && handoverState !== 'overlapping')) return 0;
+
+        const ownActive = getKillCoordinationActiveRow(player.name, self);
+        if (!ownActive || ownActive.pending !== true || getKillCoordinationRowExpiryMs(ownActive) <= nowMs) return 0;
+        // The kill page may already have converted this player to Players Found
+        // while the next Supabase heartbeat is still carrying pending=true.
+        if (player.pendingSearch === false && !player.expectedFoundAt) return 0;
+
+        const expected = Number(player.expectedFoundAt) || 0;
+        if (expected > 0) return expected;
+        const startedAt = Date.parse(String(ownActive.search_started_at || '')) || Number(player.sharedSearchStartedAt) || 0;
+        return startedAt ? startedAt + (3 * 60 * 60 * 1000) : 0;
+    }
+
+    // A pending incoming search must be revisited when its found timer expires,
+    // even though this account is not current_owner yet. Otherwise the local
+    // pending flag can remain true forever and the worker cannot finalise ownership.
+    function getNextKillPendingHandoverCompletionTarget(nowMs = now()) {
+        const leadMs = 20 * 1000;
+        return getKillPlayers()
+            .map(player => ({ player, dueAt: getKillPendingHandoverCompletionDueAt(player, nowMs) }))
+            .filter(item => item.dueAt > 0 && item.dueAt <= nowMs + leadMs)
+            .sort((left, right) => left.dueAt - right.dueAt || String(left.player.name || '').localeCompare(String(right.player.name || '')))[0]?.player || null;
+    }
+
+    function getUrgentKillCoordinationVisit(nowMs = now()) {
+        const completion = getNextKillPendingHandoverCompletionTarget(nowMs);
+        if (completion) return { type: 'handover_completion', player: completion };
+        const handover = getNextKillPlannedHandoverTarget(nowMs);
+        if (handover) return { type: 'handover_search', player: handover };
+        return null;
+    }
+
+    function bulletFactoryBlocksUrgentKillCoordination() {
+        const run = state.pendingBulletRun;
+        if (!run) return false;
+        if (state.pendingBankAction) return true;
+        const stage = String(run.stage || '').toLowerCase();
+        if (stage === 'withdraw' || stage === 'topup' || stage === 'buy' || stage === 'drive_wait') return true;
+        if (stage === 'travel_car' && isInternalDriveReady()) return true;
+        return false;
     }
 
     // Returns the next routine Player List search target. Every normal search
@@ -9504,24 +9659,15 @@
             }
         }
 
-        // If penalty exceeds threshold and penaltyDropsAt not set, navigate to penalty page
-        if (state.killPenaltyThreshold > 0 && !state.pendingPenaltyPage) {
+        // Routine searches and ownership handovers do not shoot anyone, so they
+        // must remain available regardless of the configured kill-penalty threshold.
+        // Real kill/BG shots are routed through handleKillLoopPage/doKillShootFlow,
+        // where the threshold is enforced and the penalty wait is calculated.
+        // Refresh the live cache here, but never divert a search-only visit to the
+        // penalty page; doing so caused kill → penalty → crimes/cars → kill loops.
+        if (state.killPenaltyThreshold > 0) {
             const livePenalty = getKillPenaltyMultiplier(); // authoritative on kill page
-            const cached = Number(getSetting('cachedKillPenalty', 1.0));
-            const penaltyTooHigh = livePenalty >= state.killPenaltyThreshold;
-            const penaltyChanged = Math.abs(livePenalty - cached) >= 0.05;
-            const needsCalc = !state.penaltyDropsAt || penaltyChanged;
-            // If live penalty is 1.0 (no penalty), ensure penaltyDropsAt is cleared
-            if (livePenalty <= 1.0) {
-                if (state.penaltyDropsAt) state.penaltyDropsAt = 0;
-            } else if (penaltyTooHigh && needsCalc) {
-                const reason = penaltyChanged ? `penalty changed (${cached}x → ${livePenalty}x)` : `penalty ${livePenalty}x exceeds threshold`;
-                addLiveLog(`Kill loop: ${reason} — navigating to penalty page`);
-                state.pendingPenaltyPage = true;
-                await wait(navRand());
-                gotoPage('kill-penalty');
-                return;
-            }
+            if (livePenalty <= 1.0 && state.penaltyDropsAt) state.penaltyDropsAt = 0;
         }
 
         if (hasCTCChallenge()) {
@@ -18577,9 +18723,9 @@ async function doQTPerkRedeem() {
             }
         }
 
-        // Auto re-activate kill search loop if due targets exist but loop was deactivated
-        // Runs regardless of killLoopActive — search and kill loops are independent
-        if (state.killSearchEnabled && !state.killSearchLoopActive && getNextKillTarget()) {
+        // Auto re-activate for a normal search, a replacement handover, or a
+        // pending handover whose found timer now needs to be reconciled.
+        if (state.killSearchEnabled && !state.killSearchLoopActive && (getUrgentKillCoordinationVisit(now()) || getNextKillTarget())) {
             state.killSearchLoopActive = true;
         }
 
@@ -18745,60 +18891,54 @@ async function doQTPerkRedeem() {
             state.pendingKillAction !== null &&
             !killLoopWaitingForDrive &&
             !bgShootWaitingForDrive;
-        // While Bullet Factory has an active run, suppress normal Kill Search navigation.
-        // Urgent Kill/BG work is handled above by the kill loop and can still pause BF;
-        // this guard prevents low-priority search/protected rechecks from fighting the
-        // car/factory travel flow during lag.
-        const urgentKillHandoverTarget = state.killSearchEnabled
-            ? getNextKillPlannedHandoverTarget(now())
-            : null;
-        const urgentKillHandover = !!urgentKillHandoverTarget;
-        const bulletFactoryBlocksNormalKillSearch = !!state.pendingBulletRun;
-        // A passive bullet wait is unrelated to searching and must never block an
-        // incoming ownership handover. Active Bullet Factory runs remain protected
-        // so we do not interrupt an in-flight car/factory navigation sequence.
-        const passiveBulletWaitBlocksNormalKillSearch = !urgentKillHandover && shouldDeferKillSearchForPassiveBulletWait();
+        // Coordination work is more important than routine actions, but it must
+        // not interrupt a bank submission, bullet purchase, or drive click already
+        // in flight. Safe/passive Bullet Factory stages remain resumable afterward.
+        const urgentKillCoordination = state.killSearchEnabled ? getUrgentKillCoordinationVisit(now()) : null;
+        const urgentKillCoordinationTarget = urgentKillCoordination && urgentKillCoordination.player;
+        const urgentKillCoordinationActive = !!urgentKillCoordinationTarget;
+        const bulletFactoryBlocksNormalKillSearch = urgentKillCoordinationActive
+            ? bulletFactoryBlocksUrgentKillCoordination()
+            : !!state.pendingBulletRun;
+        const passiveBulletWaitBlocksNormalKillSearch = !urgentKillCoordinationActive && shouldDeferKillSearchForPassiveBulletWait();
         if (state.killSearchLoopActive && !killLoopBlocksSearch && !bulletFactoryBlocksNormalKillSearch && !passiveBulletWaitBlocksNormalKillSearch) {
-            // Don't interrupt a GTA or melt form/page that is already in progress.
-            // The urgent handover takes priority as soon as the bot returns elsewhere.
-            if (isGTAPage() || hasGTAPageMarkers() || isMeltPage() || hasMeltPageMarkers()) {
-                // Fall through to normal page handling
-            } else if (isCrimesPage() || hasCrimePageMarkers()) {
-                // Incoming handovers are coordination-critical and pre-empt routine
-                // crimes/GTA/melt readiness. Normal searches retain the old priority.
+            const onGtaOrMelt = isGTAPage() || hasGTAPageMarkers() || isMeltPage() || hasMeltPageMarkers();
+            // Give a just-submitted GTA/melt page one brief result-processing tick,
+            // then allow coordination to pre-empt reset loops instead of starving.
+            if (onGtaOrMelt && (!urgentKillCoordinationActive || recentlyActed(2500))) {
+                // Fall through to normal page handling.
+            } else if (isCrimesPage() || hasCrimePageMarkers() || (onGtaOrMelt && urgentKillCoordinationActive)) {
                 const gtaReady   = isGTAEnabled() && !isGTALocked() && isInternalGTAReady();
                 const meltReady  = isMeltUsable() && isInternalMeltReady();
                 let crimesReady  = false;
                 try { crimesReady = getAvailableCrimes().length > 0; } catch (_) { crimesReady = false; }
-                if (urgentKillHandover || (!crimesReady && !gtaReady && !meltReady)) {
-            // Don't intercept jail page — kill page is accessible whilst jailed,
-            // so continue searching. Jail observer handles release separately.
-            if (hasCTCChallenge()) {
-                loopBusy = true;
-                try { updatePanel(); setLastActionText('CTC solving…'); await maybeSolveCTC(); } finally { loopBusy = false; }
-                return;
-            }
-            // Navigate to kill page if not already there
-            if (!isKillPage()) {
-                if (isKillPenaltyPage()) {
-                    // Let penalty page handle first
-                } else {
-                    if (urgentKillHandoverTarget) {
-                        addLiveLog(`Kill handover: prioritising ${urgentKillHandoverTarget.name} — navigating to kill page`);
-                    } else {
-                        addLiveLog('Kill search: navigating to kill page');
+                if (urgentKillCoordinationActive || (!crimesReady && !gtaReady && !meltReady)) {
+                    if (hasCTCChallenge()) {
+                        loopBusy = true;
+                        try { updatePanel(); setLastActionText('CTC solving…'); await maybeSolveCTC(); } finally { loopBusy = false; }
+                        return;
                     }
-                    gotoPage('kill');
-                    return;
+                    if (!isKillPage()) {
+                        if (isKillPenaltyPage()) {
+                            // A real shooting flow owns the penalty page.
+                        } else {
+                            if (urgentKillCoordination?.type === 'handover_completion') {
+                                addLiveLog(`Kill handover: checking completed search for ${urgentKillCoordinationTarget.name}`);
+                            } else if (urgentKillCoordinationTarget) {
+                                addLiveLog(`Kill handover: prioritising ${urgentKillCoordinationTarget.name} — navigating to kill page`);
+                            } else {
+                                addLiveLog('Kill search: navigating to kill page');
+                            }
+                            gotoPage('kill');
+                            return;
+                        }
+                    } else {
+                        loopBusy = true;
+                        try { updatePanel(); await handleKillPage(); } finally { loopBusy = false; }
+                        return;
+                    }
                 }
             } else {
-                loopBusy = true;
-                try { updatePanel(); await handleKillPage(); } finally { loopBusy = false; }
-                return;
-            }
-                } // end urgent handover or no routine action ready
-            } else {
-                // Not on crimes/GTA/melt page — handle kill search normally
                 if (hasCTCChallenge()) {
                     loopBusy = true;
                     try { updatePanel(); setLastActionText('CTC solving…'); await maybeSolveCTC(); } finally { loopBusy = false; }
@@ -18806,9 +18946,15 @@ async function doQTPerkRedeem() {
                 }
                 if (!isKillPage()) {
                     if (isKillPenaltyPage()) {
-                        // Let penalty page handle first
+                        // A real shooting flow owns the penalty page.
                     } else {
-                        addLiveLog('Kill search: navigating to kill page');
+                        if (urgentKillCoordination?.type === 'handover_completion') {
+                            addLiveLog(`Kill handover: checking completed search for ${urgentKillCoordinationTarget.name}`);
+                        } else if (urgentKillCoordinationTarget) {
+                            addLiveLog(`Kill handover: prioritising ${urgentKillCoordinationTarget.name} — navigating to kill page`);
+                        } else {
+                            addLiveLog('Kill search: navigating to kill page');
+                        }
                         gotoPage('kill');
                         return;
                     }
@@ -18817,7 +18963,7 @@ async function doQTPerkRedeem() {
                     try { updatePanel(); await handleKillPage(); } finally { loopBusy = false; }
                     return;
                 }
-            } // end isCrimesPage else-if
+            }
         }
         // Crime reset mode — always route to crimes page, ignore everything else
         if (state.resetCrimesEnabled) {
